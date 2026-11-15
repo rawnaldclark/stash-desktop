@@ -28,6 +28,7 @@ use stash_core::import::Song;
 use stash_core::player::{
     AddonTrack, Failure, Located, OnPlay, Player, QueueItem, Resolver, Settings,
 };
+use stash_core::scan::{ScanReport, scan_folder};
 use stash_core::{Library, StoredAddon, matching};
 use tiny_http::{Header, Method, Request, Response, Server};
 use url::Url;
@@ -344,6 +345,36 @@ fn found_track(track: &Track) -> Option<Value> {
     }))
 }
 
+/// The scan of the listener's music folders: running or not, and what it has done.
+#[derive(Default, Clone, serde::Serialize)]
+struct Scanning {
+    running: bool,
+    /// The folder being read.
+    folder: Option<String>,
+    /// What the scan did, so far or in the end, over all its folders.
+    report: Option<ScanReport>,
+    error: Option<String>,
+    /// How many scans have ended since the core started: the window reads the library again when it goes up.
+    finished: u64,
+}
+
+/// One report added to another: a scan of several folders says what it did in all.
+fn in_all(done: &ScanReport, now: &ScanReport) -> ScanReport {
+    let mut examples = done.unreadable_examples.clone();
+    examples.extend(now.unreadable_examples.iter().cloned());
+    examples.truncate(5);
+    ScanReport {
+        files: done.files + now.files,
+        added: done.added + now.added,
+        changed: done.changed + now.changed,
+        unchanged: done.unchanged + now.unchanged,
+        unreadable: done.unreadable + now.unreadable,
+        unreadable_examples: examples,
+        missing: done.missing + now.missing,
+        seconds: done.seconds + now.seconds,
+    }
+}
+
 /// What everything that answers requests shares.
 struct State {
     library: Arc<Mutex<Library>>,
@@ -352,9 +383,52 @@ struct State {
     /// The player, or the reason there is none (no audio engine found, or it would not start).
     player: std::result::Result<Player, String>,
     addons: Registry,
+    scanning: Arc<Mutex<Scanning>>,
 }
 
 impl State {
+    /// Starts reading `folders` into the library on a thread of its own, through a connection of its own, so the
+    /// window goes on answering. False when a scan is running already.
+    fn scan(&self, folders: Vec<String>) -> bool {
+        {
+            let mut scanning = self.scanning.lock().unwrap();
+            if scanning.running {
+                return false;
+            }
+            *scanning = Scanning {
+                running: true,
+                folder: folders.first().cloned(),
+                finished: scanning.finished,
+                ..Scanning::default()
+            };
+        }
+        let (db, scanning) = (self.options.db.clone(), Arc::clone(&self.scanning));
+        std::thread::spawn(move || {
+            let outcome = (|| -> stash_core::Result<ScanReport> {
+                let mut library = Library::open(&db)?;
+                let mut done = ScanReport::default();
+                for folder in &folders {
+                    scanning.lock().unwrap().folder = Some(folder.clone());
+                    let before = done.clone();
+                    let report = scan_folder(&mut library, Path::new(folder), |so_far| {
+                        scanning.lock().unwrap().report = Some(in_all(&before, so_far));
+                    })?;
+                    library.remember_folder(folder, now_ms())?;
+                    done = in_all(&before, &report);
+                }
+                Ok(done)
+            })();
+            let mut scanning = scanning.lock().unwrap();
+            scanning.running = false;
+            scanning.finished += 1;
+            match outcome {
+                Ok(report) => scanning.report = Some(report),
+                Err(e) => scanning.error = Some(e.to_string()),
+            }
+        });
+        true
+    }
+
     fn reload_addons(&self) -> Result<()> {
         let loaded = load_addons(&self.library.lock().unwrap())?;
         *self.addons.write().unwrap() = loaded;
@@ -410,6 +484,16 @@ impl Core {
                 }
             },
         };
+        // What the listener set last time holds again: the volume, and whether Stash takes the sound card for itself.
+        if let Ok(playing) = &player {
+            let kept = |key: &str| library.lock().unwrap().setting(key).ok().flatten();
+            if let Some(volume) = kept("volume").and_then(|v| v.parse::<f64>().ok()) {
+                let _ = playing.set_volume(volume);
+            }
+            if kept("exclusive").as_deref() == Some("1") {
+                let _ = playing.set_exclusive(true);
+            }
+        }
         Ok(Self {
             server,
             state: State {
@@ -418,6 +502,7 @@ impl Core {
                 port,
                 player,
                 addons,
+                scanning: Arc::new(Mutex::new(Scanning::default())),
             },
         })
     }
@@ -561,6 +646,35 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
     if *request.method() == Method::Get && path == "/api/player" {
         return Ok(Some(player_reply(player)));
     }
+    // The queue from `offset` on, each track with its place.
+    if *request.method() == Method::Get && path == "/api/player/queue" {
+        let url =
+            Url::parse(&format!("http://local{}", request.url())).context("the request's path")?;
+        let number = |name: &str, default: usize| {
+            url.query_pairs()
+                .find(|(k, _)| k == name)
+                .and_then(|(_, v)| v.parse::<usize>().ok())
+                .unwrap_or(default)
+        };
+        let (offset, limit) = (
+            number("offset", 0),
+            number("limit", PAGE_CAP).clamp(1, PAGE_CAP),
+        );
+        let rows: Vec<Value> = match player {
+            Ok(playing) => playing
+                .queue_at(offset, limit)
+                .iter()
+                .enumerate()
+                .map(|(n, item)| {
+                    let mut row = json!(item);
+                    row["place"] = json!(offset + n);
+                    row
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        return Ok(Some(reply_json(200, json!({ "rows": rows }))));
+    }
     if *request.method() != Method::Post || !path.starts_with("/api/player/") {
         return Ok(None);
     }
@@ -605,6 +719,39 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
             playing.seek_to(body.get("seconds").and_then(Value::as_f64).unwrap_or(0.0))?
         }
         "/api/player/stop" => playing.stop()?,
+        "/api/player/jump" => {
+            let place = body
+                .get("index")
+                .and_then(Value::as_u64)
+                .unwrap_or(u64::MAX);
+            playing.jump(usize::try_from(place).unwrap_or(usize::MAX));
+        }
+        "/api/player/volume" => {
+            let percent = body
+                .get("percent")
+                .and_then(Value::as_f64)
+                .unwrap_or(100.0)
+                .clamp(0.0, 100.0);
+            playing.set_volume(percent)?;
+            state
+                .library
+                .lock()
+                .unwrap()
+                .set_setting("volume", &format!("{percent:.0}"))?;
+        }
+        // Takes the sound card for Stash alone, or gives it back; it holds until it is changed again.
+        "/api/player/exclusive" => {
+            let exclusive = body
+                .get("exclusive")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            playing.set_exclusive(exclusive)?;
+            state
+                .library
+                .lock()
+                .unwrap()
+                .set_setting("exclusive", if exclusive { "1" } else { "0" })?;
+        }
         _ => return Ok(None),
     }
     Ok(Some(player_reply(player)))
@@ -753,6 +900,50 @@ fn addons_route(
     }
     state.reload_addons()?;
     Ok(Some(state.addons_reply()))
+}
+
+/// The listener's music folders and the scan of them. `None`: the path is not one of these.
+fn scan_route(state: &State, request: &mut Request, path: &str) -> Result<Option<Reply>> {
+    let told = |state: &State| -> Result<Reply> {
+        let scanning = state.scanning.lock().unwrap().clone();
+        let folders = state.library.lock().unwrap().folders()?;
+        Ok(reply_json(
+            200,
+            json!({ "scan": scanning, "folders": folders }),
+        ))
+    };
+    match (request.method(), path) {
+        (Method::Get, "/api/scan") => Ok(Some(told(state)?)),
+        // Asks the listener for a folder with the system's own dialog, on the computer the core runs on.
+        (Method::Post, "/api/scan/pick") => {
+            let picked = rfd::FileDialog::new()
+                .set_title("Choose a music folder")
+                .pick_folder()
+                .map(|folder| folder.to_string_lossy().into_owned());
+            Ok(Some(reply_json(200, json!({ "folder": picked }))))
+        }
+        // Scans `folder` and remembers it; without one, scans the folders that are remembered.
+        (Method::Post, "/api/scan") => {
+            let body = body_json(request)?;
+            let folders = match body.get("folder").and_then(Value::as_str).map(str::trim) {
+                Some(folder) if !folder.is_empty() => {
+                    if !Path::new(folder).is_dir() {
+                        return Ok(Some(refuse(400, "That folder was not found")));
+                    }
+                    vec![folder.to_string()]
+                }
+                _ => state.library.lock().unwrap().folders()?,
+            };
+            if folders.is_empty() {
+                return Ok(Some(refuse(400, "There is no music folder to scan yet")));
+            }
+            if !state.scan(folders) {
+                return Ok(Some(refuse(409, "A scan is running already")));
+            }
+            Ok(Some(told(state)?))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// The listener's own doing: liking, playlists, and the library written out. `None`: the path is not one of these.
@@ -935,6 +1126,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((import_route(state, request)?, false));
     }
     if let Some(response) = lists_route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = scan_route(state, request, &path)? {
         return Ok((response, false));
     }
     // A playlist's tracks: /api/playlists/{id}/tracks

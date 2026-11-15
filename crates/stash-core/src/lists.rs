@@ -54,6 +54,45 @@ fn iso_millis(ms: i64) -> String {
 }
 
 impl Library {
+    /// What the listener set for `key`, if anything.
+    pub fn setting(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+
+    pub fn set_setting(&mut self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// The music folders the listener added, in the order they were added.
+    pub fn folders(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT path FROM folders ORDER BY added_at, path")?;
+        let rows = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(rows)
+    }
+
+    /// Remembers a music folder, and when it was last scanned.
+    pub fn remember_folder(&mut self, path: &str, now_ms: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO folders(path, added_at, last_scan_at) VALUES (?1, ?2, ?2)
+             ON CONFLICT(path) DO UPDATE SET last_scan_at = excluded.last_scan_at",
+            params![path, now_ms],
+        )?;
+        Ok(())
+    }
+
     /// Likes the song `id`, or takes the like back. False when there is no such song.
     pub fn set_liked(&mut self, id: i64, liked: bool, now_ms: i64) -> Result<bool> {
         let changed = if liked {

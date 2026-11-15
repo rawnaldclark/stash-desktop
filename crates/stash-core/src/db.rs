@@ -6,10 +6,11 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
+/// A scan writes through a connection of its own; a writer that finds the other one writing waits its turn.
 const PRAGMAS: &str = "
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = NORMAL;
@@ -17,6 +18,7 @@ const PRAGMAS: &str = "
     PRAGMA temp_store = MEMORY;
     PRAGMA cache_size = -65536;
     PRAGMA mmap_size = 268435456;
+    PRAGMA busy_timeout = 5000;
 ";
 
 const V1: &str = "
@@ -188,6 +190,20 @@ const V5: &str = "
     ALTER TABLE playlists ADD COLUMN follow_shared_by TEXT;
 ";
 
+/// Version 6: what the listener set (the volume, whether Stash takes the sound card for itself), and the music
+/// folders they added, so "scan again" knows where to look.
+const V6: &str = "
+    CREATE TABLE settings(
+        key    TEXT PRIMARY KEY,
+        value  TEXT NOT NULL
+    ) WITHOUT ROWID;
+    CREATE TABLE folders(
+        path           TEXT PRIMARY KEY,
+        added_at       INTEGER NOT NULL,
+        last_scan_at   INTEGER
+    ) WITHOUT ROWID;
+";
+
 /// Opens (or creates) the library at `path` and migrates it to [`SCHEMA_VERSION`].
 pub fn open(path: &std::path::Path) -> Result<Connection> {
     prepare(Connection::open(path)?)
@@ -256,6 +272,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V5)?;
         tx.pragma_update(None, "user_version", 5)?;
+        tx.commit()?;
+    }
+    if found < 6 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V6)?;
+        tx.pragma_update(None, "user_version", 6)?;
         tx.commit()?;
     }
     Ok(())

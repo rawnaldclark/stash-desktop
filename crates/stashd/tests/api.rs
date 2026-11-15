@@ -1115,3 +1115,165 @@ fn a_library_song_is_found_by_searching_an_add_on_that_cannot_be_asked_for_it() 
     assert!(kept("Charlie").is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_folder_is_scanned_from_the_window_and_the_players_settings_are_kept() {
+    let dir = std::env::temp_dir().join(format!("stash-api-basics-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let music = dir.join("Music");
+    std::fs::create_dir_all(&music).unwrap();
+    for name in ["alpha", "bravo", "charlie", "delta"] {
+        silence(&music.join(format!("{name}.wav")));
+    }
+    let db = dir.join("library.db");
+    let engine = engine();
+    let options = || Options {
+        db: db.clone(),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: Some(Output::Silent),
+        mpv: engine.clone(),
+        play_counts_between_seconds: None,
+    };
+    let core = Core::bind(options()).unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+
+    // Nothing to scan yet; a folder that is not there is refused in words.
+    let (_, idle) = client.get("/api/scan");
+    assert_eq!(
+        (
+            idle["scan"]["running"].as_bool(),
+            idle["folders"].as_array().map(Vec::len)
+        ),
+        (Some(false), Some(0))
+    );
+    assert_eq!(
+        client.send("/api/scan", json!({})).1["error"]["message"],
+        "There is no music folder to scan yet"
+    );
+    assert_eq!(
+        client
+            .send("/api/scan", json!({ "folder": dir.join("nowhere") }))
+            .1["error"]["message"],
+        "That folder was not found"
+    );
+
+    // The folder is read in the background; when it is done the library has its songs and remembers the folder.
+    client.post("/api/scan", json!({ "folder": music }));
+    let scanned = |client: &Client, finished: u64| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let (_, state) = client.get("/api/scan");
+            if state["scan"]["finished"].as_u64() == Some(finished)
+                && state["scan"]["running"] == false
+            {
+                return state;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the scan did not finish: {state}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let done = scanned(&client, 1);
+    assert_eq!(
+        (
+            done["scan"]["report"]["files"].as_u64(),
+            done["scan"]["report"]["added"].as_u64(),
+            done["scan"]["error"].is_null()
+        ),
+        (Some(4), Some(4), true)
+    );
+    assert_eq!(done["folders"].as_array().map(Vec::len), Some(1));
+    assert_eq!(client.get("/api/counts").1["tracks"], 4);
+    // Scan again, with no folder named: the remembered one; a new file is found, the rest are as they were.
+    silence(&music.join("echo.wav"));
+    client.post("/api/scan", json!({}));
+    let again = scanned(&client, 2);
+    assert_eq!(
+        (
+            again["scan"]["report"]["added"].as_u64(),
+            again["scan"]["report"]["unchanged"].as_u64()
+        ),
+        (Some(1), Some(4))
+    );
+    assert_eq!(client.get("/api/counts").1["tracks"], 5);
+
+    if engine.is_none() {
+        eprintln!("SKIPPED the player: no libmpv found");
+        return;
+    }
+    // The volume and the sound card setting.
+    let quieter = client.post("/api/player/volume", json!({ "percent": 42 }));
+    assert_eq!(
+        (quieter["volume"].as_u64(), quieter["exclusive"].as_bool()),
+        (Some(42), Some(false))
+    );
+    assert_eq!(
+        client.post("/api/player/exclusive", json!({ "exclusive": true }))["exclusive"],
+        true
+    );
+
+    // The queue, and a jump into it.
+    client.post("/api/player/play", json!({ "offset": 0 }));
+    client.player_until("alpha playing", |s| {
+        s["status"] == "playing" && s["track"]["title"] == "alpha"
+    });
+    let (_, queue) = client.get("/api/player/queue");
+    let rows = queue["rows"].as_array().unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|r| (r["place"].as_u64().unwrap(), r["title"].as_str().unwrap()))
+            .collect::<Vec<_>>(),
+        [
+            (0, "alpha"),
+            (1, "bravo"),
+            (2, "charlie"),
+            (3, "delta"),
+            (4, "echo")
+        ]
+    );
+    assert!(rows[0].get("locator").is_none());
+    assert_eq!(
+        client.get("/api/player/queue?offset=3&limit=1").1["rows"][0]["title"],
+        "delta"
+    );
+    client.post("/api/player/jump", json!({ "index": 3 }));
+    let delta = client.player_until("delta after the jump", |s| {
+        s["status"] == "playing" && s["track"]["title"] == "delta"
+    });
+    assert_eq!(
+        (delta["index"].as_u64(), delta["queue_len"].as_u64()),
+        (Some(3), Some(5))
+    );
+    client.post("/api/player/stop", json!({}));
+
+    // A core opened on the same library later has the volume and the setting as they were left.
+    let later = Core::bind(options()).unwrap();
+    let second = Client {
+        agent: client.agent.clone(),
+        base: format!("http://127.0.0.1:{}", later.port()),
+    };
+    std::thread::spawn(move || later.run());
+    let (_, kept) = second.get("/api/player");
+    assert_eq!(
+        (kept["volume"].as_u64(), kept["exclusive"].as_bool()),
+        (Some(42), Some(true))
+    );
+    assert_eq!(
+        second.get("/api/scan").1["folders"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

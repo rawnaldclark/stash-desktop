@@ -574,3 +574,75 @@ fn a_stream_that_does_not_start_is_asked_for_once_more() {
     drop(player);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_volume_the_queue_and_a_jump_into_it() {
+    let Some(library) = library() else { return };
+    let dir = scratch("player-basics");
+    let paths: Vec<_> = (0..4).map(|n| dir.join(format!("{n}.wav"))).collect();
+    for path in &paths {
+        write_wav(path, RATE, &signal(RATE as usize * 3 / 2));
+    }
+    let player = Player::start(&library, &Output::Silent).unwrap();
+    assert_eq!(
+        (player.state().volume, player.state().exclusive),
+        (100, false)
+    );
+    player.set_volume(35.4).unwrap();
+    assert_eq!(player.state().volume, 35);
+    player.set_volume(250.0).unwrap();
+    assert_eq!(player.state().volume, 100);
+    // Exclusive mode can be asked for with nothing playing; it holds for what plays next.
+    player.set_exclusive(true).unwrap();
+    assert!(player.state().exclusive);
+    player.set_exclusive(false).unwrap();
+
+    player
+        .play(
+            paths
+                .iter()
+                .enumerate()
+                .map(|(n, path)| item(n as i64 + 1, &format!("Track {}", n + 1), path))
+                .collect(),
+        )
+        .unwrap();
+    until(&player, "the first track", |s| {
+        s.status == "playing" && s.index == Some(0)
+    });
+    assert_eq!(
+        player
+            .queue_at(0, 10)
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect::<Vec<_>>(),
+        ["Track 1", "Track 2", "Track 3", "Track 4"]
+    );
+    assert_eq!(
+        player
+            .queue_at(2, 1)
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect::<Vec<_>>(),
+        ["Track 3"]
+    );
+    // A jump plays from that place on; the queue stays whole.
+    assert!(player.jump(2));
+    let third = until(&player, "the third track after the jump", |s| {
+        s.status == "playing" && s.index == Some(2)
+    });
+    assert_eq!(
+        (third.queue_len, third.track.map(|t| t.title)),
+        (4, Some("Track 3".to_string()))
+    );
+    until(&player, "the fourth by itself", |s| {
+        s.status == "playing" && s.index == Some(3)
+    });
+    assert!(!player.jump(9));
+    // And back: a jump to an earlier place.
+    assert!(player.jump(0));
+    until(&player, "the first again", |s| {
+        s.status == "playing" && s.index == Some(0)
+    });
+    drop(player);
+    let _ = std::fs::remove_dir_all(&dir);
+}

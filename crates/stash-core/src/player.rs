@@ -145,6 +145,10 @@ pub struct PlayerState {
     pub tier: Option<String>,
     /// The id of the add-on the stream comes from.
     pub served_by: Option<String>,
+    /// The volume, 0 to 100.
+    pub volume: u32,
+    /// Stash has the sound card to itself: each track goes out at its own format and other programs are silent.
+    pub exclusive: bool,
     pub signal: Option<Signal>,
     /// The last track that could not be played, and why.
     pub error: Option<String>,
@@ -786,6 +790,46 @@ impl Player {
         Ok(())
     }
 
+    /// Sets the volume, 0 to 100. It is the engine's own volume, so in exclusive mode anything but 100 changes the
+    /// samples on their way out.
+    pub fn set_volume(&self, percent: f64) -> Result<()> {
+        self.ctx
+            .engine
+            .mpv()
+            .set("volume", &format!("{:.0}", percent.clamp(0.0, 100.0)))
+    }
+
+    /// Takes the sound card for Stash alone, or gives it back. The output is opened again at once, also in the
+    /// middle of a track.
+    pub fn set_exclusive(&self, exclusive: bool) -> Result<()> {
+        let mpv = self.ctx.engine.mpv();
+        mpv.set("audio-exclusive", if exclusive { "yes" } else { "no" })?;
+        // With nothing playing there is no output to open again: the setting holds for the next track.
+        let _ = mpv.command(&["ao-reload"]);
+        Ok(())
+    }
+
+    /// The queue from `offset` on.
+    pub fn queue_at(&self, offset: usize, limit: usize) -> Vec<QueueItem> {
+        let shared = self.ctx.shared.lock().unwrap();
+        shared
+            .queue
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    /// Plays the queue from `place` on. False when the queue has no such place.
+    pub fn jump(&self, place: usize) -> bool {
+        if place >= self.ctx.shared.lock().unwrap().queue.len() {
+            return false;
+        }
+        self.start_at(place);
+        true
+    }
+
     /// Stops and empties the queue.
     pub fn stop(&self) -> Result<()> {
         {
@@ -887,6 +931,12 @@ impl Player {
             duration_ms: if playing { seconds("duration") } else { 0 },
             tier,
             served_by,
+            volume: mpv
+                .get("volume")
+                .and_then(|v| v.parse::<f64>().ok())
+                .map(|v| v.round().clamp(0.0, 100.0) as u32)
+                .unwrap_or(100),
+            exclusive: mpv.get("audio-exclusive").as_deref() == Some("yes"),
             signal,
             error,
         }

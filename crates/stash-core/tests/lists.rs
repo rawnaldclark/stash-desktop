@@ -361,3 +361,18 @@ fn what_was_done_here_goes_out_and_what_only_works_here_stays() {
         (1, 1, 1, 1)
     );
 }
+
+#[test]
+fn settings_and_music_folders_are_kept_with_the_library() {
+    let mut library = Library::open_in_memory().unwrap();
+    assert_eq!(library.setting("volume").unwrap(), None);
+    library.set_setting("volume", "40").unwrap();
+    library.set_setting("volume", "65").unwrap();
+    assert_eq!(library.setting("volume").unwrap().as_deref(), Some("65"));
+
+    library.remember_folder("D:/Music", 1_000).unwrap();
+    library.remember_folder("E:/More", 2_000).unwrap();
+    // Scanning a folder again does not list it twice or move it.
+    library.remember_folder("D:/Music", 3_000).unwrap();
+    assert_eq!(library.folders().unwrap(), ["D:/Music", "E:/More"]);
+}
