@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
@@ -97,6 +97,90 @@ const V3: &str = "
     );
 ";
 
+/// Version 4: a library that holds more than files. A song can be here by its description alone (`origin` =
+/// 'described': brought in from the phone or the web player, played through add-ons), so `tracks` is made again with
+/// that third origin; the rule that one file is one row no longer covers described songs, which have no locator.
+/// `words_key` is the song's identity by its words ([`crate::identity`]). `track_refs` holds what other sources call
+/// a song. Likes, playlists and plays are the listener's own, with their times in milliseconds as the other Stash
+/// apps keep them.
+const V4: &str = "
+    CREATE TABLE tracks_v4(
+        id             INTEGER PRIMARY KEY,
+        title          TEXT NOT NULL,
+        artist_id      INTEGER NOT NULL REFERENCES artists(id),
+        album_id       INTEGER REFERENCES albums(id),
+        disc_no        INTEGER NOT NULL DEFAULT 1,
+        track_no       INTEGER NOT NULL DEFAULT 0,
+        duration_ms    INTEGER NOT NULL DEFAULT 0,
+        isrc           TEXT,
+        origin         TEXT NOT NULL CHECK (origin IN ('file', 'addon', 'described')),
+        addon_id       TEXT,
+        locator        TEXT NOT NULL,
+        codec          TEXT,
+        sample_rate    INTEGER,
+        bit_depth      INTEGER,
+        added_at       INTEGER NOT NULL,
+        play_count     INTEGER NOT NULL DEFAULT 0,
+        last_played_at INTEGER,
+        sort_key       TEXT NOT NULL,
+        file_size      INTEGER,
+        file_mtime     INTEGER,
+        missing_since  INTEGER,
+        words_key      TEXT NOT NULL DEFAULT '',
+        explicit       INTEGER,
+        art_url        TEXT,
+        liked_at_ms    INTEGER
+    );
+    INSERT INTO tracks_v4(id, title, artist_id, album_id, disc_no, track_no, duration_ms, isrc, origin, addon_id, locator,
+                          codec, sample_rate, bit_depth, added_at, play_count, last_played_at, sort_key,
+                          file_size, file_mtime, missing_since)
+        SELECT id, title, artist_id, album_id, disc_no, track_no, duration_ms, isrc, origin, addon_id, locator,
+               codec, sample_rate, bit_depth, added_at, play_count, last_played_at, sort_key,
+               file_size, file_mtime, missing_since
+        FROM tracks;
+    DROP TABLE tracks;
+    ALTER TABLE tracks_v4 RENAME TO tracks;
+    CREATE INDEX tracks_album ON tracks(album_id, disc_no, track_no);
+    CREATE INDEX tracks_artist ON tracks(artist_id);
+    CREATE INDEX tracks_sort ON tracks(sort_key, id);
+    CREATE INDEX tracks_added ON tracks(added_at DESC, id);
+    CREATE UNIQUE INDEX tracks_locator ON tracks(origin, IFNULL(addon_id, ''), locator) WHERE origin <> 'described';
+    CREATE INDEX tracks_words ON tracks(words_key);
+    CREATE INDEX tracks_isrc ON tracks(isrc) WHERE isrc IS NOT NULL;
+    CREATE INDEX tracks_liked ON tracks(liked_at_ms DESC, id) WHERE liked_at_ms IS NOT NULL;
+
+    CREATE TABLE track_refs(
+        track_id  INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+        source    TEXT NOT NULL,
+        ref       TEXT NOT NULL,
+        PRIMARY KEY (track_id, source)
+    ) WITHOUT ROWID;
+
+    CREATE TABLE playlists(
+        id             INTEGER PRIMARY KEY,
+        external_id    TEXT UNIQUE,
+        name           TEXT NOT NULL,
+        created_at_ms  INTEGER,
+        updated_at_ms  INTEGER,
+        follow_id      TEXT,
+        position       INTEGER NOT NULL
+    );
+    CREATE TABLE playlist_items(
+        playlist_id  INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+        position     INTEGER NOT NULL,
+        track_id     INTEGER NOT NULL REFERENCES tracks(id),
+        PRIMARY KEY (playlist_id, position)
+    ) WITHOUT ROWID;
+    CREATE INDEX playlist_items_track ON playlist_items(track_id);
+
+    CREATE TABLE plays(
+        track_id      INTEGER NOT NULL REFERENCES tracks(id),
+        played_at_ms  INTEGER NOT NULL,
+        PRIMARY KEY (track_id, played_at_ms)
+    ) WITHOUT ROWID;
+    CREATE INDEX plays_time ON plays(played_at_ms DESC);
+";
+
 /// Opens (or creates) the library at `path` and migrates it to [`SCHEMA_VERSION`].
 pub fn open(path: &std::path::Path) -> Result<Connection> {
     prepare(Connection::open(path)?)
@@ -137,6 +221,28 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V3)?;
         tx.pragma_update(None, "user_version", 3)?;
+        tx.commit()?;
+    }
+    if found < 4 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V4)?;
+        // Every song the library already has gets its identity by words.
+        let rows: Vec<(i64, String, String)> = tx
+            .prepare(
+                "SELECT t.id, t.title, a.name FROM tracks t JOIN artists a ON a.id = t.artist_id",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        {
+            let mut set = tx.prepare("UPDATE tracks SET words_key = ?2 WHERE id = ?1")?;
+            for (id, title, artist) in rows {
+                set.execute(rusqlite::params![
+                    id,
+                    crate::identity::words_key(&title, &artist)
+                ])?;
+            }
+        }
+        tx.pragma_update(None, "user_version", 4)?;
         tx.commit()?;
     }
     Ok(())
@@ -180,6 +286,13 @@ mod tests {
             .query_row("SELECT (SELECT user_version FROM pragma_user_version), play_count, file_size FROM tracks", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .unwrap();
         assert_eq!((version, plays, size), (SCHEMA_VERSION, 7, None));
+        // The table was made again for version 4: the row kept its id, and has its identity by words.
+        let (id, words): (i64, String) = conn
+            .query_row("SELECT id, words_key FROM tracks", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((id, words.as_str()), (1, "old|a"));
         // One file is one row from now on.
         let again = conn.execute("INSERT INTO tracks(title, artist_id, origin, locator, added_at, sort_key) VALUES ('Dup', 1, 'file', 'C:/music/old.flac', 2, 'dup')", []);
         assert!(again.is_err());

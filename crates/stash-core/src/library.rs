@@ -20,6 +20,9 @@ pub enum Origin {
     File,
     /// A track an add-on serves; the locator is the add-on's own id for it.
     Addon,
+    /// A song the library knows by its description (brought in from another Stash): it plays through whichever of
+    /// the listener's add-ons has it. There is no locator.
+    Described,
 }
 
 impl Origin {
@@ -27,6 +30,7 @@ impl Origin {
         match self {
             Origin::File => "file",
             Origin::Addon => "addon",
+            Origin::Described => "described",
         }
     }
 }
@@ -72,6 +76,7 @@ pub struct TrackRow {
     pub origin: String,
     /// The row's place in the title order: hand it back to [`Library::tracks_after`] for the next page.
     pub sort_key: String,
+    pub liked: bool,
 }
 
 /// An album as a grid tile shows it.
@@ -92,7 +97,7 @@ pub struct Counts {
 }
 
 pub struct Library {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 /// An add-on as the library keeps it.
@@ -111,7 +116,7 @@ pub struct StoredAddon {
 /// ([`Library::search`]). Ranking 2,000 rows takes a few milliseconds; ranking 50,000 took about 170 ms.
 pub const RANK_CAP: usize = 2_000;
 
-const TRACK_COLUMNS: &str = "t.id, t.title, a.name, al.title, t.duration_ms, t.codec, t.sample_rate, t.bit_depth, t.origin, t.sort_key";
+const TRACK_COLUMNS: &str = "t.id, t.title, a.name, al.title, t.duration_ms, t.codec, t.sample_rate, t.bit_depth, t.origin, t.sort_key, t.liked_at_ms IS NOT NULL";
 const TRACK_JOINS: &str =
     "JOIN artists a ON a.id = t.artist_id LEFT JOIN albums al ON al.id = t.album_id";
 
@@ -127,6 +132,7 @@ fn track_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackRow> {
         bit_depth: r.get(7)?,
         origin: r.get(8)?,
         sort_key: r.get(9)?,
+        liked: r.get(10)?,
     })
 }
 
@@ -199,7 +205,7 @@ impl Library {
             let mut writer = Writer::new(&tx)?;
             for change in changes {
                 match change {
-                    ScanChange::Added(track) => writer.insert(track)?,
+                    ScanChange::Added(track) => writer.insert(track).map(|_| ())?,
                     ScanChange::Changed(id, track) => writer.update(*id, track)?,
                     ScanChange::Seen(id) => writer.seen(*id)?,
                 }
@@ -355,7 +361,7 @@ impl Library {
         let mut stmt = self.conn.prepare_cached(
             "SELECT t.id, t.title, a.name, al.title, t.locator
              FROM tracks t JOIN artists a ON a.id = t.artist_id LEFT JOIN albums al ON al.id = t.album_id
-             WHERE t.id = ?1 AND t.origin = 'file' AND t.missing_since IS NULL",
+             WHERE t.id = ?1 AND ((t.origin = 'file' AND t.missing_since IS NULL) OR t.origin = 'described')",
         )?;
         let mut items = Vec::with_capacity(ids.len());
         for id in ids {
@@ -508,7 +514,7 @@ pub enum ScanChange {
 }
 
 /// Writes tracks inside one transaction, making each artist and album the first time it is named.
-struct Writer<'t> {
+pub(crate) struct Writer<'t> {
     tx: &'t rusqlite::Transaction<'t>,
     artist_ids: HashMap<String, i64>,
     album_ids: HashMap<(i64, String), i64>,
@@ -524,7 +530,7 @@ struct Writer<'t> {
 }
 
 impl<'t> Writer<'t> {
-    fn new(tx: &'t rusqlite::Transaction<'t>) -> Result<Self> {
+    pub(crate) fn new(tx: &'t rusqlite::Transaction<'t>) -> Result<Self> {
         Ok(Self {
             tx,
             artist_ids: HashMap::new(),
@@ -535,13 +541,13 @@ impl<'t> Writer<'t> {
             add_album: tx.prepare("INSERT INTO albums(title, artist_id, year, sort_key) VALUES (?1, ?2, ?3, ?4)")?,
             add_track: tx.prepare(
                 "INSERT INTO tracks(title, artist_id, album_id, disc_no, track_no, duration_ms, isrc, origin, addon_id, locator,
-                                    codec, sample_rate, bit_depth, added_at, sort_key, file_size, file_mtime)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                                    codec, sample_rate, bit_depth, added_at, sort_key, file_size, file_mtime, words_key)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             )?,
             change_track: tx.prepare(
                 "UPDATE tracks SET title = ?1, artist_id = ?2, album_id = ?3, disc_no = ?4, track_no = ?5, duration_ms = ?6,
                                    isrc = ?7, codec = ?8, sample_rate = ?9, bit_depth = ?10, sort_key = ?11,
-                                   file_size = ?12, file_mtime = ?13, missing_since = NULL
+                                   file_size = ?12, file_mtime = ?13, missing_since = NULL, words_key = ?15
                  WHERE id = ?14",
             )?,
             drop_fts: tx.prepare("DELETE FROM tracks_fts WHERE rowid = ?1")?,
@@ -607,7 +613,7 @@ impl<'t> Writer<'t> {
         Ok((artist_id, album_id))
     }
 
-    fn insert(&mut self, t: &NewTrack) -> Result<()> {
+    pub(crate) fn insert(&mut self, t: &NewTrack) -> Result<i64> {
         let (artist_id, album_id) = self.place(t)?;
         self.add_track.execute(params![
             t.title,
@@ -627,11 +633,12 @@ impl<'t> Writer<'t> {
             sort_key(&t.title),
             t.file_size.map(|s| s as i64),
             t.file_mtime,
+            crate::identity::words_key(&t.title, &t.artist),
         ])?;
         let id = self.tx.last_insert_rowid();
         self.add_fts
             .execute(params![id, t.title, t.artist, t.album])?;
-        Ok(())
+        Ok(id)
     }
 
     fn update(&mut self, id: i64, t: &NewTrack) -> Result<()> {
@@ -651,6 +658,7 @@ impl<'t> Writer<'t> {
             t.file_size.map(|s| s as i64),
             t.file_mtime,
             id,
+            crate::identity::words_key(&t.title, &t.artist),
         ])?;
         self.drop_fts.execute([id])?;
         self.add_fts
