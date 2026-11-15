@@ -32,6 +32,8 @@ pub struct DemoAddon {
     delay: Duration,
     /// Answer in the looser shapes of an add-on made for Eclipse and its family, to try that kind with.
     eclipse: bool,
+    /// Answer "do you have this song". Without it the add-on only searches and streams, as many do.
+    resolves: bool,
 }
 
 fn header(name: &str, value: &str) -> Header {
@@ -102,6 +104,17 @@ impl DemoAddon {
     /// As [`Self::bind`]; with `eclipse`, the add-on answers as one made for Eclipse does: no `stash` in its manifest,
     /// ids as numbers, lengths in seconds, a quality word instead of a tier.
     pub fn bind_as(folder: &Path, port: u16, delay: Duration, eclipse: bool) -> Result<Self> {
+        Self::bind_with(folder, port, delay, eclipse, true)
+    }
+
+    /// As [`Self::bind_as`]; without `resolves`, the add-on offers search and streams only.
+    pub fn bind_with(
+        folder: &Path,
+        port: u16,
+        delay: Duration,
+        eclipse: bool,
+        resolves: bool,
+    ) -> Result<Self> {
         let mut library = Library::open_in_memory()?;
         scan_folder(&mut library, folder, |_| {})
             .with_context(|| format!("reading {}", folder.display()))?;
@@ -127,6 +140,7 @@ impl DemoAddon {
             paths,
             delay,
             eclipse,
+            resolves,
         })
     }
 
@@ -180,7 +194,7 @@ impl DemoAddon {
                         "name": "Demo folder (Eclipse)",
                         "version": env!("CARGO_PKG_VERSION"),
                         "description": "A folder of your own files, served the way an Eclipse add-on serves them.",
-                        "resources": ["search", "stream", "resolve"],
+                        "resources": if self.resolves { json!(["search", "stream", "resolve"]) } else { json!(["search", "stream"]) },
                         "types": ["track"],
                     }),
                 ));
@@ -217,7 +231,7 @@ impl DemoAddon {
                 .map(|row| row_json(row, self.eclipse))
                 .collect();
             let _ = request.respond(answer(200, json!({ "tracks": tracks })));
-        } else if path == "/resolve" {
+        } else if path == "/resolve" && self.resolves {
             std::thread::sleep(self.delay);
             // The same song here is the same words, and a length within the contract's bounds when one is asked.
             let (Some(title), Some(artist)) = (param("title"), param("artist")) else {

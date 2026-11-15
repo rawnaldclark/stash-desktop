@@ -11,12 +11,13 @@
 //! Several requests are answered at once, so an add-on that is slow to answer holds up its own answer and nothing
 //! else.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
@@ -27,7 +28,7 @@ use stash_core::import::Song;
 use stash_core::player::{
     AddonTrack, Failure, Located, OnPlay, Player, QueueItem, Resolver, Settings,
 };
-use stash_core::{Library, StoredAddon};
+use stash_core::{Library, StoredAddon, matching};
 use tiny_http::{Header, Method, Request, Response, Server};
 use url::Url;
 
@@ -42,6 +43,8 @@ const IMPORT_CAP: u64 = 512 * 1024 * 1024;
 const WORKERS: usize = 8;
 /// The longest text taken from an add-on's answer, or from the window about an add-on's track.
 const TEXT_CAP: usize = 300;
+/// How long an add-on that did not have a song is not asked for it again.
+const MISS_MEMORY: Duration = Duration::from_secs(6 * 3600);
 /// The most tracks of an add-on one search shows, and one play request queues.
 const ADDON_TRACKS_CAP: usize = 200;
 
@@ -165,8 +168,11 @@ fn stream_from(addon: &Addon, id: &str, track: &str) -> std::result::Result<Loca
 /// An add-on's own track is asked of that add-on. A song the library knows by its description is asked of the
 /// listener's add-ons in their order: the name an add-on gave the song before is tried first, else the add-on is
 /// asked whether it has the song (the contract's `resolve`: which of its tracks is the same song is the add-on's to
-/// say). The first add-on that gives a stream wins, and the name it gave is kept for next time.
+/// say), and an add-on that can only search is searched for it ([`matching`]). The first add-on that gives a stream wins, and the name it gave is kept for next time.
 fn resolver(registry: Registry, library: Arc<Mutex<Library>>) -> Resolver {
+    // What an add-on was found not to have, and when: (the song, the add-on). It is not asked again for a while, so
+    // a queue of songs it lacks does not spend the listener's allowance there on the same answers.
+    let lacks: Mutex<HashMap<(i64, String), Instant>> = Mutex::new(HashMap::new());
     Arc::new(move |item: &QueueItem| {
         let gone = |why: &str| Failure {
             message: why.to_string(),
@@ -243,14 +249,37 @@ fn resolver(registry: Registry, library: Arc<Mutex<Library>>) -> Resolver {
                     }
                 }
             }
-            if !addon.offers_resource("resolve") {
+            let lacked = (id, addon_id.to_string());
+            if lacks
+                .lock()
+                .unwrap()
+                .get(&lacked)
+                .is_some_and(|at| at.elapsed() < MISS_MEMORY)
+            {
                 continue;
             }
-            let track = match addon.resolve(&described.wanted, None) {
+            // The add-on is asked whether it has the song. One that cannot be asked that, but can search, is
+            // searched, and a result is taken only when it is the same song by the contract's rule.
+            let asked = if addon.offers_resource("resolve") {
+                addon.resolve(&described.wanted, None)
+            } else if addon.offers_resource("search") {
+                addon
+                    .search(&matching::query(&described.wanted), 20)
+                    .map(|found| matching::pick(&described.wanted, &found).cloned())
+            } else {
+                continue;
+            };
+            let track = match asked {
                 Ok(Some(track)) => track,
                 // It does not have the song, or what it answered cannot be this song.
-                Ok(None) => continue,
-                Err(e) if e.is_miss() || e.code == Code::InvalidResponse => continue,
+                Ok(None) => {
+                    lacks.lock().unwrap().insert(lacked, Instant::now());
+                    continue;
+                }
+                Err(e) if e.is_miss() || e.code == Code::InvalidResponse => {
+                    lacks.lock().unwrap().insert(lacked, Instant::now());
+                    continue;
+                }
                 Err(e) => {
                     trouble = Some(e);
                     continue;

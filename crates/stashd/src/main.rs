@@ -116,6 +116,9 @@ enum Command {
         /// Answer the way an add-on made for Eclipse does, to try that kind of add-on with.
         #[arg(long)]
         eclipse: bool,
+        /// Offer search and streams only: no answer to "do you have this song".
+        #[arg(long)]
+        no_resolve: bool,
     },
     /// Measure opening, searching and paging a library, as a list or grid would use it.
     Bench {
@@ -208,12 +211,14 @@ fn main() -> Result<()> {
             port,
             delay_ms,
             eclipse,
+            no_resolve,
         } => {
-            let addon = stashd::demo_addon::DemoAddon::bind_as(
+            let addon = stashd::demo_addon::DemoAddon::bind_with(
                 &dir,
                 port,
                 Duration::from_millis(delay_ms),
                 eclipse,
+                !no_resolve,
             )?;
             println!(
                 "{} tracks. Add this link in Stash: {}",

@@ -1025,3 +1025,93 @@ fn an_add_on_made_for_eclipse_is_added_searched_and_played_from() {
     client.post("/api/player/stop", json!({}));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_library_song_is_found_by_searching_an_add_on_that_cannot_be_asked_for_it() {
+    let dir = std::env::temp_dir().join(format!("stash-api-matching-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let catalogue = dir.join("Catalogue");
+    std::fs::create_dir_all(&catalogue).unwrap();
+    for name in ["alpha", "alpha (Live)", "bravo - 2011 Remaster"] {
+        silence(&catalogue.join(format!("{name}.wav")));
+    }
+    let engine = engine();
+    let db = dir.join("library.db");
+    let core = Core::bind(Options {
+        db: db.clone(),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: Some(Output::Silent),
+        mpv: engine.clone(),
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    // An add-on as many are: made for Eclipse, with search and streams and nothing else.
+    let demo = DemoAddon::bind_with(&catalogue, 0, Duration::from_millis(20), true, false).unwrap();
+    let link = demo.link();
+    std::thread::spawn(move || demo.run());
+    let added = client.post("/api/addons", json!({ "link": link }));
+    assert_eq!(added["addons"][0]["resources"], json!(["search", "stream"]));
+
+    let song =
+        |title: &str| json!({ "title": title, "artist": "Unknown artist", "durationMs": 2000 });
+    let file = json!({ "kind": "stash-web-library", "v": 1, "playlists": [{ "id": "p1", "name": "Mix", "items": [song("Alpha"), song("Charlie"), song("Bravo")] }] }).to_string();
+    assert_eq!(client.upload("/api/import", file.as_bytes()).0, 200);
+    if engine.is_none() {
+        eprintln!("SKIPPED the player: no libmpv found");
+        return;
+    }
+
+    // Alpha: the add-on has it twice; the live take is not the song. Charlie: it has nothing like it. Bravo: it has
+    // it under a release label.
+    client.post("/api/player/play", json!({ "playlist": 1 }));
+    let alpha = client.player_until("Alpha playing", |s| {
+        s["status"] == "playing" && s["track"]["title"] == "Alpha"
+    });
+    assert_eq!(alpha["served_by"].as_str(), Some("demo.folder.eclipse"));
+    let bravo = client.player_until("Bravo, past Charlie", |s| {
+        s["status"] == "playing" && s["track"]["title"] == "Bravo"
+    });
+    assert_eq!(
+        (bravo["index"].as_u64(), bravo["error"].as_str()),
+        (
+            Some(2),
+            Some("Charlie could not be played: none of your add-ons has it")
+        )
+    );
+    client.post("/api/player/stop", json!({}));
+
+    // What the add-on calls each song it played is kept, so the next time there is nothing to search for; the take
+    // that was picked for Alpha is the studio one.
+    let library = Library::open(&db).unwrap();
+    let kept = |title: &str| {
+        library
+            .describe(library.search(title, 1).unwrap()[0].id)
+            .unwrap()
+            .unwrap()
+            .refs
+    };
+    let (_, found) = client.get("/api/addons/search?q=alpha");
+    let studio = found["groups"][0]["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["title"] == "alpha")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(kept("Alpha"), [("demo.folder.eclipse".to_string(), studio)]);
+    assert_eq!(kept("Bravo").len(), 1);
+    assert!(kept("Charlie").is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
