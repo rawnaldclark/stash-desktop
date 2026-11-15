@@ -57,10 +57,11 @@ The engine is libmpv (client API 2.6, the build `scripts/fetch-mpv.ps1` pins), l
 | Is the path bit-exact? | The same comparison: any resampling, dither or volume scaling would change sample values. | Every sample is identical, and the output's format is the files' own (16-bit, 44.1 kHz, stereo). |
 | What happens when the next track has another sample rate? | A 44.1 kHz file followed by a 96 kHz file. | The output is closed and opened again at 96 kHz; the second track is not resampled. The join is then not gapless, which is the trade-off of never resampling. |
 | What does a file that cannot be opened do? | A missing file followed by a real one. | The missing one ends with an error and the next one plays. |
+| Is a join between two add-on streams gapless? | A small add-on server on the same computer is added by its link, searched, and asked for two streams (the same two halves of the signal, served over HTTP). The two stream URLs are played one after the other. `tests/addon_stream.rs` | The same result as for files: the uncut signal sample for sample, the output opened once. |
 
 ### Not covered yet
 
 - **Exclusive mode on a real device.** These measurements stop at the engine's output stream. Whether WASAPI exclusive mode opens at each track's own rate, and what it does to other programs' sound, has to be checked on a sound card.
 - **Compressed formats.** WAV has no encoder delay. Gapless FLAC should behave the same; AAC, MP3 and Opus carry padding the decoder must trim, and need their own test files.
-- **Streams.** A join between two network streams depends on the next one being ready in time (`prefetch-playlist`), which needs a server to measure against.
+- **Streams over a real network.** The add-on test runs on one computer, where the next stream is ready at once. Over the internet the join depends on the next stream being open in time (`prefetch-playlist`); that needs a slow server to measure against. DASH and HLS streams are not measured either.
 - **Crossfade.** mpv has none; it needs a mixer of our own.

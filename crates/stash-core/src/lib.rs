@@ -3,6 +3,7 @@
 //! The core has no UI and no window. Every shell (the Tauri app, a phone remote, a hosted web page) talks to it
 //! through the same API, so the shell can be replaced without touching what the listener owns: the library.
 
+pub mod addons;
 pub mod audio;
 pub mod db;
 pub mod library;

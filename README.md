@@ -15,8 +15,8 @@ A desktop music client for Windows, macOS and Linux, from the people who make [S
 ## How it is built
 
 ```
-crates/stash-core   the core: library database (SQLite + full-text search) and the audio engine
-                    (libmpv, loaded at run time); soon the add-on client and the local API
+crates/stash-core   the core: library database (SQLite + full-text search), the audio engine
+                    (libmpv, loaded at run time) and the add-on client; soon the local API
 crates/stashd       the core without a window: a command line for now, the local server later
 scripts/            fetch-mpv.ps1 downloads the pinned libmpv build the engine is tested against
 ```
