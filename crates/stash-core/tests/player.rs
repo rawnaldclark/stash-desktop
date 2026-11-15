@@ -940,3 +940,37 @@ fn replaygain_evens_a_song_out_and_the_signal_says_the_samples_are_scaled() {
         s.signal.as_ref().is_some_and(|g| g.scaled)
     });
 }
+
+#[test]
+fn a_song_whose_file_is_gone_is_asked_for_through_the_add_ons() {
+    let Some(library) = library() else { return };
+    let dir = scratch("gone-file");
+    let here = dir.join("here.wav");
+    write_wav(&here, RATE, &signal(RATE as usize));
+    let gone = dir.join("gone.wav");
+    let asked: Arc<Mutex<Vec<Option<i64>>>> = Arc::new(Mutex::new(Vec::new()));
+    let resolver: Resolver = {
+        let (asked, here) = (Arc::clone(&asked), here.clone());
+        Arc::new(move |item: &QueueItem| {
+            asked.lock().unwrap().push(item.id);
+            Ok(Located {
+                locator: here.to_string_lossy().into_owned(),
+                tier: Some("lossless".into()),
+                addon: Some("somewhere".into()),
+            })
+        })
+    };
+    let settings = Settings {
+        resolver: Some(resolver),
+        ..Settings::default()
+    };
+    let player = Player::start_with(&library, &Output::Silent, settings).unwrap();
+    player.play(vec![item(7, "Gone", &gone)]).unwrap();
+    let state = until(
+        &player,
+        "the song playing from where the add-ons said",
+        |s| s.status == "playing" && s.duration_ms > 0,
+    );
+    assert_eq!(state.served_by.as_deref(), Some("somewhere"));
+    assert_eq!(*asked.lock().unwrap(), vec![Some(7)]);
+}

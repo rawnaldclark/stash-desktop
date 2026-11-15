@@ -355,6 +355,7 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 - **A song of the library can be saved as a file**, from its menu, or all the liked songs or a playlist's at once. One song at a time, the core finds it through the add-ons the way it does for playing (the add-on that has it already first, then each add-on in order), and asks for a file to keep: the contract's `download` route, or the stream of an add-on made for Eclipse, unless its manifest says `allowDownloads` is off. Only one progressive file is asked for.
 - **The file** comes in under a temporary name, is checked to be audio by its first bytes (a web page or an error is not kept), and goes to `Artist/Album/NN Title.ext` in the downloads folder (Stash in the system's music folder unless another is chosen), never over another file. Its tags get the title, artist, album, track number and ISRC the library knows the song by, and the add-on's cover goes inside it.
 - **The song's row becomes that file**: its likes, playlists and plays stay, the window shows the file's format, it plays with no connection, and the cover shown is the file's own. Taking it off the list deletes the file and the folders it leaves empty, and the song plays through the add-ons again.
+- A song of the library whose file is not there when it comes up in the queue (given back after it was saved, or on a drive that is not plugged in) is asked for through the add-ons like any song known by its description.
 - A song that cannot be saved stays on the list with the reason ("there is no add-on to save it from", the add-on's own words); Try again puts those back. A song coming in when the program ends is started again next time.
 
 ### Checked
@@ -365,6 +366,5 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 ### Not covered yet
 
 - No real add-on has been asked for a download (the owner's has a small daily allowance; a download counts like a play).
-- A song taken off the list while it is in the queue keeps the queue's old copy until it is queued again (the deleted file is then a song that cannot be played).
 - Big lists show 300 songs at a time; there is no per-song progress for waiting songs, only for the one coming in.
 - A DASH or HLS add-on is not asked for downloads (only one progressive file).

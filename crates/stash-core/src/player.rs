@@ -57,9 +57,13 @@ pub struct QueueItem {
 }
 
 impl QueueItem {
-    /// Where it plays from has to be asked for.
+    /// Where it plays from has to be asked for: an add-on's track, a song of the library known by its description,
+    /// and a song of the library whose file is not there (given back after it was saved, or on a drive that is not
+    /// plugged in): the add-ons may have it.
     fn asks(&self) -> bool {
-        self.addon.is_some() || self.locator.is_empty()
+        self.addon.is_some()
+            || self.locator.is_empty()
+            || (self.id.is_some() && !std::path::Path::new(&self.locator).exists())
     }
 }
 
@@ -459,6 +463,12 @@ impl Ctx {
         }
         match &self.resolver {
             Some(resolve) => resolve(item),
+            // With no add-ons to ask, a file that is not there is handed to the engine, which says so in its words.
+            None if !item.locator.is_empty() => Ok(Located {
+                locator: item.locator.clone(),
+                tier: None,
+                addon: None,
+            }),
             None => Err(Failure {
                 message: "this player has no add-ons".into(),
                 miss: false,
