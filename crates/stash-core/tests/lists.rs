@@ -213,6 +213,26 @@ fn a_song_met_at_an_add_on_becomes_the_librarys_and_a_play_is_kept_once() {
     );
     assert_eq!(library.search("brand", 1).unwrap()[0].origin, "described");
 
+    // A song from YouTube alone is asked for as the song its title names, and kept as it is (a saved file is tagged
+    // with what the library calls it).
+    let upload = library
+        .adopt(&Song {
+            title: "Planet Caravan - Black Sabbath".into(),
+            artist: "Some Uploader".into(),
+            refs: vec![("youtube".into(), "dQw4w9WgXcQ".into())],
+            ..Song::default()
+        })
+        .unwrap();
+    let described = library.describe(upload).unwrap().unwrap();
+    assert_ne!(described.wanted, described.kept);
+    assert_eq!(
+        (
+            described.kept.title.as_str(),
+            described.kept.artist.as_str()
+        ),
+        ("Planet Caravan - Black Sabbath", "Some Uploader")
+    );
+
     assert!(library.record_play(new, 5_000).unwrap());
     assert!(!library.record_play(new, 5_000).unwrap());
     assert!(library.record_play(new, 9_000).unwrap());
@@ -375,6 +395,37 @@ fn settings_and_music_folders_are_kept_with_the_library() {
     // Scanning a folder again does not list it twice or move it.
     library.remember_folder("D:/Music", 3_000).unwrap();
     assert_eq!(library.folders().unwrap(), ["D:/Music", "E:/More"]);
+}
+
+#[test]
+fn autoplay_spreads_an_artist_out_and_does_not_follow_the_last_song_with_it() {
+    let mut library = Library::open_in_memory().unwrap();
+    let mut songs = Vec::new();
+    for n in 0..5 {
+        songs.push(file_track(
+            &format!("A{n}"),
+            "A",
+            &format!("C:/m/a{n}.flac"),
+        ));
+    }
+    for artist in ["B", "C", "D", "E", "F"] {
+        songs.push(file_track(artist, artist, &format!("C:/m/{artist}.flac")));
+    }
+    library.add_tracks(songs).unwrap();
+    let artist_of = |id: i64| library.describe(id).unwrap().unwrap().kept.artist;
+    for _ in 0..20 {
+        let picks = library
+            .autoplay_picks(&[], &["A".into()], &Default::default(), 0, true, 10)
+            .unwrap();
+        assert_eq!(picks.len(), 10);
+        let artists: Vec<String> = picks.iter().map(|&id| artist_of(id)).collect();
+        // Five by A and one each by five others: A every other song, never right after A's song.
+        assert_ne!(artists[0], "A", "{artists:?}");
+        assert!(
+            artists.windows(2).all(|pair| pair[0] != pair[1]),
+            "{artists:?}"
+        );
+    }
 }
 
 #[test]

@@ -30,7 +30,8 @@ pub(crate) struct Autoplay {
 }
 
 impl Autoplay {
-    /// Looks at the player (about once a second) and adds songs when the last one has started.
+    /// Looks at the player (about once a second) and adds songs when the last one has started, or when nothing comes
+    /// after the one playing (the songs after it could not be played).
     pub fn look(&mut self, library: &Mutex<Library>, player: &Player, can_ask_addons: bool) {
         let state = player.state();
         let Some(index) = state.index else { return };
@@ -39,12 +40,12 @@ impl Autoplay {
         };
         if state.status != "playing"
             || state.repeat != "off"
-            || index + 1 != state.queue_len
+            || (index + 1 != state.queue_len && !state.nothing_after)
             || self.filled_after == Some(current.qid)
         {
             return;
         }
-        self.filled_after = Some(current.qid);
+        // Switched off: looked at again, in case it is switched on before the song ends.
         if !on(&library.lock().unwrap()) {
             return;
         }
@@ -61,18 +62,23 @@ impl Autoplay {
             .unwrap_or(0);
         let items = {
             let library = library.lock().unwrap();
-            let picked = library
-                .autoplay_picks(
-                    &seed_ids,
-                    &seed_artists,
-                    &queued,
-                    now - RESTED_MS,
-                    !can_ask_addons,
-                    BATCH,
-                )
-                .unwrap_or_default();
-            library.queue_items(&picked).unwrap_or_default()
+            // The library could not be read: tried again at the next look.
+            let Ok(picked) = library.autoplay_picks(
+                &seed_ids,
+                &seed_artists,
+                &queued,
+                now - RESTED_MS,
+                !can_ask_addons,
+                BATCH,
+            ) else {
+                return;
+            };
+            let Ok(items) = library.queue_items(&picked) else {
+                return;
+            };
+            items
         };
+        self.filled_after = Some(current.qid);
         player.enqueue(items, false);
     }
 }

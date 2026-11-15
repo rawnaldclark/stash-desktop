@@ -2372,6 +2372,29 @@ fn autoplay_goes_on_with_songs_like_the_last_when_the_queue_ends() {
     });
     std::thread::sleep(Duration::from_millis(2500));
     assert_eq!(client.get("/api/player").1["queue_len"].as_u64(), Some(1));
+
+    // The queue's last song can't be played (no add-on has it): it is passed over before it starts, and autoplay
+    // goes on all the same.
+    client.post("/api/settings/autoplay", json!({ "on": true }));
+    let file = json!({
+        "kind": "stash-web-library", "v": 1, "generator": "a test",
+        "likes": [{ "item": { "title": "Nowhere", "artist": "Nobody" }, "likedAt": 1_759_838_400_000i64 }]
+    })
+    .to_string();
+    assert_eq!(client.upload("/api/import", file.as_bytes()).0, 200);
+    let id = |q: &str| {
+        client.get(&format!("/api/search?q={q}&limit=1")).1["rows"][0]["id"]
+            .as_i64()
+            .unwrap()
+    };
+    client.post(
+        "/api/player/play",
+        json!({ "items": [{ "id": id("two") }, { "id": id("nowhere") }] }),
+    );
+    until(
+        "the queue to grow past the song that can't be played",
+        &|s| s["queue_len"].as_u64().is_some_and(|n| n > 2),
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

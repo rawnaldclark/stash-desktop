@@ -26,9 +26,11 @@ use stash_core::youtube_title::{self, tokens};
 /// (most wrong picks, most misses) allowed. 2026-11-15, v1 (777 songs): 3 / 73 at first; 5 / 21 once titles and
 /// credits were read the way real catalogues write them and a video's length was no longer held against a result;
 /// v2 (3,682 songs) 14 / 306 then. With YouTube rows read as the songs they name (and, failing that, as kept or the
-/// other way round), Spotify's "(with …)" credits and unbracketed "feat." tails: v1 3 / 21, v2 17 / 142. (The phone
-/// app's matcher: v1 8 / 18, v2 33 / 105.)
-const V1_MAX: (usize, usize) = (3, 21);
+/// other way round), Spotify's "(with …)" credits and unbracketed "feat." tails: v1 3 / 21, v2 17 / 142. With a result
+/// credited the same way preferred to one that names the artist only somewhere in its credit, and versions written
+/// after a credit, beside a title in another script or as a live album "From …" kept apart: v1 2 / 21, v2 17 / 142.
+/// (The phone app's matcher: v1 8 / 18, v2 33 / 105.)
+const V1_MAX: (usize, usize) = (2, 21);
 const V2_MAX: (usize, usize) = (17, 142);
 /// Of the labelled YouTube rows, how many (percent) are read as the right artist and title. The phone app: 91.7.
 const MIN_TITLES_RIGHT: f64 = 91.6;

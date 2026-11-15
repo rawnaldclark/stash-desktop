@@ -144,7 +144,11 @@ pub struct PlaylistRow {
 /// What the library knows a song by, for asking an add-on for it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Described {
+    /// The song as it is asked for.
     pub wanted: crate::addons::Wanted,
+    /// The song as the library keeps it (its own title and artist): what a saved file is tagged with. The same as
+    /// `wanted` but for a row from YouTube, which is asked for as the song its title names.
+    pub kept: crate::addons::Wanted,
     /// Other ways to read the song, when it is asked for otherwise than it is kept (a row from YouTube): search results
     /// that are not `wanted` are matched against these, in turn.
     pub also: Vec<crate::addons::Wanted>,
@@ -662,12 +666,18 @@ impl Library {
         // A song that came from YouTube alone carries the upload's title, channel and length: it is asked for as the
         // song the title names, the way the phone app asks.
         let from = |source: &str| refs.iter().any(|(s, _)| s == source);
+        let kept = wanted.clone();
         let (wanted, also) = if from("youtube") && !from("spotify") {
             crate::youtube_title::asked_for(wanted)
         } else {
             (wanted, Vec::new())
         };
-        Ok(Some(Described { wanted, also, refs }))
+        Ok(Some(Described {
+            wanted,
+            kept,
+            also,
+            refs,
+        }))
     }
 
     /// Keeps what `source` calls the song `id` (in place of what it called it before).

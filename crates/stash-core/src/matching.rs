@@ -68,14 +68,43 @@ const VERSION_WORDS: &[&str] = &[
     "piano",
     "rehearsal",
     "take",
+    "takes",
+    "sessions",
+    "extended",
+    "alternate",
+    "early",
+    "outtake",
+    "outtakes",
+    "recorded",
+    "rerecorded",
+    "recording",
+    "stripped",
+    "symphonic",
+    "cappella",
+    "acapella",
+    "acappella",
+    "performance",
+    "concert",
+    "dub",
+    "club",
+    "vip",
+    "bootleg",
+    "mashup",
+    "nightcore",
+    "lofi",
 ];
+
+/// Whether a part of a title names another version ("Live", "Instrumental", "MTV Unplugged").
+fn names_version(part: &str) -> bool {
+    fold(part).split(' ').any(|w| VERSION_WORDS.contains(&w))
+}
 
 /// A title as it is compared: folded, and without a trailing release label ("Song - 2011 Remaster", "Song (Mono)",
 /// "Song [Deluxe Edition]"). A bracket or a dash part that says anything else stays: it names a version. In a bracket
 /// of parts joined by a slash, the parts that are labels go and the rest stays ("(Radio Edit / Remastered 2025)" is
 /// "(Radio Edit)").
 fn title_key(title: &str) -> String {
-    let unslashed = without_label_parts(without_feat_tail(title.trim()));
+    let unslashed = without_label_parts(&without_feat_tail(title.trim()));
     let mut rest = unslashed.as_str();
     loop {
         let cut = if rest.ends_with(')') || rest.ends_with(']') {
@@ -111,7 +140,10 @@ fn is_release_label(label: &str) -> bool {
     {
         return true;
     }
-    if words.first() == Some(&"from") && words.len() > 1 {
+    if words.first() == Some(&"from")
+        && words.len() > 1
+        && !words.iter().any(|w| VERSION_WORDS.contains(w))
+    {
         return true;
     }
     let year_or_count = |w: &str| {
@@ -172,18 +204,31 @@ fn without_label_parts(title: &str) -> String {
 }
 
 /// A title without a featuring credit written after it, unbracketed ("Potholderz feat. Count Bass D", "LOYALTY. FEAT.
-/// RIHANNA."). A bracketed one is already left out by `fold`.
-fn without_feat_tail(title: &str) -> &str {
-    let lower = title.to_lowercase();
-    if lower.len() != title.len() {
-        return title;
-    }
-    [" feat. ", " ft. ", " featuring "]
+/// RIHANNA."). A bracketed one is already left out by `fold`. The credit ends where a bracket or a dash part begins;
+/// what follows stays when it names a version ("Song feat. X (Live)" is "Song (Live)", "Song feat. X (Album Name)" is
+/// "Song").
+fn without_feat_tail(title: &str) -> String {
+    // Lowered letter for letter in ASCII only, so every place in it is the same place in the title.
+    let lower = title.to_ascii_lowercase();
+    let Some(at) = [" feat. ", " ft. ", " featuring "]
         .iter()
         .filter_map(|credit| lower.find(credit))
         .filter(|&at| at > 0 && !title[..at].contains('(') && !title[..at].contains('['))
         .min()
-        .map_or(title, |at| title[..at].trim_end())
+    else {
+        return title.to_string();
+    };
+    let after = at + 1;
+    match [" (", " [", " - "]
+        .iter()
+        .filter_map(|mark| title[after..].find(mark).map(|i| after + i))
+        .min()
+    {
+        Some(end) if names_version(&title[end..]) => {
+            format!("{}{}", title[..at].trim_end(), &title[end..])
+        }
+        _ => title[..at].trim_end().to_string(),
+    }
 }
 
 /// A title without a trailing "(with …)" that names artists the credit already has: Spotify writes a song's other
@@ -221,8 +266,10 @@ fn title_keys(title: &str, credit: &str) -> Vec<String> {
         } else {
             let latin = |s: &str| s.chars().any(|c| c.is_ascii_alphabetic());
             let other_script = |s: &str| s.chars().any(|c| c.is_alphabetic() && !c.is_ascii());
-            if (!latin(left) && other_script(left) && latin(right))
-                || (!latin(right) && other_script(right) && latin(left))
+            if ((!latin(left) && other_script(left) && latin(right))
+                || (!latin(right) && other_script(right) && latin(left)))
+                && !names_version(left)
+                && !names_version(right)
             {
                 keys.push(fold(left));
                 keys.push(title_key(right));
@@ -239,9 +286,7 @@ fn title_keys(title: &str, credit: &str) -> Vec<String> {
 fn with_name_in_front(wanted: &str, theirs: &str) -> bool {
     theirs.match_indices(':').any(|(at, _)| {
         let (front, rest) = (&theirs[..at], &theirs[at + 1..]);
-        !rest.trim().is_empty()
-            && title_key(rest) == wanted
-            && !fold(front).split(' ').any(|w| VERSION_WORDS.contains(&w))
+        !rest.trim().is_empty() && title_key(rest) == wanted && !names_version(front)
     })
 }
 
@@ -281,26 +326,37 @@ fn artists(credit: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether the two credits are the same artist: the whole credit, the first artist named in each, or the one that
-/// leads either credit named in the other (a library that credits the composer first and the orchestra after, a
-/// catalogue that credits only the orchestra).
-fn same_artist(wanted: &str, theirs: &str) -> bool {
+/// How two credits are the same artist.
+#[derive(Debug, PartialEq)]
+enum Credits {
+    /// The whole credit, or the first artist named in each.
+    Same,
+    /// The artist that leads one credit is named somewhere in the other (a library that credits the composer first and
+    /// the orchestra after, a catalogue that credits only the orchestra). Weaker: a result whose credit is the same is
+    /// preferred ("Interlude" by "J. Cole, Kendrick Lamar" is J. Cole's, not Kendrick Lamar's, when both come up).
+    Named,
+    Other,
+}
+
+fn credits(wanted: &str, theirs: &str) -> Credits {
     if same_name(&fold(wanted), &fold(theirs)) {
-        return true;
+        return Credits::Same;
     }
     let (wanted, theirs) = (artists(wanted), artists(theirs));
     let named = |list: &[String], name: &str| list.iter().any(|n| same_name(n, name));
     match (wanted.first(), theirs.first()) {
-        (Some(first), Some(other)) => {
-            same_name(first, other) || named(&theirs, first) || named(&wanted, other)
+        (Some(first), Some(other)) if same_name(first, other) => Credits::Same,
+        (Some(first), Some(other)) if named(&theirs, first) || named(&wanted, other) => {
+            Credits::Named
         }
-        _ => false,
+        _ => Credits::Other,
     }
 }
 
-/// Whether `candidate` is the song `wanted`, by the rule above. With `Some`, how far its length is from the wanted
-/// one in milliseconds (0 when one of them is not known).
-fn same_song(wanted: &Wanted, candidate: &Track) -> Option<u64> {
+/// Whether `candidate` is the song `wanted`, by the rule above. With `Some`: whether its credit only names the wanted
+/// artist somewhere ([`Credits::Named`]), and how far its length is from the wanted one in milliseconds (0 when one
+/// of them is not known).
+fn same_song(wanted: &Wanted, candidate: &Track) -> Option<(bool, u64)> {
     let apart = match (wanted.duration_ms, candidate.duration_ms) {
         (Some(asked), Some(theirs)) => {
             let apart = asked.abs_diff(theirs);
@@ -315,11 +371,13 @@ fn same_song(wanted: &Wanted, candidate: &Track) -> Option<u64> {
     if let (Some(asked), Some(theirs)) = (&wanted.isrc, &candidate.isrc)
         && asked.eq_ignore_ascii_case(theirs)
     {
-        return Some(apart);
+        return Some((false, apart));
     }
-    if !same_artist(&wanted.artist, &candidate.artist) {
-        return None;
-    }
+    let named = match credits(&wanted.artist, &candidate.artist) {
+        Credits::Same => false,
+        Credits::Named => true,
+        Credits::Other => return None,
+    };
     let theirs = title_keys(&candidate.title, &candidate.artist);
     let ours = title_keys(&wanted.title, &wanted.artist);
     // The same title, or the same with a composer's or a work's name in front on either side.
@@ -329,11 +387,11 @@ fn same_song(wanted: &Wanted, candidate: &Track) -> Option<u64> {
         || theirs
             .iter()
             .any(|key| with_name_in_front(key, &wanted.title));
-    same_title.then_some(apart)
+    same_title.then_some((named, apart))
 }
 
 /// The search result that is the song `wanted`, or `None`. Among several that are, the explicit or clean twin that
-/// was asked for, then the one closest in length, then the first. (Tried on the labelled sets in
+/// was asked for, then one credited the same way, then the one closest in length, then the first. (Tried on the labelled sets in
 /// `tests/matcher_corpus.rs` and dropped: preferring a plain title, or a video's length, when the song's own length is
 /// not known, picked more wrong versions than it saved; refusing when such results disagree on length missed many
 /// more songs and saved no wrong pick.)
@@ -342,9 +400,9 @@ pub fn pick<'t>(wanted: &Wanted, found: &'t [Track]) -> Option<&'t Track> {
         .iter()
         .enumerate()
         .filter_map(|(place, track)| Some((same_song(wanted, track)?, place, track)))
-        .min_by_key(|(apart, place, track)| {
+        .min_by_key(|((named, apart), place, track)| {
             let other_twin = matches!((wanted.explicit, track.explicit), (Some(asked), Some(theirs)) if asked != theirs);
-            (other_twin, *apart, *place)
+            (other_twin, *named, *apart, *place)
         })
         .map(|(_, _, track)| track)
 }
@@ -663,5 +721,48 @@ mod tests {
             "Nikolai Lugansky",
             Some(228)
         ));
+    }
+
+    #[test]
+    fn a_version_is_not_taken_for_the_song_however_it_is_written() {
+        let one = |w: &Wanted, title: &str, artist: &str| {
+            pick(w, &[track("1", title, artist, None)]).is_some()
+        };
+        let song = |title: &str, artist: &str| wanted(title, artist, None);
+        for (asked, title, artist) in [
+            // A version written in Latin beside a title in another script, either way round.
+            (song("紅蓮華", "LiSA"), "紅蓮華 - Instrumental", "LiSA"),
+            (song("Группа крови", "Кино"), "Группа крови - Live", "Кино"),
+            (song("紅蓮華 - Live", "LiSA"), "紅蓮華", "LiSA"),
+            // A version written after a featuring credit.
+            (song("Song", "A"), "Song feat. X (Live)", "A"),
+            (song("Song", "A"), "Song ft. X - Remix", "A"),
+            (song("Song feat. X (Acoustic)", "A"), "Song", "A"),
+            // Where it is from, when that is a live album; a remaster that is also another take.
+            (song("Song", "A"), "Song (From \"MTV Unplugged\")", "A"),
+            (song("Song", "A"), "Song - From \"Live at Wembley\"", "A"),
+            (
+                song("Song", "A"),
+                "Song (2015 Remastered Extended Version)",
+                "A",
+            ),
+            (song("Song", "A"), "BBC Sessions: Song", "A"),
+        ] {
+            assert!(!one(&asked, title, artist), "{title} by {artist}");
+        }
+        // Still the song: what follows a credit that names no version, a film it is from.
+        assert!(one(&song("Song", "A"), "Song feat. X (Album Name)", "A"));
+        assert!(one(&song("Song", "A"), "Song (From \"Porco Rosso\")", "A"));
+        // Letters whose small form takes other room than the capital do not throw the reading off.
+        assert!(one(&song("ẞé", "A"), "ẞé feat. Xİ", "A"));
+        // A result credited the same way is preferred to one that names the artist somewhere in its credit.
+        let both = [
+            track("k", "Interlude", "Kendrick Lamar", None),
+            track("j", "Interlude", "J. Cole", None),
+        ];
+        assert_eq!(
+            pick(&song("Interlude", "J. Cole, Kendrick Lamar"), &both).map(|t| t.id.as_str()),
+            Some("j")
+        );
     }
 }

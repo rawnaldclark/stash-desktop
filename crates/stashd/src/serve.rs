@@ -319,7 +319,15 @@ pub(crate) fn through_addons<T>(
         }
         let resolving = addon.offers_resource("resolve");
         let asked = if resolving {
-            addon.resolve(&described.wanted, None)
+            // As the song is read, then each other way it may be read (a row from YouTube), until the add-on has it.
+            let mut answer = Ok(None);
+            for reading in std::iter::once(&described.wanted).chain(&described.also) {
+                answer = addon.resolve(reading, None);
+                if !matches!(&answer, Ok(None)) {
+                    break;
+                }
+            }
+            answer
         } else if addon.offers_resource("search") {
             addon
                 .search(&matching::query(&described.wanted), 20)
@@ -1100,12 +1108,17 @@ const NO_LYRICS_KEPT_SECONDS: i64 = 24 * 3600;
 fn lyrics_for(state: &State, param: &dyn Fn(&str) -> Option<String>) -> Result<Value> {
     let library = || state.library.lock().unwrap();
     let row = param("id").and_then(|id| id.parse::<i64>().ok());
-    let (wanted, mut refs, file) = match row {
+    let (wanted, also, mut refs, file) = match row {
         Some(id) => {
             let Some(described) = library().describe(id)? else {
                 return Ok(json!({ "lyrics": null, "via": null }));
             };
-            (described.wanted, described.refs, library().file_of(id)?)
+            (
+                described.wanted,
+                described.also,
+                described.refs,
+                library().file_of(id)?,
+            )
         }
         None => {
             let text = |name: &str| param(name).map(|v| capped(&v)).filter(|v| !v.is_empty());
@@ -1117,7 +1130,7 @@ fn lyrics_for(state: &State, param: &dyn Fn(&str) -> Option<String>) -> Result<V
                 isrc: param("isrc").and_then(|v| stash_core::identity::isrc(&v)),
                 explicit: None,
             };
-            (wanted, Vec::new(), None)
+            (wanted, Vec::new(), Vec::new(), None)
         }
     };
     if let (Some(addon), Some(track)) = (param("addon"), param("track")) {
@@ -1185,19 +1198,25 @@ fn lyrics_for(state: &State, param: &dyn Fn(&str) -> Option<String>) -> Result<V
         }
     }
     if library().setting(LRCLIB_SETTING)?.as_deref() != Some("0") {
-        match stash_core::lyrics::from_lrclib(
-            LRCLIB,
-            &wanted.title,
-            &wanted.artist,
-            wanted.album.as_deref(),
-            wanted.duration_ms,
-        ) {
-            Ok(Some(found)) => {
-                library().keep_lyrics(&key, Some(&found), Some("LRCLIB"), now)?;
-                return Ok(json!({ "lyrics": found, "via": "LRCLIB" }));
+        // As the song is read, then each other way it may be read (a row from YouTube).
+        for reading in std::iter::once(&wanted).chain(&also) {
+            match stash_core::lyrics::from_lrclib(
+                LRCLIB,
+                &reading.title,
+                &reading.artist,
+                reading.album.as_deref(),
+                reading.duration_ms,
+            ) {
+                Ok(Some(found)) => {
+                    library().keep_lyrics(&key, Some(&found), Some("LRCLIB"), now)?;
+                    return Ok(json!({ "lyrics": found, "via": "LRCLIB" }));
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    unreachable += 1;
+                    break;
+                }
             }
-            Ok(None) => {}
-            Err(_) => unreachable += 1,
         }
     }
     // "None there" is kept only when every source answered: one that could not be asked is asked again next time.

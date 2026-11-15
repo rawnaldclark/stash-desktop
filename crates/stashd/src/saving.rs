@@ -104,13 +104,14 @@ fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<(), Troub
             .map_err(|e| Trouble::Failed(e.to_string()))?
             .ok_or_else(|| Trouble::Failed("it is no longer in the library".into()))?;
         let art = library.art_url_of(id).ok().flatten();
-        let wanted = described.wanted;
+        // Tagged with what the library knows the song by, not with how it was asked for.
+        let kept = described.kept;
         let song = Song {
-            title: wanted.title,
-            artist: wanted.artist,
-            album: wanted.album,
+            title: kept.title,
+            artist: kept.artist,
+            album: kept.album,
             track_no: library.track_number(id).ok().flatten(),
-            isrc: wanted.isrc,
+            isrc: kept.isrc,
         };
         (song, art, folder(&library))
     };

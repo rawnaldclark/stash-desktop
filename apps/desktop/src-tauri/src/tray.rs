@@ -5,6 +5,7 @@
 //! When the listener chose it (Settings › Appearance), closing the window leaves Stash playing here instead of
 //! ending it. Like the media controls, the tray drives the player over the core's local API.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -39,15 +40,25 @@ fn post(agent: &ureq::Agent, base: &str, path: &str, body: Value) {
     let _ = agent.post(format!("{base}{path}")).send_json(body);
 }
 
+/// Whether the listener chose to keep Stash in the tray when the window is closed, as last read (about once a
+/// second, by the tray's own thread: closing the window never waits for the core, which may be busy importing).
+static KEEPS_PLAYING: AtomicBool = AtomicBool::new(false);
+
 /// Whether the listener chose to keep Stash in the tray when the window is closed.
-pub fn keeps_playing(port: u16) -> bool {
-    read(
-        &agent(),
-        &format!("http://127.0.0.1:{port}"),
-        "/api/settings/window",
-    )
-    .and_then(|v| v["tray"].as_bool())
-    .unwrap_or(false)
+pub fn keeps_playing() -> bool {
+    KEEPS_PLAYING.load(Ordering::Relaxed)
+}
+
+/// `text` cut to what a tray tip holds: 127 UTF-16 units on Windows (an emoji takes two), never in the middle of a
+/// character.
+fn fit_tip(text: &str) -> String {
+    let mut units = 0;
+    text.chars()
+        .take_while(|c| {
+            units += c.len_utf16();
+            units <= 127
+        })
+        .collect()
 }
 
 /// Puts the icon in the tray and keeps its tip on what plays. Without a tray on this system, it says why and
@@ -78,20 +89,30 @@ fn build(app: &AppHandle, port: u16) -> tauri::Result<()> {
         .on_menu_event({
             let base = base.clone();
             move |app, event| {
-                let agent = agent();
+                // What asks the core is done off the window's thread, so a busy core never freezes the window.
+                let ask = |what: &'static str| {
+                    let base = base.clone();
+                    std::thread::spawn(move || {
+                        let agent = agent();
+                        match what {
+                            "toggle" => {
+                                let playing = read(&agent, &base, "/api/player")
+                                    .is_some_and(|p| p["status"] == "playing");
+                                post(
+                                    &agent,
+                                    &base,
+                                    "/api/player/pause",
+                                    json!({ "paused": playing }),
+                                );
+                            }
+                            path => post(&agent, &base, path, json!({})),
+                        }
+                    });
+                };
                 match event.id().as_ref() {
-                    "toggle" => {
-                        let playing = read(&agent, &base, "/api/player")
-                            .is_some_and(|p| p["status"] == "playing");
-                        post(
-                            &agent,
-                            &base,
-                            "/api/player/pause",
-                            json!({ "paused": playing }),
-                        );
-                    }
-                    "next" => post(&agent, &base, "/api/player/next", json!({})),
-                    "previous" => post(&agent, &base, "/api/player/previous", json!({})),
+                    "toggle" => ask("toggle"),
+                    "next" => ask("/api/player/next"),
+                    "previous" => ask("/api/player/previous"),
                     "show" => windows::full(app),
                     "mini" => {
                         windows::show(app, stashd::serve::View::Mini);
@@ -116,13 +137,19 @@ fn build(app: &AppHandle, port: u16) -> tauri::Result<()> {
     }
     let tray = builder.build(app)?;
 
-    // The tip follows the song: "Title · Artist", or just "Stash".
+    // The tip follows the song: "Title · Artist", or just "Stash". And the listener's choice for closing the window is
+    // kept up to date.
     std::thread::Builder::new()
         .name("stash-tray".into())
         .spawn(move || {
             let agent = agent();
             let mut said = String::new();
             loop {
+                if let Some(chosen) =
+                    read(&agent, &base, "/api/settings/window").and_then(|v| v["tray"].as_bool())
+                {
+                    KEEPS_PLAYING.store(chosen, Ordering::Relaxed);
+                }
                 let tip = read(&agent, &base, "/api/player")
                     .and_then(|p| {
                         let track = p.get("track")?;
@@ -130,7 +157,7 @@ fn build(app: &AppHandle, port: u16) -> tauri::Result<()> {
                         let artist = track["artist"].as_str().unwrap_or_default();
                         Some(format!("{title} · {artist}"))
                     })
-                    .map(|now| now.chars().take(120).collect::<String>())
+                    .map(|now| fit_tip(&now))
                     .unwrap_or_else(|| "Stash".into());
                 if tip != said {
                     let _ = tray.set_tooltip(Some(&tip));

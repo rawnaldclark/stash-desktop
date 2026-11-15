@@ -95,7 +95,7 @@ impl Library {
     /// Songs to play after `seeds` (the last songs heard; `seed_artists` names their artists, for songs that are not
     /// the library's): by those artists first, then liked songs, then the most played, then any. None of `queued`,
     /// none heard since `rested_since_ms`, only files here when `files_only`. At most `n`, the same artist never twice
-    /// in a row when that can be helped.
+    /// in a row when that can be helped (nor right after the last song heard, `seed_artists[0]`).
     pub fn autoplay_picks(
         &self,
         seeds: &[i64],
@@ -181,14 +181,28 @@ impl Library {
         take(&same_artists, n, &mut picked);
         take(&any, n, &mut picked);
 
-        // The same artist not twice in a row, when another can come between.
+        // The same artist not twice in a row, when another can come between, starting from the song heard last. Of the
+        // artists that can come next, the one with the most songs left goes, so the rest can be spread between them.
         let mut ordered: Vec<i64> = Vec::with_capacity(picked.len());
-        let mut last: Option<i64> = None;
+        let mut last: Option<i64> = match seed_artists.first() {
+            Some(name) => self
+                .conn
+                .prepare_cached("SELECT id FROM artists WHERE name = ?1 COLLATE NOCASE")?
+                .query_row([name], |r| r.get::<_, i64>(0))
+                .optional()?,
+            None => None,
+        };
         while !picked.is_empty() {
+            let mut left: HashMap<i64, usize> = HashMap::new();
+            for (_, artist) in &picked {
+                *left.entry(*artist).or_default() += 1;
+            }
             let at = picked
                 .iter()
-                .position(|(_, a)| Some(*a) != last)
-                .unwrap_or(0);
+                .enumerate()
+                .filter(|(_, (_, artist))| Some(*artist) != last)
+                .max_by_key(|(place, (_, artist))| (left[artist], std::cmp::Reverse(*place)))
+                .map_or(0, |(place, _)| place);
             let (id, artist) = picked.remove(at);
             ordered.push(id);
             last = Some(artist);

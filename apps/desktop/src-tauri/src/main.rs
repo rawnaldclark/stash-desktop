@@ -16,9 +16,6 @@ use anyhow::{Context, Result};
 use stashd::serve::{Core, Options};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
-/// The port of the core's local API, for the window's own events.
-struct CorePort(u16);
-
 /// The library to open: the one `STASH_DB` names, else `library.db` in this user's Stash data folder.
 fn library_path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("STASH_DB") {
@@ -97,7 +94,6 @@ fn main() -> Result<()> {
                 .min_inner_size(640.0, 400.0)
                 .initialization_script(&script)
                 .build()?;
-            app.manage(CorePort(port));
             app.manage(windows::PageScript(script));
             if !measuring {
                 media_controls::start(app.handle().clone(), &window, port);
@@ -116,10 +112,8 @@ fn main() -> Result<()> {
             if let WindowEvent::CloseRequested { api, .. } = event
                 && window.label() == windows::MAIN
             {
-                let app = window.app_handle();
-                let in_tray = app.tray_by_id(tray::ID).is_some();
-                let port = app.try_state::<CorePort>().map(|p| p.0);
-                if in_tray && port.is_some_and(tray::keeps_playing) {
+                let in_tray = window.app_handle().tray_by_id(tray::ID).is_some();
+                if in_tray && tray::keeps_playing() {
                     api.prevent_close();
                     let _ = window.hide();
                 }

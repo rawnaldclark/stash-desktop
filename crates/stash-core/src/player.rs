@@ -207,6 +207,10 @@ pub struct PlayerState {
     /// Nothing plays and the player rests on `track` (`status` is "paused"): the queue ended there, the track
     /// could not be played, or the queue was brought back from last time. Play starts it.
     pub resting: bool,
+    /// Nothing comes after the track playing: the engine has nothing after it, and the queue has nothing left to hand
+    /// it (what was left could not be played). Not for the page.
+    #[serde(skip)]
+    pub nothing_after: bool,
 }
 
 /// The listening to the track the engine is on.
@@ -1461,6 +1465,7 @@ impl Player {
             error,
             queue,
             resting,
+            nothing_after,
         ) = {
             let shared = self.ctx.shared.lock().unwrap();
             let index = shared.index();
@@ -1488,6 +1493,8 @@ impl Player {
                     shared.from.clone(),
                 ),
                 resting,
+                shared.ahead >= shared.queue.len()
+                    && shared.pos.is_some_and(|pos| pos + 1 >= shared.slots.len()),
             )
         };
         let (queue_version, shuffle, repeat, from) = queue;
@@ -1602,6 +1609,7 @@ impl Player {
             signal,
             error,
             resting: resting.is_some(),
+            nothing_after,
         }
     }
 }
