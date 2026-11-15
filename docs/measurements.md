@@ -305,7 +305,7 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 
 - **Full-size covers.** The made-up covers are tiny. A folder of albums with 3,000 px pictures inside every file sends each one whole to a 40 px box; a small-picture cache in the core is the fix when it shows.
 - **Bit-perfect and exclusive wording on screen** were read from the engine's report, not looked at in the new bar with exclusive mode on.
-- **Lyrics:** the panel is there and says there are none; the core has no lyrics yet.
+- **Lyrics:** the panel is there and says there are none; the core has no lyrics yet (since section 13 it has).
 - The folder dialog and Import were not clicked in the new Settings; their routes are the ones already tested.
 
 ## 12. Opening where it was left
@@ -327,3 +327,23 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 - A kept queue of an add-on's tracks was not restarted in the real app (the path is the same as for the library's; the stream is asked for again when play is pressed).
 - The window's remembered size was not checked by resizing it by hand; the run above opened at the size it was closed at.
 - Search does not ask add-ons for albums or artists, only for songs.
+
+## 13. Working with the rest of the computer
+
+- **One Stash at a time.** Starting it again while it runs brings the open window to the front; the second start ends by itself.
+- **The system's media controls** (media keys, the volume overlay, the lock screen) show the song, its artist, album, cover and place, and their play, pause, next, previous and seek work the player. Stop pauses.
+- **The sound output is chosen in Settings › Sound**: the system's own choice, or any output of the system's sound driver. The change is heard at once, also in the middle of a song, and the choice is kept. When the chosen output is not connected, the system's choice plays, Settings says which one is missing, and the chosen one is taken back within five seconds of being plugged in again.
+- **Lyrics.** A song's own come first: a `.lrc` file beside it (read each time, so one dropped in shows at once), or the lyrics in its tags. Then the add-ons that offer lyrics, the one serving the song asked by its own id. Then LRCLIB, an open database of timed lyrics, unless Settings › Lyrics switches it off; it is sent the song's title, artist, album and length. What came from the network is kept in the library for 30 days, and "none there" for a day; a miss is not kept when a source could not be asked. What any source gives is cleaned and capped as the add-on contract says.
+
+### Checked
+
+- **In the real app on a scratch library with scratch user folders** (so it opened "its own" library as a listener's would): through the system's media session, aimed at Stash's session only (no key presses, which would reach whatever else plays), next, play/pause, a position and previous all moved the player, and the session's title followed the song. A second start ended by itself, the first kept playing.
+- **The output switched in the middle of a song** to another of five outputs and back: the same song played on, from where it was.
+- **Lyrics in the panel**: a `.lrc` beside a song showed in the panel while it played, with the line of the moment lit. One LRCLIB lookup of a well-known song came back in 280 ms with 50 timed lines; asked again, 11 ms from the library.
+- **By the tests:** `crates/stash-core/tests/player.rs` (the outputs listed, the system's choice first, one chosen and back), `crates/stash-core/src/lyrics.rs` (LRC with several stamps a line and an offset, plain text, a source's lyrics checked, the LRCLIB search result picked by length and name), `crates/stashd/tests/api.rs` (an output chosen, kept for the next run, refused when not there, missing when unplugged; lyrics from a `.lrc`, from an add-on by its id and by title and artist, kept when the add-on is gone, the LRCLIB switch). No test reaches LRCLIB.
+
+### Not covered yet
+
+- Unplugging an output while it plays was not tried with a real device; the path is the engine's own fallback and the five-second check.
+- Word-by-word lyrics are shown when an add-on gives them; LRCLIB and `.lrc` files give lines only.
+- The full-size covers and memory notes of section 11 still stand.
