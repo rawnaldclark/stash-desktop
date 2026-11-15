@@ -306,7 +306,24 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 - **Full-size covers.** The made-up covers are tiny. A folder of albums with 3,000 px pictures inside every file sends each one whole to a 40 px box; a small-picture cache in the core is the fix when it shows.
 - **Bit-perfect and exclusive wording on screen** were read from the engine's report, not looked at in the new bar with exclusive mode on.
 - **Lyrics:** the panel is there and says there are none; the core has no lyrics yet.
-- **Search finds songs only.** Albums and artists are reached from a song or from the Library tabs.
-- **A window under 1,100 px** hides the bar's volume and format, as the web player's medium layout does.
-- **When the queue ends, the bar goes away;** the web player keeps the last song there.
 - The folder dialog and Import were not clicked in the new Settings; their routes are the ones already tested.
+
+## 12. Opening where it was left
+
+- **The queue is kept between runs.** What was queued, the place in it, the seconds into the track, shuffle and repeat are written into the library's settings as they change, and brought back when the program opens: paused where it was, nothing playing until asked. A song of the library is kept by its row, an add-on's track whole. A song that is gone by then is left out. Nothing relies on a clean exit: the place is written every five seconds while a track plays, and to the second when paused.
+- **The player rests on a track while nothing plays.** At the end of the queue that is the last track, and a track that could not be played is the one it rests on. The state says paused with the track, so the bar stays, and play starts it. Songs added to a resting queue are only added.
+- **Search finds albums and artists in the library**, a dozen of each beside the songs: an album by its title or its songs' artist, an artist by name, names that start with what was typed first. The card at the top is the artist or the album when its name is what was typed.
+- **The window opens at the size and place it had.**
+- **A window under 1,100 px keeps the volume, Up next and the format line in the bar.** The web player's medium layout drops them; a desktop window that size has nothing else.
+
+### Checked
+
+- **In the real app, killed in the middle of a queue** (the process ended, not closed): 646 songs queued from the library, paused 7 s into the first, repeat on. Opened again, the bar showed the same song, paused at 7 s, the same queue and repeat; pressing play in the bar went on from there on the sound card.
+- **In a browser on a silent output:** a one-song queue played to its end left the bar on that song, paused; "lanterns" put the artist The Lanterns on the top card with an Artists row and an Albums row under it; at 960 x 640 the bar had the volume, Up next and the format line.
+- **By the tests:** `crates/stash-core/tests/player.rs` (resting at the end of the queue, a seek and previous while resting, adding to a resting queue, a kept queue brought back and played on from its second), `crates/stashd/tests/api.rs` (the queue written down, a second core opening on it with a song gone in between, nothing kept after stop; albums and artists in a search).
+
+### Not covered yet
+
+- A kept queue of an add-on's tracks was not restarted in the real app (the path is the same as for the library's; the stream is asked for again when play is pressed).
+- The window's remembered size was not checked by resizing it by hand; the run above opened at the size it was closed at.
+- Search does not ask add-ons for albums or artists, only for songs.
