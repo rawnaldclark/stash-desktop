@@ -57,7 +57,12 @@ fn main() -> Result<()> {
             }
         })?;
 
-    tauri::Builder::default()
+    let mut shell = tauri::Builder::default();
+    if !measuring {
+        // The window opens where it was closed, at the size it had (a measurement keeps the one size it is run at).
+        shell = shell.plugin(tauri_plugin_window_state::Builder::default().build());
+    }
+    shell
         .setup(move |app| {
             // Set before any of the page's own script runs.
             let script = format!("window.__STASH_CORE__ = 'http://127.0.0.1:{port}'; window.__STASH_BENCH__ = {measuring};");

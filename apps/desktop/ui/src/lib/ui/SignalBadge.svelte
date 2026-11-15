@@ -29,8 +29,6 @@
 	.sig-bar .b-fmt { margin-top: 0; }
 	.sig-bar .sig-v { font-size: 10px; line-height: 15px; }
 	.sig-fs { justify-content: center; margin-top: 8px; }
-	/* the bar shows its third line at the L size only, as the web player's badge */
-	:global(.wp:not([data-size='l'])) .sig-bar { display: none; }
 	/* the verdict colours are the app's, made for its dark surfaces: on the light theme they are darkened to hold their contrast
 	   (vite.config.ts's themeSwitch makes this follow Settings › Appearance as well as the system) */
 	@media (prefers-color-scheme: light) { .sig-v { filter: brightness(.55) saturate(1.6); } }

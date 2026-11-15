@@ -10,6 +10,7 @@ anyhow = "1.0.104"
 stash-core = { version = "0.0.1", path = "../../../crates/stash-core" }
 stashd = { path = "../../../crates/stashd" }
 tauri = "2.12.5"
+tauri-plugin-window-state = "2"
 
 [build-dependencies]
 tauri-build = "2.7.4"

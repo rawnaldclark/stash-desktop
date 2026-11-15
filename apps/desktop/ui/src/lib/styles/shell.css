@@ -129,7 +129,9 @@
 @supports not (backdrop-filter: blur(1px)) { .bar { background: var(--wp-main); } }
 @container wp (max-width: 1099.98px) {
 	.bar { left: 84px; height: 68px; grid-template-columns: minmax(0, 1fr) minmax(260px, 1.2fr) auto; padding: 8px 12px; column-gap: 12px; }
-	.bar .vol, .bar .b-que { display: none; }
+	/* The desktop keeps the volume and Up next in the bar at this size too (the web player hands them to the phone's own
+	   controls); the slider is shorter. */
+	.bar .vol-s { width: 64px; }
 }
 .bar-l { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .bar-cv { display: block; width: 52px; height: 52px; border-radius: 6px; flex: none; overflow: clip; }
@@ -170,7 +172,7 @@
 .b-fmt { justify-self: start; margin-top: 3px; padding: 0 6px; font-size: 10px; line-height: 15px; }
 .bar-t { container: bart / inline-size; }
 @container bart (max-width: 150px) { .fmt-d { display: none; } }
-.wp:not([data-size='l']) .b-fmt { display: none; }
+/* the desktop shows what the sound is at every size: it is what the app is for */
 .vol { display: inline-flex; align-items: center; gap: 2px; margin: 0 8px 0 4px; color: var(--wp-text-2); }
 .vol-s { appearance: none; -webkit-appearance: none; width: 88px; height: 16px; margin: 0; background: transparent; cursor: pointer; }
 .vol-s::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: linear-gradient(90deg, var(--wp-text-2) var(--v, 70%), var(--wp-line-2) var(--v, 70%)); }
