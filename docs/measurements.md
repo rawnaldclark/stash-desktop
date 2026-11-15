@@ -139,3 +139,21 @@ Nearly all of it is the web view starting. From the page beginning to load, the 
 - Memory with the audio engine playing, with cover art in an album grid, and after hours of use.
 - macOS (WKWebView) and Linux (WebKitGTK), where the web view is a different engine. Linux is the known risk for this shell.
 - A packaged install (installer size, code signing, the first-run experience on a PC without WebView2).
+
+## 5. Scanning a folder
+
+`stashd scan --db <library> <folder>` walks a folder, reads the tags of every audio file it has not seen (or whose size or time changed) and writes them in batches of 500. A file that is gone is marked missing, never deleted.
+
+**How it was measured.** `stashd synth-files --tracks 5000` writes 5,000 small WAV files with ID3 tags (179 artists, 454 albums, 39 MB), then two scans into a new library. Same machine.
+
+| | Time | Rate |
+|---|---:|---:|
+| First scan: every file's tags read, 5,000 rows written | 0.9 s | 5,800 files a second |
+| Second scan, nothing changed: no file opened | 0.1 s | 34,000 files a second |
+
+This is a best case: small files that the system had just written and still held in memory, on an SSD. A first scan of a real collection is bound by reading the files from disk (or a network share), not by this code. The re-scan number is the one that carries over: checking 100,000 unchanged files should take about three seconds.
+
+### Not covered yet
+
+A real collection (large FLAC files with embedded pictures, a spinning disk, a network share), watching a folder for changes instead of re-scanning, and files moved or renamed (today: one missing, one added).
+

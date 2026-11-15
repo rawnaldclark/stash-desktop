@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
@@ -74,6 +74,15 @@ const V1: &str = "
     );
 ";
 
+/// Version 2: what a folder scan needs. A file's size and time tell a scan whether to read its tags again; a file
+/// that is not found is marked missing, never deleted; and one file (or one add-on's track) is one row.
+const V2: &str = "
+    ALTER TABLE tracks ADD COLUMN file_size INTEGER;
+    ALTER TABLE tracks ADD COLUMN file_mtime INTEGER;
+    ALTER TABLE tracks ADD COLUMN missing_since INTEGER;
+    CREATE UNIQUE INDEX tracks_locator ON tracks(origin, IFNULL(addon_id, ''), locator);
+";
+
 /// Opens (or creates) the library at `path` and migrates it to [`SCHEMA_VERSION`].
 pub fn open(path: &std::path::Path) -> Result<Connection> {
     prepare(Connection::open(path)?)
@@ -104,6 +113,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         tx.pragma_update(None, "user_version", 1)?;
         tx.commit()?;
     }
+    if found < 2 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V2)?;
+        tx.pragma_update(None, "user_version", 2)?;
+        tx.commit()?;
+    }
     Ok(())
 }
 
@@ -127,6 +142,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn a_version_1_library_is_brought_up_with_its_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(V1).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute_batch(
+            "INSERT INTO artists(id, name, sort_key) VALUES (1, 'A', 'a');
+             INSERT INTO tracks(title, artist_id, origin, locator, added_at, sort_key, play_count)
+             VALUES ('Old', 1, 'file', 'C:/music/old.flac', 1, 'old', 7);",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        let (version, plays, size): (i64, i64, Option<i64>) = conn
+            .query_row("SELECT (SELECT user_version FROM pragma_user_version), play_count, file_size FROM tracks", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        assert_eq!((version, plays, size), (SCHEMA_VERSION, 7, None));
+        // One file is one row from now on.
+        let again = conn.execute("INSERT INTO tracks(title, artist_id, origin, locator, added_at, sort_key) VALUES ('Dup', 1, 'file', 'C:/music/old.flac', 2, 'dup')", []);
+        assert!(again.is_err());
     }
 
     #[test]

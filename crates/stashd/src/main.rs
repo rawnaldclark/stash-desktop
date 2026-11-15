@@ -55,6 +55,23 @@ enum Command {
         #[arg(long)]
         verbose: bool,
     },
+    /// Read a music folder into the library: new files are added, changed ones read again, missing ones marked.
+    Scan {
+        #[arg(long)]
+        db: PathBuf,
+        /// The folder to scan, with everything below it.
+        folder: PathBuf,
+    },
+    /// Write made-up tracks as real tagged files (for measuring a scan).
+    SynthFiles {
+        /// The folder to write into.
+        #[arg(long)]
+        dir: PathBuf,
+        #[arg(long, default_value_t = 5_000)]
+        tracks: usize,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+    },
     /// Measure opening, searching and paging a library, as a list or grid would use it.
     Bench {
         #[arg(long)]
@@ -69,6 +86,13 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Synth { db, tracks, seed } => synth_library(&db, tracks, seed),
         Command::Bench { db, json } => bench(&db, json),
+        Command::Scan { db, folder } => scan(&db, &folder),
+        Command::SynthFiles { dir, tracks, seed } => {
+            let written = synth::write_files(&dir, tracks, seed)
+                .with_context(|| format!("writing into {}", dir.display()))?;
+            println!("{written} files written under {}", dir.display());
+            Ok(())
+        }
         Command::OutputCheck {
             mpv,
             exclusive,
@@ -108,6 +132,36 @@ fn synth_library(db: &Path, tracks: usize, seed: u64) -> Result<()> {
         took.as_secs_f64(),
         added as f64 / took.as_secs_f64(),
         megabytes(file_bytes(db))
+    );
+    Ok(())
+}
+
+fn scan(db: &Path, folder: &Path) -> Result<()> {
+    let mut library = Library::open(db).with_context(|| format!("opening {}", db.display()))?;
+    let report = stash_core::scan::scan_folder(&mut library, folder, |so_far| {
+        eprintln!(
+            "  {} files: {} added, {} changed, {} unchanged ({:.1} s)",
+            so_far.files, so_far.added, so_far.changed, so_far.unchanged, so_far.seconds
+        );
+    })?;
+    println!(
+        "{} audio files in {:.1} s ({:.0} files/s): {} added, {} changed, {} unchanged, {} missing, {} unreadable",
+        report.files,
+        report.seconds,
+        report.files as f64 / report.seconds.max(0.001),
+        report.added,
+        report.changed,
+        report.unchanged,
+        report.missing,
+        report.unreadable
+    );
+    for example in &report.unreadable_examples {
+        println!("  unreadable: {example}");
+    }
+    let counts = library.counts()?;
+    println!(
+        "library: {} tracks, {} albums, {} artists",
+        counts.tracks, counts.albums, counts.artists
     );
     Ok(())
 }

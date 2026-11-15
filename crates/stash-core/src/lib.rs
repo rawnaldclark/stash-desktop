@@ -7,9 +7,10 @@ pub mod addons;
 pub mod audio;
 pub mod db;
 pub mod library;
+pub mod scan;
 pub mod synth;
 
-pub use library::{AlbumRow, Counts, Library, NewTrack, Origin, TrackRow};
+pub use library::{AlbumRow, Counts, FileState, Library, NewTrack, Origin, ScanChange, TrackRow};
 
 /// What can go wrong in the core.
 #[derive(Debug, thiserror::Error)]
@@ -18,6 +19,8 @@ pub enum Error {
     Db(#[from] rusqlite::Error),
     #[error("audio engine: {0}")]
     Audio(String),
+    #[error("scan: {0}")]
+    Scan(String),
     #[error(
         "the library was written by a newer Stash (schema {found}, this build reads up to {supported})"
     )]

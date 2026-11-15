@@ -204,6 +204,7 @@ pub fn tracks(count: usize, seed: u64) -> impl Iterator<Item = NewTrack> {
                         ),
                         title,
                         artist: artist.clone(),
+                        album_artist: None,
                         album: Some(album.clone()),
                         year: Some(year),
                         disc_no: 1,
@@ -216,6 +217,8 @@ pub fn tracks(count: usize, seed: u64) -> impl Iterator<Item = NewTrack> {
                         sample_rate: Some(rate),
                         bit_depth: if bits == 0 { None } else { Some(bits) },
                         added_at: 1_500_000_000 + rng.below(290_000_000) as i64,
+                        file_size: None,
+                        file_mtime: None,
                     });
                 }
             }
@@ -224,6 +227,49 @@ pub fn tracks(count: usize, seed: u64) -> impl Iterator<Item = NewTrack> {
         made += 1;
         pending.pop()
     })
+}
+
+/// Writes `count` made-up tracks as real files under `root` (`Artist/Album/NN Title.wav`): a tenth of a second of
+/// silence each, with ID3 tags, so a folder scan has something true to read. Returns how many were written.
+pub fn write_files(root: &std::path::Path, count: usize, seed: u64) -> std::io::Result<usize> {
+    use lofty::config::WriteOptions;
+    use lofty::prelude::*;
+    use lofty::tag::{Tag, TagType};
+
+    // 16-bit stereo, 44.1 kHz, 4,410 frames of silence.
+    let data_bytes: u32 = 4_410 * 4;
+    let mut wav = Vec::with_capacity(44 + data_bytes as usize);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&44_100u32.to_le_bytes());
+    wav.extend_from_slice(&(44_100u32 * 4).to_le_bytes());
+    wav.extend_from_slice(&4u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_bytes.to_le_bytes());
+    wav.resize(44 + data_bytes as usize, 0);
+
+    let mut written = 0usize;
+    for track in tracks(count, seed) {
+        let album = track.album.clone().unwrap_or_default();
+        let folder = root.join(&track.artist).join(&album);
+        std::fs::create_dir_all(&folder)?;
+        let path = folder.join(format!("{:02} {}.wav", track.track_no, track.title));
+        std::fs::write(&path, &wav)?;
+        let mut tag = Tag::new(TagType::Id3v2);
+        tag.set_title(track.title);
+        tag.set_artist(track.artist);
+        tag.set_album(album);
+        tag.set_track(track.track_no);
+        tag.save_to_path(&path, WriteOptions::default())
+            .map_err(std::io::Error::other)?;
+        written += 1;
+    }
+    Ok(written)
 }
 
 #[cfg(test)]

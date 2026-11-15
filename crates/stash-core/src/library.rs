@@ -36,6 +36,8 @@ impl Origin {
 pub struct NewTrack {
     pub title: String,
     pub artist: String,
+    /// Who the album is by, when that is not the track's artist (a compilation, a guest).
+    pub album_artist: Option<String>,
     pub album: Option<String>,
     pub year: Option<i32>,
     pub disc_no: u32,
@@ -50,6 +52,10 @@ pub struct NewTrack {
     pub bit_depth: Option<u32>,
     /// Seconds since the Unix epoch.
     pub added_at: i64,
+    /// For a file: its size in bytes and when it was last changed (seconds since the Unix epoch). A scan re-reads a
+    /// file only when one of them differs.
+    pub file_size: Option<u64>,
+    pub file_mtime: Option<i64>,
 }
 
 /// A track as a list row shows it.
@@ -141,99 +147,95 @@ impl Library {
     }
 
     /// Adds tracks in one transaction and returns how many went in. Artists and albums are made as they are first
-    /// named; an album is its title under one artist.
+    /// named; an album is its title under its album artist (the track's artist when it names none).
     pub fn add_tracks(&mut self, tracks: impl IntoIterator<Item = NewTrack>) -> Result<usize> {
         let tx = self.conn.transaction()?;
         let mut added = 0usize;
         {
-            let mut artist_ids: HashMap<String, i64> = HashMap::new();
-            let mut album_ids: HashMap<(i64, String), i64> = HashMap::new();
-            let mut find_artist = tx.prepare("SELECT id FROM artists WHERE name = ?1")?;
-            let mut add_artist =
-                tx.prepare("INSERT INTO artists(name, sort_key) VALUES (?1, ?2)")?;
-            let mut find_album =
-                tx.prepare("SELECT id FROM albums WHERE artist_id = ?1 AND title = ?2")?;
-            let mut add_album = tx.prepare(
-                "INSERT INTO albums(title, artist_id, year, sort_key) VALUES (?1, ?2, ?3, ?4)",
-            )?;
-            let mut add_track = tx.prepare(
-                "INSERT INTO tracks(title, artist_id, album_id, disc_no, track_no, duration_ms, isrc, origin, addon_id, locator,
-                                    codec, sample_rate, bit_depth, added_at, sort_key)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-            )?;
-            let mut add_fts = tx.prepare(
-                "INSERT INTO tracks_fts(rowid, title, artist, album) VALUES (?1, ?2, ?3, ?4)",
-            )?;
-
-            for t in tracks {
-                let artist_id = match artist_ids.get(&t.artist) {
-                    Some(id) => *id,
-                    None => {
-                        let found: Option<i64> =
-                            find_artist.query_row([&t.artist], |r| r.get(0)).ok();
-                        let id = match found {
-                            Some(id) => id,
-                            None => {
-                                add_artist.execute(params![t.artist, sort_key(&t.artist)])?;
-                                tx.last_insert_rowid()
-                            }
-                        };
-                        artist_ids.insert(t.artist.clone(), id);
-                        id
-                    }
-                };
-                let album_id = match &t.album {
-                    None => None,
-                    Some(title) => {
-                        let key = (artist_id, title.clone());
-                        Some(match album_ids.get(&key) {
-                            Some(id) => *id,
-                            None => {
-                                let found: Option<i64> = find_album
-                                    .query_row(params![artist_id, title], |r| r.get(0))
-                                    .ok();
-                                let id = match found {
-                                    Some(id) => id,
-                                    None => {
-                                        add_album.execute(params![
-                                            title,
-                                            artist_id,
-                                            t.year,
-                                            sort_key(title)
-                                        ])?;
-                                        tx.last_insert_rowid()
-                                    }
-                                };
-                                album_ids.insert(key, id);
-                                id
-                            }
-                        })
-                    }
-                };
-                add_track.execute(params![
-                    t.title,
-                    artist_id,
-                    album_id,
-                    t.disc_no,
-                    t.track_no,
-                    t.duration_ms as i64,
-                    t.isrc,
-                    t.origin.as_str(),
-                    t.addon_id,
-                    t.locator,
-                    t.codec,
-                    t.sample_rate,
-                    t.bit_depth,
-                    t.added_at,
-                    sort_key(&t.title),
-                ])?;
-                let id = tx.last_insert_rowid();
-                add_fts.execute(params![id, t.title, t.artist, t.album])?;
+            let mut writer = Writer::new(&tx)?;
+            for track in tracks {
+                writer.insert(&track)?;
                 added += 1;
             }
         }
         tx.commit()?;
         Ok(added)
+    }
+
+    /// What the library holds for the file at `path`, if anything.
+    pub fn file_state(&self, path: &str) -> Result<Option<FileState>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, file_size, file_mtime, missing_since IS NOT NULL FROM tracks
+             WHERE origin = 'file' AND IFNULL(addon_id, '') = '' AND locator = ?1",
+        )?;
+        let mut rows = stmt.query_map([path], |r| {
+            Ok(FileState {
+                id: r.get(0)?,
+                size: r.get::<_, Option<i64>>(1)?.map(|s| s as u64),
+                mtime: r.get(2)?,
+                missing: r.get(3)?,
+            })
+        })?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// Writes one batch of a folder scan in one transaction: new files, files whose tags are read again, and files
+    /// that are simply still there.
+    pub fn apply_scan(&mut self, changes: &[ScanChange]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut writer = Writer::new(&tx)?;
+            for change in changes {
+                match change {
+                    ScanChange::Added(track) => writer.insert(track)?,
+                    ScanChange::Changed(id, track) => writer.update(*id, track)?,
+                    ScanChange::Seen(id) => writer.seen(*id)?,
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Marks every file track under `root` whose path is not in `seen` as missing since `now`, and returns how many
+    /// were newly marked. Nothing is deleted: a drive that is unplugged today is back tomorrow, with its play counts.
+    pub fn mark_missing(
+        &mut self,
+        root: &str,
+        seen: &std::collections::HashSet<String>,
+        now: i64,
+    ) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let mut marked = 0usize;
+        {
+            let mut under = tx.prepare(
+                "SELECT id, locator FROM tracks
+                 WHERE origin = 'file' AND missing_since IS NULL AND substr(locator, 1, length(?1)) = ?1",
+            )?;
+            let gone: Vec<i64> = under
+                .query_map([root], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })?
+                .filter_map(|row| row.ok())
+                .filter(|(_, locator)| !seen.contains(locator))
+                .map(|(id, _)| id)
+                .collect();
+            let mut mark = tx.prepare("UPDATE tracks SET missing_since = ?1 WHERE id = ?2")?;
+            for id in gone {
+                marked += mark.execute(params![now, id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(marked)
+    }
+
+    /// How many file tracks are marked missing.
+    pub fn missing_count(&self) -> Result<u64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM tracks WHERE missing_since IS NOT NULL",
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as u64)
     }
 
     /// Search as the listener types: every word must start a word in the title, artist or album ("radioh cre" finds
@@ -358,6 +360,184 @@ impl Library {
     }
 }
 
+/// What the library knows about a file it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileState {
+    pub id: i64,
+    pub size: Option<u64>,
+    pub mtime: Option<i64>,
+    /// It was not found by an earlier scan.
+    pub missing: bool,
+}
+
+/// One thing a folder scan found.
+#[derive(Debug, Clone)]
+pub enum ScanChange {
+    /// A file the library did not have.
+    Added(NewTrack),
+    /// A file it had, whose size or time changed: its tags are taken again. Play counts and the day it was added stay.
+    Changed(i64, NewTrack),
+    /// A file it had, unchanged: only marked as there again if it had been missing.
+    Seen(i64),
+}
+
+/// Writes tracks inside one transaction, making each artist and album the first time it is named.
+struct Writer<'t> {
+    tx: &'t rusqlite::Transaction<'t>,
+    artist_ids: HashMap<String, i64>,
+    album_ids: HashMap<(i64, String), i64>,
+    find_artist: rusqlite::Statement<'t>,
+    add_artist: rusqlite::Statement<'t>,
+    find_album: rusqlite::Statement<'t>,
+    add_album: rusqlite::Statement<'t>,
+    add_track: rusqlite::Statement<'t>,
+    change_track: rusqlite::Statement<'t>,
+    drop_fts: rusqlite::Statement<'t>,
+    add_fts: rusqlite::Statement<'t>,
+    mark_seen: rusqlite::Statement<'t>,
+}
+
+impl<'t> Writer<'t> {
+    fn new(tx: &'t rusqlite::Transaction<'t>) -> Result<Self> {
+        Ok(Self {
+            tx,
+            artist_ids: HashMap::new(),
+            album_ids: HashMap::new(),
+            find_artist: tx.prepare("SELECT id FROM artists WHERE name = ?1")?,
+            add_artist: tx.prepare("INSERT INTO artists(name, sort_key) VALUES (?1, ?2)")?,
+            find_album: tx.prepare("SELECT id FROM albums WHERE artist_id = ?1 AND title = ?2")?,
+            add_album: tx.prepare("INSERT INTO albums(title, artist_id, year, sort_key) VALUES (?1, ?2, ?3, ?4)")?,
+            add_track: tx.prepare(
+                "INSERT INTO tracks(title, artist_id, album_id, disc_no, track_no, duration_ms, isrc, origin, addon_id, locator,
+                                    codec, sample_rate, bit_depth, added_at, sort_key, file_size, file_mtime)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            )?,
+            change_track: tx.prepare(
+                "UPDATE tracks SET title = ?1, artist_id = ?2, album_id = ?3, disc_no = ?4, track_no = ?5, duration_ms = ?6,
+                                   isrc = ?7, codec = ?8, sample_rate = ?9, bit_depth = ?10, sort_key = ?11,
+                                   file_size = ?12, file_mtime = ?13, missing_since = NULL
+                 WHERE id = ?14",
+            )?,
+            drop_fts: tx.prepare("DELETE FROM tracks_fts WHERE rowid = ?1")?,
+            add_fts: tx.prepare("INSERT INTO tracks_fts(rowid, title, artist, album) VALUES (?1, ?2, ?3, ?4)")?,
+            mark_seen: tx.prepare("UPDATE tracks SET missing_since = NULL WHERE id = ?1 AND missing_since IS NOT NULL")?,
+        })
+    }
+
+    fn artist(&mut self, name: &str) -> Result<i64> {
+        if let Some(id) = self.artist_ids.get(name) {
+            return Ok(*id);
+        }
+        let found: Option<i64> = self.find_artist.query_row([name], |r| r.get(0)).ok();
+        let id = match found {
+            Some(id) => id,
+            None => {
+                self.add_artist.execute(params![name, sort_key(name)])?;
+                self.tx.last_insert_rowid()
+            }
+        };
+        self.artist_ids.insert(name.to_string(), id);
+        Ok(id)
+    }
+
+    fn album(&mut self, artist_id: i64, title: &str, year: Option<i32>) -> Result<i64> {
+        let key = (artist_id, title.to_string());
+        if let Some(id) = self.album_ids.get(&key) {
+            return Ok(*id);
+        }
+        let found: Option<i64> = self
+            .find_album
+            .query_row(params![artist_id, title], |r| r.get(0))
+            .ok();
+        let id = match found {
+            Some(id) => id,
+            None => {
+                self.add_album
+                    .execute(params![title, artist_id, year, sort_key(title)])?;
+                self.tx.last_insert_rowid()
+            }
+        };
+        self.album_ids.insert(key, id);
+        Ok(id)
+    }
+
+    /// The track's artist, and its album under the album's artist.
+    fn place(&mut self, t: &NewTrack) -> Result<(i64, Option<i64>)> {
+        let artist_id = self.artist(&t.artist)?;
+        let album_id = match &t.album {
+            None => None,
+            Some(title) => {
+                let by = match t
+                    .album_artist
+                    .as_deref()
+                    .filter(|name| !name.trim().is_empty())
+                {
+                    Some(name) => self.artist(name)?,
+                    None => artist_id,
+                };
+                Some(self.album(by, title, t.year)?)
+            }
+        };
+        Ok((artist_id, album_id))
+    }
+
+    fn insert(&mut self, t: &NewTrack) -> Result<()> {
+        let (artist_id, album_id) = self.place(t)?;
+        self.add_track.execute(params![
+            t.title,
+            artist_id,
+            album_id,
+            t.disc_no,
+            t.track_no,
+            t.duration_ms as i64,
+            t.isrc,
+            t.origin.as_str(),
+            t.addon_id,
+            t.locator,
+            t.codec,
+            t.sample_rate,
+            t.bit_depth,
+            t.added_at,
+            sort_key(&t.title),
+            t.file_size.map(|s| s as i64),
+            t.file_mtime,
+        ])?;
+        let id = self.tx.last_insert_rowid();
+        self.add_fts
+            .execute(params![id, t.title, t.artist, t.album])?;
+        Ok(())
+    }
+
+    fn update(&mut self, id: i64, t: &NewTrack) -> Result<()> {
+        let (artist_id, album_id) = self.place(t)?;
+        self.change_track.execute(params![
+            t.title,
+            artist_id,
+            album_id,
+            t.disc_no,
+            t.track_no,
+            t.duration_ms as i64,
+            t.isrc,
+            t.codec,
+            t.sample_rate,
+            t.bit_depth,
+            sort_key(&t.title),
+            t.file_size.map(|s| s as i64),
+            t.file_mtime,
+            id,
+        ])?;
+        self.drop_fts.execute([id])?;
+        self.add_fts
+            .execute(params![id, t.title, t.artist, t.album])?;
+        Ok(())
+    }
+
+    fn seen(&mut self, id: i64) -> Result<()> {
+        self.mark_seen.execute([id])?;
+        Ok(())
+    }
+}
+
 /// How a name sorts: lower case, without a leading article, so "The Beatles" files under B.
 pub fn sort_key(name: &str) -> String {
     let lower = name.trim().to_lowercase();
@@ -395,6 +575,7 @@ mod tests {
         NewTrack {
             title: title.into(),
             artist: artist.into(),
+            album_artist: None,
             album: Some(album.into()),
             year: Some(1993),
             disc_no: 1,
@@ -408,6 +589,8 @@ mod tests {
             sample_rate: Some(44_100),
             bit_depth: Some(16),
             added_at: 1_700_000_000,
+            file_size: None,
+            file_mtime: None,
         }
     }
 

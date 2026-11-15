@@ -15,9 +15,10 @@ A desktop music client for Windows, macOS and Linux, from the people who make [S
 ## How it is built
 
 ```
-crates/stash-core   the core: library database (SQLite + full-text search), the audio engine
-                    (libmpv, loaded at run time) and the add-on client; soon the local API
-crates/stashd       the core without a window: a command line for now, the local server later
+crates/stash-core   the core: library database (SQLite + full-text search), folder scanning, the audio
+                    engine (libmpv, loaded at run time) and the add-on client
+crates/stashd       the core without a window: the local API (`serve`) and commands to scan, measure
+                    and check a sound card
 apps/desktop/ui     the window's UI (Svelte): a track list over 100,000 rows and search, through the local API
 apps/desktop/src-tauri  the desktop shell (Tauri): one program holding the core and the UI, in a window
 scripts/            fetch-mpv.ps1 downloads the pinned libmpv build the engine is tested against
@@ -41,6 +42,8 @@ target/release/stashd bench --db test.db
 ```
 
 `synth` makes a library of made-up tracks (the same every time for the same seed); `bench` measures opening, searching and paging it.
+
+To use your own music instead: `target/release/stashd scan --db my.db <your music folder>` reads the tags of every audio file under the folder into a library. Run it again any time: only new and changed files are read, and files that are gone are marked missing, not deleted.
 
 To see the UI: `cd apps/desktop/ui && npm install && npm run build`, then `target/release/stashd serve --db test.db --ui apps/desktop/ui/dist` and open http://127.0.0.1:47821.
 
