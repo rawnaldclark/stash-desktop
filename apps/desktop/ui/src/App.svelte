@@ -1,7 +1,25 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import NowPlaying from "./lib/NowPlaying.svelte";
   import VirtualList from "./lib/VirtualList.svelte";
-  import { counts as fetchCounts, measuring, postMeasurement, search, tracksAt, type Counts, type TrackRow } from "./lib/api";
+  import {
+    counts as fetchCounts,
+    IDLE,
+    measuring,
+    nextTrack,
+    player as fetchPlayer,
+    playFrom,
+    playTracks,
+    postMeasurement,
+    previousTrack,
+    search,
+    seekTo,
+    setPaused,
+    tracksAt,
+    type Counts,
+    type PlayerState,
+    type TrackRow,
+  } from "./lib/api";
   import { measure, type Drawn } from "./lib/bench";
 
   const ROW_HEIGHT = 34;
@@ -22,6 +40,33 @@
     if (marks.firstRowsDataMs === undefined && state.last > state.first && state.loaded === state.last - state.first) {
       marks.firstRowsDataMs = Math.round(performance.now());
     }
+  }
+
+  /** The player as the core last reported it, and when (the position is carried forward between reports). */
+  let playing: PlayerState = $state(IDLE);
+  let reportedAt = 0;
+  let now = $state(0);
+
+  function heard(state: PlayerState) {
+    playing = state;
+    reportedAt = performance.now();
+    now = reportedAt;
+  }
+
+  /** The player with its position moved on by the time since the core's report, so the bar runs smoothly. */
+  const shown: PlayerState = $derived.by(() => {
+    if (playing.status !== "playing" || !playing.duration_ms) return playing;
+    const position = Math.min(playing.duration_ms, playing.position_ms + (now - reportedAt));
+    return { ...playing, position_ms: position };
+  });
+
+  const act = (call: Promise<PlayerState>) => call.then(heard).catch(() => {});
+
+  function toggle(event: KeyboardEvent) {
+    const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement;
+    if (event.code !== "Space" || typing || !playing.track) return;
+    event.preventDefault();
+    act(setPaused(playing.status === "playing"));
   }
 
   let searching: AbortController | undefined;
@@ -59,6 +104,26 @@
     return codec === "OPUS" ? "Opus" : codec;
   }
 
+  // Once the core answers: it is asked twice a second while something plays, and now and then when nothing does.
+  $effect(() => {
+    if (measuring || !counts) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ask = async () => {
+      const state = await fetchPlayer().catch(() => null);
+      if (stopped) return;
+      if (state) heard(state);
+      timer = setTimeout(ask, state && state.status !== "idle" ? 500 : 1500);
+    };
+    ask();
+    const tick = setInterval(() => (now = performance.now()), 250);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      clearInterval(tick);
+    };
+  });
+
   onMount(async () => {
     try {
       counts = await fetchCounts();
@@ -87,7 +152,7 @@
 {#snippet trackRow(track: TrackRow | undefined, index: number)}
   {#if track}
     <span class="n">{index + 1}</span>
-    <span class="title">{track.title}</span>
+    <span class="title" class:now={track.id === playing.track?.id}>{track.title}</span>
     <span class="artist">{track.artist}</span>
     <span class="album">{track.album ?? ""}</span>
     <span class="format">{format(track)}</span>
@@ -119,7 +184,14 @@
     {:else}
       <div class="results" role="list">
         {#each results as track, i (track.id)}
-          <div class="row" role="listitem" style:height="{ROW_HEIGHT}px">{@render trackRow(track, i)}</div>
+          <div
+            class="row"
+            role="listitem"
+            style:height="{ROW_HEIGHT}px"
+            ondblclick={() => act(playTracks(results.slice(i).map((r) => r.id)))}
+          >
+            {@render trackRow(track, i)}
+          </div>
         {/each}
       </div>
     {/if}
@@ -131,9 +203,20 @@
       fetchPage={tracksAt}
       row={trackRow}
       onDrawn={noteDrawn}
+      onActivate={(index) => act(playFrom(index))}
     />
   {/if}
 </main>
+
+<NowPlaying
+  player={shown}
+  onPause={(paused) => act(setPaused(paused))}
+  onNext={() => act(nextTrack())}
+  onPrevious={() => act(previousTrack())}
+  onSeek={(seconds) => act(seekTo(seconds))}
+/>
+
+<svelte:window onkeydown={toggle} />
 
 <style>
   header {
@@ -204,6 +287,10 @@
   :global(.row .album),
   :global(.row .format) {
     color: var(--soft);
+  }
+  :global(.row .title.now) {
+    color: var(--accent);
+    font-weight: 600;
   }
   :global(.row:hover) {
     background: var(--hover);

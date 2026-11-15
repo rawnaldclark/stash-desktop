@@ -157,3 +157,15 @@ This is a best case: small files that the system had just written and still held
 
 A real collection (large FLAC files with embedded pictures, a spinning disk, a network share), watching a folder for changes instead of re-scanning, and files moved or renamed (today: one missing, one added).
 
+## 6. Playing from the window
+
+Not a measurement, a check of the whole path: library, local API, player, engine, sound card, and back to the window.
+
+- **In a browser, on a silent output** (`stashd serve --silent`, 30 scanned tracks of 12 s): double-clicking a row plays it and queues the rows after it; the playing row is marked; the queue moves on by itself at the end of a track; pause holds the position; next and previous move through the queue; a click three quarters along the bar lands at 0:09 of 0:12; a double-click in search results plays from that result with the results after it; Space pauses when the search box is not in use; stopping returns the bar to rest.
+- **In the desktop app, on the real sound card** (the same library; the files are digital silence): the engine beside the program is found, the chosen row plays with the rest queued, and the signal path reads `PCM 16-bit 44.1 kHz → shared 32-bit float 48 kHz, resampled, format changed`. That is the truth for this device in shared mode (section 2): the bar says so in the colour for "changed on the way".
+- **By the tests** (`tests/player.rs`, `crates/stashd/tests/api.rs`): the same controls against the engine directly and over HTTP, on a silent output.
+
+### Not covered yet
+
+Exclusive mode from the window (it is an environment switch, `STASH_EXCLUSIVE=1`, not a setting yet), a queue view, volume, shuffle and repeat, and playing an add-on's track from the window.
+

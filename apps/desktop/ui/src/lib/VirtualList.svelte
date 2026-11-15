@@ -12,9 +12,11 @@
     row: Snippet<[Row | undefined, number]>;
     /** Called after rows were drawn: how many of the rows on screen had their data. */
     onDrawn?: (state: { first: number; last: number; loaded: number }) => void;
+    /** A row was double-clicked. */
+    onActivate?: (index: number, data: Row | undefined) => void;
   };
 
-  let { count, rowHeight = 34, pageSize = 200, fetchPage, row, onDrawn }: Props = $props();
+  let { count, rowHeight = 34, pageSize = 200, fetchPage, row, onDrawn, onActivate }: Props = $props();
 
   const OVERSCAN = 12;
   const KEEP_PAGES = 24;
@@ -100,7 +102,9 @@
   <div class="spacer" style:height="{count * rowHeight}px">
     <div class="rows" style:transform="translateY({first * rowHeight}px)">
       {#each visible as item (item.index)}
-        <div class="row" role="listitem" style:height="{rowHeight}px">{@render row(item.data, item.index)}</div>
+        <div class="row" role="listitem" style:height="{rowHeight}px" ondblclick={() => onActivate?.(item.index, item.data)}>
+          {@render row(item.data, item.index)}
+        </div>
       {/each}
     </div>
   </div>

@@ -229,15 +229,21 @@ pub fn tracks(count: usize, seed: u64) -> impl Iterator<Item = NewTrack> {
     })
 }
 
-/// Writes `count` made-up tracks as real files under `root` (`Artist/Album/NN Title.wav`): a tenth of a second of
+/// Writes `count` made-up tracks as real files under `root` (`Artist/Album/NN Title.wav`): `seconds` of
 /// silence each, with ID3 tags, so a folder scan has something true to read. Returns how many were written.
-pub fn write_files(root: &std::path::Path, count: usize, seed: u64) -> std::io::Result<usize> {
+pub fn write_files(
+    root: &std::path::Path,
+    count: usize,
+    seed: u64,
+    seconds: f32,
+) -> std::io::Result<usize> {
     use lofty::config::WriteOptions;
     use lofty::prelude::*;
     use lofty::tag::{Tag, TagType};
 
-    // 16-bit stereo, 44.1 kHz, 4,410 frames of silence.
-    let data_bytes: u32 = 4_410 * 4;
+    // 16-bit stereo, 44.1 kHz, silence.
+    let frames = (44_100.0 * seconds.clamp(0.05, 600.0)) as u32;
+    let data_bytes: u32 = frames * 4;
     let mut wav = Vec::with_capacity(44 + data_bytes as usize);
     wav.extend_from_slice(b"RIFF");
     wav.extend_from_slice(&(36 + data_bytes).to_le_bytes());

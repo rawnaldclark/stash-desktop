@@ -51,6 +51,9 @@ enum Command {
         /// Run without a player.
         #[arg(long)]
         no_audio: bool,
+        /// Play to nowhere, at the speed of a sound card: everything works, nothing is heard.
+        #[arg(long)]
+        silent: bool,
     },
     /// Play a moment of silence at several formats and report what the sound card opened at for each.
     OutputCheck {
@@ -80,6 +83,9 @@ enum Command {
         tracks: usize,
         #[arg(long, default_value_t = 1)]
         seed: u64,
+        /// How long each file is, in seconds.
+        #[arg(long, default_value_t = 0.1)]
+        seconds: f32,
     },
     /// Measure opening, searching and paging a library, as a list or grid would use it.
     Bench {
@@ -96,8 +102,13 @@ fn main() -> Result<()> {
         Command::Synth { db, tracks, seed } => synth_library(&db, tracks, seed),
         Command::Bench { db, json } => bench(&db, json),
         Command::Scan { db, folder } => scan(&db, &folder),
-        Command::SynthFiles { dir, tracks, seed } => {
-            let written = synth::write_files(&dir, tracks, seed)
+        Command::SynthFiles {
+            dir,
+            tracks,
+            seed,
+            seconds,
+        } => {
+            let written = synth::write_files(&dir, tracks, seed, seconds)
                 .with_context(|| format!("writing into {}", dir.display()))?;
             println!("{written} files written under {}", dir.display());
             Ok(())
@@ -115,12 +126,17 @@ fn main() -> Result<()> {
             mpv,
             exclusive,
             no_audio,
+            silent,
         } => stashd::serve::serve(stashd::serve::Options {
             db,
             ui,
             port,
             bench_out,
-            audio: (!no_audio).then_some(stash_core::audio::Output::Device { exclusive }),
+            audio: match (no_audio, silent) {
+                (true, _) => None,
+                (false, true) => Some(stash_core::audio::Output::Silent),
+                (false, false) => Some(stash_core::audio::Output::Device { exclusive }),
+            },
             mpv,
         }),
     }

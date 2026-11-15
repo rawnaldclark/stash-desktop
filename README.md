@@ -2,7 +2,7 @@
 
 A desktop music client for Windows, macOS and Linux, from the people who make [Stash](https://github.com/rawnaldclark/Stash) for Android.
 
-**Status: early prototype.** There is no app to download yet. What is here is the core, a first window, and the measurements that decide whether the design holds.
+**Status: early prototype.** There is no app to download yet. What is here: a core that scans a music folder, searches it and plays it gapless, a first window that lists, searches and plays, and the measurements that decide whether the design holds.
 
 ## What it is going to be
 
@@ -47,7 +47,9 @@ To use your own music instead: `target/release/stashd scan --db my.db <your musi
 
 To see the UI: `cd apps/desktop/ui && npm install && npm run build`, then `target/release/stashd serve --db test.db --ui apps/desktop/ui/dist` and open http://127.0.0.1:47821.
 
-To run the desktop app on that library: build the UI as above, then `cargo build --release -p stash-desktop` and start `target/release/stash-desktop` with `STASH_DB` set to the path of `test.db`. Without `STASH_DB` it opens (and creates) an empty library in your user data folder; there is no way to add music from the window yet.
+To run the desktop app on that library: build the UI as above, then `cargo build --release -p stash-desktop` and start `target/release/stash-desktop` with `STASH_DB` set to the path of `test.db`. Without `STASH_DB` it opens (and creates) an empty library in your user data folder; scanning is a command for now (above), not a button.
+
+To hear it, the programs need libmpv: copy `third_party/mpv/libmpv-2.dll` beside them in `target/release/`, or set `STASH_MPV_LIBRARY` to its path. Then double-click a track. The bar at the bottom shows what is playing and the signal path: what the engine decoded and what the sound card was opened at. `STASH_EXCLUSIVE=1` takes the sound card for Stash alone. `stashd serve --silent` plays to nowhere, for trying the window without sound.
 
 The audio tests need libmpv. On Windows, `powershell -ExecutionPolicy Bypass -File scripts/fetch-mpv.ps1` puts the pinned build in `third_party/mpv/` (it needs 7-Zip). Elsewhere, point `STASH_MPV_LIBRARY` at your system's libmpv. Without it those tests say they were skipped and the rest still run.
 

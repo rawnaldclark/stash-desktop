@@ -8,6 +8,7 @@
   --field: #1a1d21;
   --hover: #1b1f24;
   --accent: #6aa9ff;
+  --warn: #e0a84e;
   font: 14px/1.4 system-ui, "Segoe UI", sans-serif;
 }
 
@@ -21,6 +22,7 @@
     --field: #ffffff;
     --hover: #f0f2f5;
     --accent: #1f6fe0;
+    --warn: #9a6200;
   }
 }
 
