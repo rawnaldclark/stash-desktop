@@ -48,6 +48,8 @@ const WORKERS: usize = 8;
 const TEXT_CAP: usize = 300;
 /// How long an add-on that did not have a song is not asked for it again.
 const MISS_MEMORY: Duration = Duration::from_secs(6 * 3600);
+/// How long after it last found a song an add-on's "I don't have it" is believed (see [`Lacks`]).
+const FINDING: Duration = Duration::from_secs(30 * 60);
 /// The most tracks of an add-on one search shows, and one play request queues.
 const ADDON_TRACKS_CAP: usize = 200;
 
@@ -133,13 +135,13 @@ fn capped(text: &str) -> String {
 
 /// An add-on the listener added, as the core holds it while it runs.
 pub(crate) struct Loaded {
-    stored: StoredAddon,
+    pub(crate) stored: StoredAddon,
     /// Ready to be asked, or why it cannot be (what was kept no longer passes the checks).
     addon: std::result::Result<Addon, String>,
 }
 
 impl Loaded {
-    fn usable(&self) -> Option<&Addon> {
+    pub(crate) fn usable(&self) -> Option<&Addon> {
         self.addon.as_ref().ok().filter(|_| self.stored.enabled)
     }
 
@@ -189,21 +191,49 @@ fn stream_from(addon: &Addon, id: &str, track: &str) -> std::result::Result<Loca
         })
 }
 
-/// How the player finds where a track plays from.
-///
-/// An add-on's own track is asked of that add-on. A song the library knows by its description is asked of the
-/// listener's add-ons in their order: the name an add-on gave the song before is tried first, else the add-on is
-/// asked whether it has the song (the contract's `resolve`: which of its tracks is the same song is the add-on's to
-/// say), and an add-on that can only search is searched for it ([`matching`]). The first add-on that gives a stream wins, and the name it gave is kept for next time.
 /// What each add-on was found not to have, and when: (the song, the add-on). It is not asked again for a while, so a
-/// queue of songs it lacks does not spend the listener's allowance there on the same answers.
+/// queue of songs it lacks does not spend the listener's allowance there on the same answers. And when each add-on
+/// last found a song: its "I don't have it" is believed only while it is finding others (an add-on whose allowance is
+/// spent, or of the wrong kind, may answer "nothing" to everything).
 #[derive(Default)]
-pub(crate) struct Lacks(Mutex<HashMap<(i64, String), Instant>>);
+pub(crate) struct Lacks {
+    missed: Mutex<HashMap<(i64, String), Instant>>,
+    found: Mutex<HashMap<String, Instant>>,
+}
+
+impl Lacks {
+    /// Forgets what the add-ons were found not to have of the song `id` (the listener fixed it).
+    pub(crate) fn forget(&self, id: i64) {
+        self.missed
+            .lock()
+            .unwrap()
+            .retain(|(song, _), _| *song != id);
+    }
+
+    fn found_by(&self, addon: &str) {
+        self.found
+            .lock()
+            .unwrap()
+            .insert(addon.to_string(), Instant::now());
+    }
+
+    fn finding(&self, addon: &str) -> bool {
+        self.found
+            .lock()
+            .unwrap()
+            .get(addon)
+            .is_some_and(|at| at.elapsed() < FINDING)
+    }
+}
 
 /// Asks the listener's add-ons that can (`can`) for the library's song `id`, in the listener's order, and does `act`
 /// with the first that has it: the add-on's own name for the song is tried first, then the add-on is asked whether
 /// it has the song (or searched, when it can only be searched; a result is taken only when it is the same song by
 /// the contract's rule). Answers what `act` gave and which add-on gave it. `none` says why when no add-on can.
+///
+/// When every add-on that could be asked said it does not have the song, and each of them is finding other songs,
+/// the song goes on the list of songs no add-on could find (for the listener to fix); found, it leaves that list.
+/// Trouble with an add-on (it could not be reached, its allowance is spent) never puts a song there.
 pub(crate) fn through_addons<T>(
     registry: &Registry,
     library: &Mutex<Library>,
@@ -238,6 +268,14 @@ pub(crate) fn through_addons<T>(
     }
     // Trouble with an add-on is not "it does not have the song": it is said, and asking again may help.
     let mut trouble: Option<AddonError> = None;
+    // The add-ons that said they do not have it (now, or a little while ago), and whether one had it but could not
+    // give it.
+    let mut said_no: Vec<&str> = Vec::new();
+    let mut had_it = false;
+    let found = |addon_id: &str| {
+        lacks.found_by(addon_id);
+        let _ = library.lock().unwrap().found_again(id);
+    };
     for loaded in &addons {
         let Some(addon) = loaded.usable() else {
             continue;
@@ -250,12 +288,18 @@ pub(crate) fn through_addons<T>(
             .map(|(_, theirs)| theirs.clone());
         if let Some(track) = &known {
             match act(addon, addon_id, track) {
-                Ok(done) => return Ok((done, addon_id.to_string())),
+                Ok(done) => {
+                    found(addon_id);
+                    return Ok((done, addon_id.to_string()));
+                }
                 // The add-on no longer knows that name: it is forgotten, and the add-on is asked for the song.
                 Err(e) if e.code == Code::NotFound => {
                     let _ = library.lock().unwrap().drop_ref(id, addon_id);
                 }
-                Err(e) if e.is_miss() => continue,
+                Err(e) if e.is_miss() => {
+                    had_it = true;
+                    continue;
+                }
                 Err(e) => {
                     trouble = Some(e);
                     continue;
@@ -264,15 +308,17 @@ pub(crate) fn through_addons<T>(
         }
         let lacked = (id, addon_id.to_string());
         if lacks
-            .0
+            .missed
             .lock()
             .unwrap()
             .get(&lacked)
             .is_some_and(|at| at.elapsed() < MISS_MEMORY)
         {
+            said_no.push(addon_id);
             continue;
         }
-        let asked = if addon.offers_resource("resolve") {
+        let resolving = addon.offers_resource("resolve");
+        let asked = if resolving {
             addon.resolve(&described.wanted, None)
         } else if addon.offers_resource("search") {
             addon
@@ -285,11 +331,17 @@ pub(crate) fn through_addons<T>(
             Ok(Some(track)) => track,
             // It does not have the song, or what it answered cannot be this song.
             Ok(None) => {
-                lacks.0.lock().unwrap().insert(lacked, Instant::now());
+                lacks.missed.lock().unwrap().insert(lacked, Instant::now());
+                said_no.push(addon_id);
                 continue;
             }
+            // A wrong answer to "do you have this song" (the host refused it as another song) is a no; a broken
+            // search answer is not.
             Err(e) if e.is_miss() || e.code == Code::InvalidResponse => {
-                lacks.0.lock().unwrap().insert(lacked, Instant::now());
+                lacks.missed.lock().unwrap().insert(lacked, Instant::now());
+                if e.is_miss() || resolving {
+                    said_no.push(addon_id);
+                }
                 continue;
             }
             Err(e) => {
@@ -300,9 +352,13 @@ pub(crate) fn through_addons<T>(
         match act(addon, addon_id, &track.id) {
             Ok(done) => {
                 let _ = library.lock().unwrap().set_ref(id, addon_id, &track.id);
+                found(addon_id);
                 return Ok((done, addon_id.to_string()));
             }
-            Err(e) if e.is_miss() => continue,
+            Err(e) if e.is_miss() => {
+                had_it = true;
+                continue;
+            }
             Err(e) => {
                 trouble = Some(e);
                 continue;
@@ -314,10 +370,40 @@ pub(crate) fn through_addons<T>(
             message: e.in_words(),
             miss: false,
         },
-        None => gone("none of your add-ons has it"),
+        None => {
+            // Noted only when every add-on that can play songs and be asked for one said no (on the way to saving, an
+            // add-on that only streams was not asked), and each of them is finding others.
+            let askable: Vec<String> = registry
+                .read()
+                .unwrap()
+                .iter()
+                .filter(|a| {
+                    a.usable().is_some_and(|addon| {
+                        addon.offers_resource("stream")
+                            && (addon.offers_resource("resolve") || addon.offers_resource("search"))
+                    })
+                })
+                .map(|a| a.stored.id.clone())
+                .collect();
+            if !had_it
+                && !said_no.is_empty()
+                && askable.iter().all(|a| said_no.contains(&a.as_str()))
+                && said_no.iter().all(|a| lacks.finding(a))
+            {
+                let _ = library.lock().unwrap().note_unfound(id, now_ms());
+            }
+            gone("none of your add-ons has it")
+        }
     })
 }
 
+/// How the player finds where a track plays from.
+///
+/// An add-on's own track is asked of that add-on. A song the library knows by its description is asked of the
+/// listener's add-ons in their order: the name an add-on gave the song before is tried first, else the add-on is
+/// asked whether it has the song (the contract's `resolve`: which of its tracks is the same song is the add-on's to
+/// say), and an add-on that can only search is searched for it ([`matching`]). The first add-on that gives a stream
+/// wins, and the name it gave is kept for next time.
 fn resolver(registry: Registry, library: Arc<Mutex<Library>>, lacks: Arc<Lacks>) -> Resolver {
     Arc::new(move |item: &QueueItem| {
         let gone = |why: &str| Failure {
@@ -1170,7 +1256,7 @@ fn devices_reply(state: &State, playing: &Player) -> Value {
 
 /// Asks `asked` for tracks matching `query`, all at once; one group of results (or one reason) per add-on, in the
 /// order given.
-fn search_addons(asked: &[Arc<Loaded>], query: &str, limit: usize) -> Vec<Value> {
+pub(crate) fn search_addons(asked: &[Arc<Loaded>], query: &str, limit: usize) -> Vec<Value> {
     let one = |loaded: &Loaded| {
         let who = json!({ "id": loaded.stored.id, "name": loaded.listed()["name"] });
         let Some(addon) = loaded.usable() else {
@@ -1544,6 +1630,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::saving::route(state, request, &path, &param)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::unfound::route(state, request, &path, &param)? {
         return Ok((response, false));
     }
     // One album or one artist: /api/albums/{id}, /api/artists/{id}; the picture of a file: /api/art/track/{id}

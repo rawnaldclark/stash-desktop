@@ -4,6 +4,9 @@
 	import { tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { library, player, saveSongs, unsaveSongs } from '../app';
+	import { setAside } from '../core';
+	import { NF } from '../desktop/unfound.svelte';
+	import { LIB_REF } from '../identity';
 	import { albumHref, albumLink, artistHref, artistLink } from '../identity';
 	import Icon from './Icon.svelte';
 	import type { IconName } from './icons';
@@ -20,6 +23,15 @@
 	const targets = $derived(m ? (m.group?.length ? m.group : [m.item]) : []);
 	const isGroup = $derived(!!m?.group?.length);
 	const allLiked = $derived(targets.length > 0 && targets.every((t) => L.isLiked(t)));
+	/** A song no add-on could find: to Library › Not found, opened on it (back on the list if it was set aside). */
+	async function findIt(row: string) {
+		try {
+			NF.take(await setAside([Number(row)], false));
+		} catch {
+			/* it opens anyway */
+		}
+		go(`/library?tab=notfound&song=${row}`);
+	}
 	function likeAll() {
 		const like = !allLiked;
 		for (const t of targets) if (L.isLiked(t) !== like) void (like ? library.like(t) : library.unlike(t));
@@ -144,6 +156,9 @@
 					void saveSongs(targets).then((said) => ui.toast(said), () => {});
 					close();
 				})}
+			{/if}
+			{#if !isGroup && NF.has(m.item)}
+				{@render entry('search', 'Find on your add-ons…', () => run(() => void findIt(m.item.refs[LIB_REF])))}
 			{/if}
 			{#if m.queueIndex !== undefined}
 				{#if m.queueIndex > 0}{@render entry('arrow_upward', 'Move up', () => run(() => player.move(m.queueIndex!, m.queueIndex! - 1)))}{/if}

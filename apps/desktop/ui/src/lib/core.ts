@@ -334,6 +334,21 @@ export const retrySaving = (ids: number[] = []) => post<Downloads>('/api/downloa
 /** Where new songs are saved: a folder, or one picked in the system's dialog. */
 export const setDownloadsFolder = (where: { folder: string } | { pick: true }) => post<Downloads>('/api/downloads/folder', where);
 
+// ---- Not found: songs no add-on could find, fixed by hand
+
+export type UnfoundRow = TrackRow & { first_at_ms: number; last_at_ms: number };
+/** The list (newest miss first), how many are on it, and every song known not to play (on it or set aside). */
+export type Unfound = { rows: UnfoundRow[]; open: number; marked: number[]; saving?: boolean };
+/** The add-ons' closest results for one song, and the words searched. */
+export type Candidates = { query: string; groups: AddonGroup[] };
+export const unfound = (offset: number, limit: number) => get<Unfound>(`/api/unfound?offset=${offset}&limit=${limit}`);
+export const candidates = (id: number, words?: string, signal?: AbortSignal) =>
+	get<Candidates>(`/api/unfound/${id}/candidates${words ? `?q=${encodeURIComponent(words)}` : ''}`, signal);
+/** The listener's pick: kept as that add-on's name for the song. `saving`: a save of it that failed goes again. */
+export const fixSong = (id: number, addon: string, track: string) => post<Unfound>('/api/unfound/fix', { id, addon, track });
+/** "None of these" (or, with `aside` false, back on the list). */
+export const setAside = (ids: number[], aside = true) => post<Unfound>('/api/unfound/aside', { ids, aside });
+
 // ---- Lyrics
 
 /** A song's lyrics and where they came from (".lrc file", "the file's tags", an add-on's name, "LRCLIB"); `lyrics` null for none. */

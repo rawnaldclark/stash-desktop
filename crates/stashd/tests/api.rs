@@ -2452,3 +2452,151 @@ fn the_page_asks_the_program_around_the_core_for_the_mini_player() {
     assert_eq!(ask(&base, json!({ "view": "mini" })).0, 503);
     assert_eq!(*asked.lock().unwrap(), [View::Mini, View::Full, View::Mini]);
 }
+
+#[test]
+fn songs_no_add_on_finds_wait_to_be_fixed_by_hand() {
+    let dir = std::env::temp_dir().join(format!("stash-api-unfound-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (served, saved) = (dir.join("Served"), dir.join("Saved"));
+    std::fs::create_dir_all(&served).unwrap();
+    silence(&served.join("golf.wav"));
+    silence(&served.join("hotel.wav"));
+    let addon = DemoAddon::bind(&served, 0, Duration::ZERO).unwrap();
+    let link = addon.link();
+    std::thread::spawn(move || addon.run());
+    let core = Core::bind(Options {
+        db: dir.join("library.db"),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: None,
+        mpv: None,
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    client.post(
+        "/api/downloads/folder",
+        json!({ "folder": saved.to_string_lossy() }),
+    );
+    // Golf is on the add-on; Hotel is too, but the library's length for it is not the add-on's (so asking for it
+    // finds nothing); India is nowhere.
+    let song = |title: &str, ms: u64| json!({ "title": title, "artist": "Unknown artist", "durationMs": ms });
+    let file = json!({
+        "kind": "stash-web-library", "v": 1, "generator": "a test",
+        "likes": [
+            { "item": song("golf", 2_000), "likedAt": 1_759_838_400_300i64 },
+            { "item": song("hotel", 95_000), "likedAt": 1_759_838_400_200i64 },
+            { "item": song("india", 2_000), "likedAt": 1_759_838_400_100i64 }
+        ]
+    })
+    .to_string();
+    assert_eq!(client.upload("/api/import", file.as_bytes()).0, 200);
+    client.post("/api/addons", json!({ "link": link }));
+    let id = |title: &str| {
+        client.get(&format!("/api/search?q={title}&limit=1")).1["rows"][0]["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let (golf, hotel, india) = (id("golf"), id("hotel"), id("india"));
+    let save = |ids: &[i64]| {
+        client.post("/api/downloads", json!({ "ids": ids }));
+        client.post("/api/downloads/retry", json!({ "ids": ids }));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let (_, list) = client.get("/api/downloads");
+            if list["counts"]["queued"] == 0 && list["counts"]["saving"] == 0 {
+                return list;
+            }
+            assert!(Instant::now() < deadline, "still saving: {list}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let unfound = || client.get("/api/unfound").1;
+
+    // An add-on's "I don't have it" counts only once it is finding other songs.
+    save(&[india]);
+    assert_eq!(unfound()["open"], 0);
+    let list = save(&[golf]);
+    assert_eq!(list["counts"]["saved"], 1, "{list}");
+    save(&[india, hotel]);
+    let listed = unfound();
+    let mut titles: Vec<&str> = listed["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["title"].as_str().unwrap())
+        .collect();
+    titles.sort_unstable();
+    assert_eq!(
+        (listed["open"].as_u64(), titles),
+        (Some(2), vec!["hotel", "india"]),
+        "{listed}"
+    );
+    let mut marked: Vec<i64> = serde_json::from_value(listed["marked"].clone()).unwrap();
+    marked.sort_unstable();
+    assert_eq!(marked, {
+        let mut both = vec![hotel, india];
+        both.sort_unstable();
+        both
+    });
+
+    // The add-on's closest results for Hotel, searched as the library knows it, or in other words.
+    let (status, found) = client.get(&format!("/api/unfound/{hotel}/candidates"));
+    assert_eq!(status, 200, "{found}");
+    assert_eq!(found["query"].as_str(), Some("Unknown artist hotel"));
+    let tracks = &found["groups"][0]["tracks"];
+    let pick = tracks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["title"] == "hotel")
+        .unwrap_or_else(|| panic!("{found}"))["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        client
+            .get(&format!("/api/unfound/{hotel}/candidates?q=golf"))
+            .1["query"]
+            .as_str(),
+        Some("golf")
+    );
+    assert_eq!(client.get("/api/unfound/12345678/candidates").0, 404);
+
+    // Picked: it leaves the list, and the save that failed goes again and comes from the pick.
+    let fixed = client.post(
+        "/api/unfound/fix",
+        json!({ "id": hotel, "addon": "demo.folder", "track": pick }),
+    );
+    assert_eq!(
+        (fixed["open"].as_u64(), fixed["saving"].as_bool()),
+        (Some(1), Some(true)),
+        "{fixed}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while client.get("/api/downloads").1["counts"]["saved"] != 2 {
+        assert!(
+            Instant::now() < deadline,
+            "{}",
+            client.get("/api/downloads").1
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(saved.join("Unknown artist").join("hotel.wav").is_file());
+
+    // "None of these": off the list, still known not to play.
+    let aside = client.post("/api/unfound/aside", json!({ "ids": [india] }));
+    assert_eq!(
+        (aside["open"].as_u64(), aside["marked"].clone()),
+        (Some(0), json!([india]))
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

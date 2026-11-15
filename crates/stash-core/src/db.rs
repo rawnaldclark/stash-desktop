@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
@@ -237,6 +237,18 @@ const V9: &str = "
     CREATE INDEX downloads_state ON downloads(state, asked_at);
 ";
 
+/// Songs no add-on could find: every add-on that could be asked said it does not have the song. `aside_at` is when the
+/// listener said none of an add-on's results is it: the song leaves the list and is still known not to play.
+const V10: &str = "
+    CREATE TABLE unfound(
+        track_id  INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+        first_at  INTEGER NOT NULL,
+        last_at   INTEGER NOT NULL,
+        aside_at  INTEGER
+    );
+    CREATE INDEX unfound_last ON unfound(last_at);
+";
+
 /// Opens (or creates) the library at `path` and migrates it to [`SCHEMA_VERSION`].
 pub fn open(path: &std::path::Path) -> Result<Connection> {
     prepare(Connection::open(path)?)
@@ -329,6 +341,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V9)?;
         tx.pragma_update(None, "user_version", 9)?;
+        tx.commit()?;
+    }
+    if found < 10 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V10)?;
+        tx.pragma_update(None, "user_version", 10)?;
         tx.commit()?;
     }
     Ok(())

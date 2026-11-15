@@ -8,6 +8,7 @@
 	import { mmss } from './format';
 	import { openSongMenu, songMenu } from './song-menu';
 	import { S, type MenuState } from './state.svelte';
+	import { NF } from '../desktop/unfound.svelte';
 
 	let {
 		item,
@@ -17,8 +18,11 @@
 		handle = false,
 		onplay,
 		extra = {},
-		tag
-	}: { item: LibraryItem; num?: number; cover?: boolean; album?: boolean; /** a drag handle for reordering (the list wires it with the reorder action) */ handle?: boolean; onplay: () => void; extra?: Partial<MenuState>; /** a small label before the artist (what an add-on says a track's best quality is: "Lossless") */ tag?: string } = $props();
+		tag,
+		hit
+	}: { item: LibraryItem; num?: number; cover?: boolean; album?: boolean; /** a drag handle for reordering (the list wires it with the reorder action) */ handle?: boolean; onplay: () => void; extra?: Partial<MenuState>; /** a small label before the artist (what an add-on says a track's best quality is: "Lossless") */ tag?: string; /** what the row does, when it is not playing the song */ hit?: string } = $props();
+	/** No add-on could find it: drawn dimmed (Library › Not found fixes it). */
+	const off = $derived(NF.has(item));
 
 	// The same row of the library, not only the same song: the one song kept as two files is two rows, and only the copy playing lights up.
 	const current = $derived(!!S.v.current && sameCopy(item, S.v.current));
@@ -34,12 +38,12 @@
 	}
 </script>
 
-<div class="trk-row" class:cur={current} class:has-num={num !== undefined} class:has-cv={cover} class:has-al={album} class:has-rd={handle} use:songMenu={{ item, extra }} role="presentation">
+<div class="trk-row" class:cur={current} class:off class:has-num={num !== undefined} class:has-cv={cover} class:has-al={album} class:has-rd={handle} use:songMenu={{ item, extra }} role="presentation" title={off ? 'Not found on your add-ons' : undefined}>
 	{#if handle}<button type="button" class="rd-h" aria-label="Reorder {item.title}" title="Drag to reorder, or press Arrow Up or Down" aria-keyshortcuts="ArrowUp ArrowDown"><Icon name="drag_indicator" /></button>{/if}
 	<!-- A click anywhere on the row plays it (except on the names that link away); the button inside is the keyboard and screen-reader way in: its Enter or Space click bubbles to the row. -->
 	<!-- svelte-ignore a11y_click_events_have_key_events -->
 	<div class="trk-main" role="presentation" onclick={rowClick}>
-		<button type="button" class="trk-hit" aria-label="Play {item.title} by {item.artist}"></button>
+		<button type="button" class="trk-hit" aria-label={hit ?? `Play ${item.title} by ${item.artist}${off ? ' (not found on your add-ons)' : ''}`}></button>
 		{#if num !== undefined}
 			<span class="tr-n">{#if current}<i class="eq" class:still={!playing} aria-hidden="true"><b></b><b></b><b></b></i>{:else}{num}{/if}</span>
 		{/if}

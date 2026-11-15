@@ -7,6 +7,8 @@
 	import Albums from '../../lib/desktop/Albums.svelte';
 	import Artists from '../../lib/desktop/Artists.svelte';
 	import Downloads from '../../lib/desktop/Downloads.svelte';
+	import NotFound from '../../lib/desktop/NotFound.svelte';
+	import { NF } from '../../lib/desktop/unfound.svelte';
 	import Songs from '../../lib/desktop/Songs.svelte';
 	import { fold } from '../../lib/identity';
 	import Card from '../../lib/ui/Card.svelte';
@@ -15,7 +17,7 @@
 	import { L, LS, ui } from '../../lib/ui/state.svelte';
 	import { dayLabel, songs } from '../../lib/ui/format';
 
-	const TABS = ['songs', 'likes', 'playlists', 'albums', 'artists', 'downloads', 'history'] as const;
+	const TABS = ['songs', 'likes', 'playlists', 'albums', 'artists', 'downloads', 'notfound', 'history'] as const;
 	type Tab = (typeof TABS)[number];
 	const tab = $derived<Tab>(TABS.find((t) => t === page.url.searchParams.get('tab')) ?? 'songs');
 
@@ -26,8 +28,14 @@
 		['albums', 'Albums'],
 		['artists', 'Artists'],
 		['downloads', 'Downloads'],
+		['notfound', 'Not found'],
 		['history', 'History']
 	];
+	// Not found shows only while songs wait on it.
+	const shownTabs = $derived(tabs.filter(([id]) => id !== 'notfound' || NF.open > 0 || tab === 'notfound'));
+	$effect(() => {
+		void NF.refresh();
+	});
 
 	// Sort orders, remembered in this window per tab.
 	const LIKE_SORTS = { recent: 'Recently added', title: 'Title A–Z', artist: 'Artist A–Z', plays: 'Most played', duration: 'Duration' } as const;
@@ -104,7 +112,7 @@
 <div class="view view-in view-library">
 	<h1 class="vh2 lib-title">Your library</h1>
 	<nav class="lib-chips" aria-label="Library sections">
-		{#each tabs as [id, label] (id)}
+		{#each shownTabs as [id, label] (id)}
 			<a class="chip" class:on={tab === id} href="/library?tab={id}" aria-current={tab === id ? 'page' : undefined}>{label}</a>
 		{/each}
 	</nav>
@@ -164,6 +172,8 @@
 		{#key L.changed}<Artists />{/key}
 	{:else if tab === 'downloads'}
 		<Downloads />
+	{:else if tab === 'notfound'}
+		{#key page.url.searchParams.get('song')}<NotFound />{/key}
 	{:else if groups.length}
 		{#each groups as g (g.day)}
 			<p class="caps hist-day">{g.day}</p>

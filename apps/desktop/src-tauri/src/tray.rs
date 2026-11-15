@@ -8,9 +8,9 @@
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use tauri::AppHandle;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::AppHandle;
 
 use crate::windows;
 

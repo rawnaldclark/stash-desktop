@@ -129,10 +129,12 @@ impl Library {
         artists.sort_unstable();
         artists.dedup();
 
+        // Songs no add-on could find are left out: they would only be passed over.
         let playable = if files_only {
             "t.origin = 'file' AND t.missing_since IS NULL"
         } else {
-            "(t.origin = 'described' OR (t.origin = 'file' AND t.missing_since IS NULL))"
+            "(t.origin = 'file' AND t.missing_since IS NULL
+              OR t.origin = 'described' AND NOT EXISTS (SELECT 1 FROM unfound u WHERE u.track_id = t.id))"
         };
         let rested =
             "NOT EXISTS (SELECT 1 FROM plays p WHERE p.track_id = t.id AND p.played_at_ms >= ?1)";
@@ -437,6 +439,120 @@ impl Library {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    // ---- Not found: songs every add-on that could be asked said it does not have. The list fills only from songs the
+    // listener played or asked to save (no add-on is ever asked about the library in bulk), and empties as songs are
+    // found: by the listener picking one of an add-on's results, or by an add-on finding it later.
+
+    /// Notes that no add-on has the song `id`: a song described here, or a file that is gone (an unplugged drive's
+    /// songs are not asked of the add-ons). Noted again, it keeps its place and stays set aside if it was. False when
+    /// `id` is no such song.
+    pub fn note_unfound(&mut self, id: i64, now_ms: i64) -> Result<bool> {
+        Ok(self.conn.execute(
+            "INSERT INTO unfound(track_id, first_at, last_at)
+             SELECT id, ?2, ?2 FROM tracks
+             WHERE id = ?1 AND (origin = 'described' OR (origin = 'file' AND missing_since IS NOT NULL))
+             ON CONFLICT(track_id) DO UPDATE SET last_at = excluded.last_at",
+            params![id, now_ms],
+        )? > 0)
+    }
+
+    /// The song was found after all: it leaves the list, set aside or not.
+    pub fn found_again(&mut self, id: i64) -> Result<bool> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM unfound WHERE track_id = ?1", [id])?
+            > 0)
+    }
+
+    /// The listener picked the add-on's track `theirs` as the song `id`: it is kept as that add-on's name for the
+    /// song (so it plays from there from now on), the song leaves the list, and a save of it that failed is asked
+    /// again. `None` when there is no such song; `Some(true)` when a save was asked again.
+    pub fn fix_unfound(
+        &mut self,
+        id: i64,
+        addon: &str,
+        theirs: &str,
+        now_ms: i64,
+    ) -> Result<Option<bool>> {
+        let tx = self.conn.transaction()?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tracks WHERE id = ?1)",
+            [id],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Ok(None);
+        }
+        tx.execute(
+            "INSERT INTO track_refs(track_id, source, ref) VALUES (?1, ?2, ?3)
+             ON CONFLICT(track_id, source) DO UPDATE SET ref = excluded.ref",
+            params![id, addon, theirs],
+        )?;
+        tx.execute("DELETE FROM unfound WHERE track_id = ?1", [id])?;
+        let saving = tx.execute(
+            "UPDATE downloads SET state = 'queued', error = NULL, asked_at = ?2 WHERE track_id = ?1 AND state = 'failed'",
+            params![id, now_ms],
+        )? > 0;
+        tx.commit()?;
+        Ok(Some(saving))
+    }
+
+    /// Sets songs aside (none of an add-on's results is the song): off the list, still known not to play. With
+    /// `aside` false they are back on it. Answers how many changed.
+    pub fn set_unfound_aside(&mut self, ids: &[i64], aside: bool, now_ms: i64) -> Result<usize> {
+        let mut n = 0;
+        for id in ids {
+            n += self.conn.execute(
+                "UPDATE unfound SET aside_at = ?2 WHERE track_id = ?1",
+                params![id, aside.then_some(now_ms)],
+            )?;
+        }
+        Ok(n)
+    }
+
+    /// The page of songs on the list at `offset` (not set aside, not a file here now), the latest miss first.
+    pub fn unfound_at(&self, offset: usize, limit: usize) -> Result<Vec<UnfoundRow>> {
+        let sql = format!(
+            "SELECT {}, u.first_at, u.last_at
+             FROM (SELECT u.* FROM unfound u JOIN tracks t ON t.id = u.track_id
+                   WHERE u.aside_at IS NULL AND NOT (t.origin = 'file' AND t.missing_since IS NULL)
+                   ORDER BY u.last_at DESC, u.track_id LIMIT ?1 OFFSET ?2) u
+             JOIN tracks t ON t.id = u.track_id {}
+             ORDER BY u.last_at DESC, u.track_id",
+            crate::library::TRACK_COLUMNS_FOR_LISTS,
+            crate::library::TRACK_JOINS_FOR_LISTS,
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt
+            .query_map(params![limit as i64, offset as i64], |r| {
+                Ok(UnfoundRow {
+                    track: crate::library::track_row_for_lists(r)?,
+                    first_at_ms: r.get(17)?,
+                    last_at_ms: r.get(18)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// How many songs are on the list, and every song known not to play (on the list or set aside), for marking them
+    /// wherever they are shown.
+    pub fn unfound_counts(&self) -> Result<UnfoundCounts> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT u.track_id, u.aside_at IS NULL FROM unfound u JOIN tracks t ON t.id = u.track_id
+             WHERE NOT (t.origin = 'file' AND t.missing_since IS NULL) ORDER BY u.track_id",
+        )?;
+        let mut counts = UnfoundCounts::default();
+        for row in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?)))? {
+            let (id, open) = row?;
+            counts.marked.push(id);
+            if open {
+                counts.open += 1;
+            }
+        }
+        Ok(counts)
     }
 
     pub fn setting(&self, key: &str) -> Result<Option<String>> {
@@ -832,6 +948,22 @@ pub struct DownloadCounts {
     pub saving: u64,
     pub saved: u64,
     pub failed: u64,
+}
+
+/// The songs no add-on could find: how many are on the list, and every one known not to play.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct UnfoundCounts {
+    pub open: u64,
+    pub marked: Vec<i64>,
+}
+
+/// A song on the list of songs no add-on could find.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct UnfoundRow {
+    #[serde(flatten)]
+    pub track: crate::library::TrackRow,
+    pub first_at_ms: i64,
+    pub last_at_ms: i64,
 }
 
 /// A song on the downloads list.

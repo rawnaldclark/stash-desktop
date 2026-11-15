@@ -9,12 +9,14 @@
 	import { songs } from '../ui/format';
 	import { ui } from '../ui/state.svelte';
 	import { trouble } from './folders.svelte';
+	import { NF } from './unfound.svelte';
 
 	const PAGE = 300;
 	let d = $state<core.Downloads | null>(null);
 	let shown = $state(PAGE);
 	let picking = $state(false);
 	let savedBefore = -1;
+	let failedBefore = 0;
 
 	async function read() {
 		try {
@@ -22,6 +24,9 @@
 			// Songs that became files: the library's lists show them as files from now on.
 			if (savedBefore >= 0 && next.counts.saved > savedBefore) void library.reload();
 			savedBefore = next.counts.saved;
+			// A song that could not be saved may now be known not to play.
+			if (next.counts.failed > failedBefore) void NF.refresh();
+			failedBefore = next.counts.failed;
 			d = next;
 		} catch {
 			/* the core said nothing new: the list stays as it was */

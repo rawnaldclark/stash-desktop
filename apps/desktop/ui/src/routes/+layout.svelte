@@ -17,6 +17,7 @@
 	import Toast from '../lib/ui/Toast.svelte';
 	import Wash from '../lib/ui/Wash.svelte';
 	import { coverOf } from '../lib/ui/format';
+	import { NF } from '../lib/desktop/unfound.svelte';
 	import { DEFAULT_PALETTE, forScheme, loadPalette, paletteStyle, wordmarkInk, type Palette } from '../lib/ui/palette';
 	import { S, ui } from '../lib/ui/state.svelte';
 	import type { LayoutProps } from './$types';
@@ -82,7 +83,11 @@
 	let lastError: string | null = null;
 	$effect(() => {
 		const e = S.v.error;
-		if (e && e !== lastError) ui.toast(/[.!?]$/.test(e) ? e : `${e}.`);
+		if (e && e !== lastError) {
+			ui.toast(/[.!?]$/.test(e) ? e : `${e}.`);
+			// A song that could not be played may now be known not to play.
+			void NF.refresh();
+		}
 		lastError = e;
 	});
 	// The core has no audio engine: said once, with its reason (Settings › Sound keeps saying it).
@@ -100,6 +105,7 @@
 	);
 
 	onMount(() => {
+		if (!measuring) void NF.refresh();
 		// Measuring: the whole library's list is what is measured.
 		if (measuring && !(page.url.pathname === '/library' && page.url.searchParams.get('tab') === 'songs')) void goto('/library?tab=songs', { replaceState: true });
 		const idle = (window as Window & { requestIdleCallback?: (f: () => void, o?: { timeout: number }) => number }).requestIdleCallback;

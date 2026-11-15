@@ -376,3 +376,85 @@ fn settings_and_music_folders_are_kept_with_the_library() {
     library.remember_folder("D:/Music", 3_000).unwrap();
     assert_eq!(library.folders().unwrap(), ["D:/Music", "E:/More"]);
 }
+
+#[test]
+fn a_song_no_add_on_finds_waits_to_be_fixed_and_leaves_when_it_is() {
+    let mut library = Library::open_in_memory().unwrap();
+    library
+        .add_tracks([file_track("On Disk", "A", "C:/m/disk.flac")])
+        .unwrap();
+    let described = |title: &str| Song {
+        title: title.into(),
+        artist: "A".into(),
+        duration_ms: Some(180_000),
+        refs: vec![("spotify".into(), format!("{title:0>22}").replace(' ', "x"))],
+        ..Song::default()
+    };
+    let (hotel, india) = (
+        library.adopt(&described("Hotel")).unwrap(),
+        library.adopt(&described("India")).unwrap(),
+    );
+    let file = id_of(&library, "On Disk");
+
+    // Noted once, with its first and latest miss; a file that is here is never noted.
+    assert!(library.note_unfound(hotel, 1_000).unwrap());
+    assert!(library.note_unfound(hotel, 2_000).unwrap());
+    assert!(library.note_unfound(india, 1_500).unwrap());
+    assert!(!library.note_unfound(file, 1_500).unwrap());
+    assert!(!library.note_unfound(999, 1_500).unwrap());
+    let listed = library.unfound_at(0, 10).unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|r| (r.track.title.as_str(), r.first_at_ms, r.last_at_ms))
+            .collect::<Vec<_>>(),
+        [("Hotel", 1_000, 2_000), ("India", 1_500, 1_500)]
+    );
+    assert_eq!(library.unfound_counts().unwrap().open, 2);
+
+    // Autoplay leaves out what is known not to play.
+    let picks = library
+        .autoplay_picks(&[], &[], &Default::default(), 0, false, 10)
+        .unwrap();
+    assert!(!picks.contains(&hotel) && !picks.contains(&india));
+    assert!(picks.contains(&file));
+
+    // Set aside: off the list, still marked, and it stays aside when it is missed again; then put back.
+    assert_eq!(library.set_unfound_aside(&[india], true, 3_000).unwrap(), 1);
+    library.note_unfound(india, 4_000).unwrap();
+    let counts = library.unfound_counts().unwrap();
+    assert_eq!((counts.open, counts.marked), (1, vec![hotel, india]));
+    library.set_unfound_aside(&[india], false, 5_000).unwrap();
+    assert_eq!(library.unfound_counts().unwrap().open, 2);
+
+    // Fixed: the add-on's name for it is kept, it leaves the list, and a save that failed is asked again.
+    library.ask_downloads(&[hotel], 6_000).unwrap();
+    assert_eq!(library.next_download().unwrap(), Some(hotel));
+    library
+        .download_failed(hotel, "none of your add-ons has it")
+        .unwrap();
+    assert_eq!(
+        library
+            .fix_unfound(hotel, "demo.folder", "41", 7_000)
+            .unwrap(),
+        Some(true)
+    );
+    assert!(
+        library
+            .describe(hotel)
+            .unwrap()
+            .unwrap()
+            .refs
+            .contains(&("demo.folder".to_string(), "41".to_string()))
+    );
+    assert_eq!(library.download_counts().unwrap().queued, 1);
+    assert_eq!(library.unfound_counts().unwrap().marked, [india]);
+    assert_eq!(
+        library.fix_unfound(999, "demo.folder", "1", 7_000).unwrap(),
+        None
+    );
+
+    // Found by itself later: gone from the list.
+    assert!(library.found_again(india).unwrap());
+    assert_eq!(library.unfound_counts().unwrap(), Default::default());
+}
