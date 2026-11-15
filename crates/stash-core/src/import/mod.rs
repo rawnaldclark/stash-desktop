@@ -45,6 +45,8 @@ pub struct Playlist {
     pub updated_at_ms: Option<i64>,
     /// Set for a shared mix someone else owns: its share id.
     pub follow_id: Option<String>,
+    pub follow_version: Option<i64>,
+    pub follow_shared_by: Option<String>,
 }
 
 /// Everything one file holds.
@@ -247,15 +249,18 @@ impl Merger<'_> {
             None => {
                 self.tx
                     .prepare_cached(
-                        "INSERT INTO playlists(external_id, name, created_at_ms, updated_at_ms, follow_id, position)
-                         VALUES (?1, ?2, ?3, ?4, ?5, (SELECT IFNULL(MAX(position), 0) + 1 FROM playlists))",
+                        "INSERT INTO playlists(external_id, name, created_at_ms, updated_at_ms, follow_id, follow_version,
+                                               follow_shared_by, position)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, (SELECT IFNULL(MAX(position), 0) + 1 FROM playlists))",
                     )?
                     .execute(params![
                         playlist.external_id,
                         playlist.name,
                         playlist.created_at_ms,
                         playlist.updated_at_ms,
-                        playlist.follow_id
+                        playlist.follow_id,
+                        playlist.follow_version,
+                        playlist.follow_shared_by
                     ])?;
                 let id = self.tx.last_insert_rowid();
                 for (position, song) in playlist.items.iter().enumerate() {
@@ -315,6 +320,33 @@ impl Merger<'_> {
 }
 
 impl Library {
+    /// The library's rows for `songs`, in their order: for each the row the library has for that song, or a new one
+    /// known by its description.
+    pub fn adopt_songs(&mut self, songs: &[Song]) -> crate::Result<Vec<i64>> {
+        let now_s = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let tx = self.conn.transaction()?;
+        let ids = {
+            let mut merger = Merger {
+                tx: &tx,
+                writer: Writer::new(&tx)?,
+                met: HashMap::new(),
+                new_rows: HashSet::new(),
+                played: HashSet::new(),
+                now_s,
+                summary: Summary::default(),
+            };
+            songs
+                .iter()
+                .map(|song| merger.track(song))
+                .collect::<crate::Result<Vec<i64>>>()?
+        };
+        tx.commit()?;
+        Ok(ids)
+    }
+
     /// Merges `incoming` into the library, all of it or (on an error) none of it.
     pub fn import(&mut self, incoming: &Incoming) -> crate::Result<Summary> {
         let now_s = std::time::SystemTime::now()

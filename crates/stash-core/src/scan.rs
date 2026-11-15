@@ -26,6 +26,9 @@ const AUDIO: &[&str] = &[
     "wv", "mpc",
 ];
 
+/// The artist of a file whose tags name none.
+pub const UNKNOWN_ARTIST: &str = "Unknown artist";
+
 /// What a scan did, so far or in the end.
 #[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct ScanReport {
@@ -165,7 +168,7 @@ fn read_track(
         .unwrap_or_else(|| locator.to_string());
     let artist = tag
         .and_then(|t| text(t.artist()))
-        .unwrap_or_else(|| "Unknown artist".to_string());
+        .unwrap_or_else(|| UNKNOWN_ARTIST.to_string());
     let lossless = matches!(
         file.file_type(),
         FileType::Flac | FileType::Wav | FileType::Aiff | FileType::Ape | FileType::WavPack

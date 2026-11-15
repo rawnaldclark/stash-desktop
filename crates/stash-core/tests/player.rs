@@ -261,6 +261,7 @@ fn an_add_ons_track_is_asked_for_late_and_one_it_does_not_have_is_passed_over() 
     let settings = Settings {
         resolver: Some(addon.resolver()),
         ask_ahead_seconds: 0.6,
+        ..Settings::default()
     };
     let player = Player::start_with(&library, &Output::Silent, settings).unwrap();
 
@@ -325,6 +326,7 @@ fn next_and_previous_do_not_wait_for_the_engine_to_have_the_track() {
     let settings = Settings {
         resolver: Some(addon.resolver()),
         ask_ahead_seconds: 0.2,
+        ..Settings::default()
     };
     let player = Player::start_with(&library, &Output::Silent, settings).unwrap();
     let file = dir.join("file.wav");
@@ -386,6 +388,7 @@ fn trouble_with_the_add_on_is_said_and_the_queue_is_not_marched_through() {
     let settings = Settings {
         resolver: Some(addon.resolver()),
         ask_ahead_seconds: 30.0,
+        ..Settings::default()
     };
     let player = Player::start_with(&library, &Output::Silent, settings).unwrap();
 
@@ -413,5 +416,72 @@ fn trouble_with_the_add_on_is_said_and_the_queue_is_not_marched_through() {
         state.error.as_deref(),
         Some("A could not be played: this player has no add-ons")
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_play_counts_once_half_the_track_was_really_played() {
+    let Some(library) = library() else { return };
+    let dir = scratch("player-plays");
+    let (a, b, c) = (dir.join("a.wav"), dir.join("b.wav"), dir.join("c.wav"));
+    for path in [&a, &b, &c] {
+        write_wav(path, RATE, &signal(RATE as usize * 3 / 2)); // 1.5 s: half is 0.75 s
+    }
+    let counted: Arc<Mutex<Vec<(String, i64)>>> = Arc::new(Mutex::new(Vec::new()));
+    let told = Arc::clone(&counted);
+    let settings = Settings {
+        on_play: Some(Arc::new(move |item: &QueueItem, started_at_ms| {
+            told.lock()
+                .unwrap()
+                .push((item.title.clone(), started_at_ms))
+        })),
+        // The rule's floor of 30 s would leave nothing to count in a test: here half the track decides.
+        counts_between_seconds: (0.2, 240.0),
+        ..Settings::default()
+    };
+    let player = Player::start_with(&library, &Output::Silent, settings).unwrap();
+    let titles = || {
+        counted
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(title, _)| title.clone())
+            .collect::<Vec<_>>()
+    };
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
+    player
+        .play(vec![
+            item(1, "One", &a),
+            item(2, "Two", &b),
+            item(3, "Three", &c),
+        ])
+        .unwrap();
+    until(&player, "the first track playing", |s| {
+        s.status == "playing" && s.index == Some(0) && s.position_ms > 100
+    });
+    // Paused, time passes but nothing is heard: the play does not count.
+    player.set_paused(true).unwrap();
+    std::thread::sleep(Duration::from_millis(1100));
+    assert_eq!(titles(), Vec::<String>::new());
+    player.set_paused(false).unwrap();
+    // Played past its half, it counts, once, with the time it started.
+    until(&player, "the second track", |s| {
+        s.index == Some(1) && s.status == "playing"
+    });
+    assert_eq!(titles(), ["One"]);
+    let started = counted.lock().unwrap()[0].1;
+    assert!(
+        (before..before + 1_500).contains(&started),
+        "the play is stamped with its start, not with when it counted"
+    );
+    // Skipped before its half, the second does not count; the third, played through, does.
+    player.next().unwrap();
+    until(&player, "the end of the queue", |s| s.status == "idle");
+    assert_eq!(titles(), ["One", "Three"]);
+    drop(player);
     let _ = std::fs::remove_dir_all(&dir);
 }

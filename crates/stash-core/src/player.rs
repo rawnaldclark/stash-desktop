@@ -80,11 +80,19 @@ pub struct Failure {
 /// Called on a thread of its own; it may take as long as the network does.
 pub type Resolver = Arc<dyn Fn(&QueueItem) -> std::result::Result<Located, Failure> + Send + Sync>;
 
+/// Told of a play that counted: the track, and when it started (milliseconds since 1970).
+pub type OnPlay = Arc<dyn Fn(&QueueItem, i64) + Send + Sync>;
+
 pub struct Settings {
     /// Without one, the queue can hold files only.
     pub resolver: Option<Resolver>,
     /// An add-on's track is asked for when the track before it has this long left.
     pub ask_ahead_seconds: f64,
+    /// Told when a play counts.
+    pub on_play: Option<OnPlay>,
+    /// A play counts once half the track was really played, but never before the first of these seconds and always
+    /// by the second: the rule the other Stashes (and Last.fm) use, 30 s and 4 minutes.
+    pub counts_between_seconds: (f64, f64),
 }
 
 impl Default for Settings {
@@ -92,6 +100,8 @@ impl Default for Settings {
         Self {
             resolver: None,
             ask_ahead_seconds: 30.0,
+            on_play: None,
+            counts_between_seconds: (30.0, 240.0),
         }
     }
 }
@@ -140,6 +150,17 @@ pub struct PlayerState {
     pub error: Option<String>,
 }
 
+/// The listening to the track the engine is on.
+struct Heard {
+    /// Which of the engine's tracks, in which run of the queue.
+    pos: usize,
+    generation: u64,
+    started_at_ms: i64,
+    /// Seconds really played: not paused, not waiting for data.
+    listened: f64,
+    counted: bool,
+}
+
 /// A track the engine has been handed.
 struct Slot {
     /// Its place in the queue.
@@ -172,6 +193,7 @@ struct Shared {
     error: Option<String>,
     /// A seek asked for while the next track was still loading; it is done when the track has loaded.
     pending_seek: Option<f64>,
+    heard: Option<Heard>,
 }
 
 impl Shared {
@@ -200,9 +222,81 @@ struct Ctx {
     shared: Arc<Mutex<Shared>>,
     resolver: Option<Resolver>,
     ask_ahead_seconds: f64,
+    on_play: Option<OnPlay>,
+    counts_between_seconds: (f64, f64),
 }
 
 impl Ctx {
+    /// Called a few times a second: adds the time since `last` to the listening of the current track when the engine
+    /// really played through it, and tells of the play once it counts.
+    fn listen(&self, last: &mut Instant) {
+        let now = Instant::now();
+        let passed = now.duration_since(*last).as_secs_f64().min(1.0);
+        *last = now;
+        let Some(on_play) = &self.on_play else {
+            return;
+        };
+        {
+            let mut shared = self.shared.lock().unwrap();
+            let Some(pos) = shared.pos.filter(|p| *p < shared.slots.len()) else {
+                shared.heard = None;
+                return;
+            };
+            let generation = shared.generation;
+            let same = shared
+                .heard
+                .as_ref()
+                .is_some_and(|h| h.pos == pos && h.generation == generation);
+            if !same {
+                let started_at_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                shared.heard = Some(Heard {
+                    pos,
+                    generation,
+                    started_at_ms,
+                    listened: 0.0,
+                    counted: false,
+                });
+                return;
+            }
+            if shared.heard.as_ref().is_some_and(|h| h.counted) {
+                return;
+            }
+        }
+        let mpv = self.engine.mpv();
+        if mpv.get("core-idle").as_deref() != Some("no") {
+            return;
+        }
+        let (least, most) = self.counts_between_seconds;
+        let needed = match mpv.get("duration").and_then(|v| v.parse::<f64>().ok()) {
+            Some(length) if length > 0.0 => (length / 2.0).clamp(least, most),
+            _ => most,
+        };
+        let counted = {
+            let mut shared = self.shared.lock().unwrap();
+            let Some(heard) = shared.heard.as_mut() else {
+                return;
+            };
+            heard.listened += passed;
+            if heard.listened < needed {
+                return;
+            }
+            heard.counted = true;
+            let (pos, started_at_ms) = (heard.pos, heard.started_at_ms);
+            shared
+                .slots
+                .get(pos)
+                .and_then(|slot| shared.queue.get(slot.queue))
+                .cloned()
+                .map(|item| (item, started_at_ms))
+        };
+        if let Some((item, started_at_ms)) = counted {
+            on_play(&item, started_at_ms);
+        }
+    }
+
     fn locate(&self, item: &QueueItem) -> std::result::Result<Located, Failure> {
         if !item.asks() {
             return Ok(Located {
@@ -423,6 +517,8 @@ impl Player {
             shared: Arc::new(Mutex::new(Shared::default())),
             resolver: settings.resolver,
             ask_ahead_seconds: settings.ask_ahead_seconds,
+            on_play: settings.on_play,
+            counts_between_seconds: settings.counts_between_seconds,
         };
         let stop = Arc::new(AtomicBool::new(false));
         let events = {
@@ -431,6 +527,7 @@ impl Player {
             std::thread::Builder::new()
                 .name("stash-player".into())
                 .spawn(move || {
+                    let mut last = Instant::now();
                     while !stop.load(Ordering::Relaxed) {
                         match ctx.engine.next_event(0.25) {
                             Event::Property { name, value } if name == "playlist-pos" => {
@@ -481,6 +578,7 @@ impl Player {
                             _ => {}
                         }
                         ctx.keep_ahead();
+                        ctx.listen(&mut last);
                     }
                 })
                 .map_err(|e| crate::Error::Audio(format!("starting the player's thread: {e}")))?

@@ -112,10 +112,11 @@ fn playlist(value: &Value) -> Option<Playlist> {
         .collect();
     let created_at_ms = time(value.get("createdAt"));
     // A shared mix someone else owns: an 8-character share id and a version of 1 or more.
-    let follow_id = value.get("follow").and_then(|follow| {
+    let follow = value.get("follow").and_then(|follow| {
         let id = follow.get("id")?.as_str()?;
         let version = follow.get("version")?.as_i64()?;
-        (made_of(id, 8..=8, b"") && version >= 1).then(|| id.to_string())
+        (made_of(id, 8..=8, b"") && version >= 1)
+            .then(|| (id.to_string(), version, text(follow.get("sharedBy"), 40)))
     });
     Some(Playlist {
         external_id: id.to_string(),
@@ -123,7 +124,9 @@ fn playlist(value: &Value) -> Option<Playlist> {
         items,
         created_at_ms,
         updated_at_ms: time(value.get("updatedAt")).or(created_at_ms),
-        follow_id,
+        follow_id: follow.as_ref().map(|(id, _, _)| id.clone()),
+        follow_version: follow.as_ref().map(|(_, version, _)| *version),
+        follow_shared_by: follow.and_then(|(_, _, by)| by),
     })
 }
 

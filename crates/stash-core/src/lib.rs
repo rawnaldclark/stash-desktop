@@ -9,6 +9,7 @@ pub mod db;
 pub mod identity;
 pub mod import;
 pub mod library;
+pub mod lists;
 pub mod player;
 pub mod scan;
 pub mod synth;
@@ -27,6 +28,9 @@ pub enum Error {
     Audio(String),
     #[error("scan: {0}")]
     Scan(String),
+    /// Something the listener asked for that cannot be done, in words for the listener.
+    #[error("{0}")]
+    Refused(String),
     #[error(
         "the library was written by a newer Stash (schema {found}, this build reads up to {supported})"
     )]

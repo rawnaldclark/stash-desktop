@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
@@ -181,6 +181,13 @@ const V4: &str = "
     CREATE INDEX plays_time ON plays(played_at_ms DESC);
 ";
 
+/// Version 5: a shared mix someone else owns keeps its version and who shared it, so it can be written out again as
+/// the follow it is.
+const V5: &str = "
+    ALTER TABLE playlists ADD COLUMN follow_version INTEGER;
+    ALTER TABLE playlists ADD COLUMN follow_shared_by TEXT;
+";
+
 /// Opens (or creates) the library at `path` and migrates it to [`SCHEMA_VERSION`].
 pub fn open(path: &std::path::Path) -> Result<Connection> {
     prepare(Connection::open(path)?)
@@ -243,6 +250,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             }
         }
         tx.pragma_update(None, "user_version", 4)?;
+        tx.commit()?;
+    }
+    if found < 5 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V5)?;
+        tx.pragma_update(None, "user_version", 5)?;
         tx.commit()?;
     }
     Ok(())
