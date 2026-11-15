@@ -260,3 +260,53 @@ Volume, the queue, the sound card setting and scanning from the window. Plain co
 - A scan cannot be stopped once started, a remembered folder cannot be forgotten from the window, and folders are not scanned by themselves when the app starts or when files change.
 - The queue can be looked at and jumped into, not edited (no removing, reordering, "play next"). No shuffle or repeat.
 
+## 11. The window, with the web player's look
+
+The window is now the Stash web player's UI, ported: the sidebar, Home, Search, Library, the playlist, album and artist pages, the floating player bar, the Lyrics / Up next panel and the full Now playing screen, with its styles and fonts and the colour taken from the cover that is playing. Only the UI came across. The screens talk to one boundary written for the desktop on top of the core's local API.
+
+What the desktop adds to it:
+
+- **Library** has Songs (the whole library on the virtual list, searched in place), Liked, Playlists, Albums, Artists and History.
+- **The bar and Now playing say what the sound is:** the format as decoded, and one word for the way to the sound card: Bit-perfect, Lossless, Resampled or Lossy. For a stream, which add-on it came from and what the add-on said it was.
+- **Settings:** Sound, Add-ons, Your library (music folders, import, save a library file), Appearance, About.
+- **A file's own cover.** A file in a music folder had no picture; only songs another Stash described did. A file row's picture is now read out of the file (the front cover in its tags), else `cover`, `folder`, `front` or `album` `.jpg/.png/.webp` beside it. Whether a file has one is found out the first time it is asked for and kept, so a file without is asked for once.
+- **The queue is edited from the window:** play next, add to queue, remove, drag to reorder, shuffle, repeat, save as a playlist.
+
+### Measured
+
+Same machine, same 100,000-track library, same self-measurement as sections 3 and 4 (`?bench`, which now measures Library › Songs). A row is 56 px with a cover, a heart and a menu; the old one was a 34 px line of text.
+
+In Edge (1384 × 861, 75 Hz, fresh profile):
+
+| | Old plain list | New window, as ported | New window, rows reused |
+|---|---|---|---|
+| Jump anywhere to real rows | 40 to 48 ms typical | 51 ms | 45 to 53 ms typical, 66 to 77 ms at the 95th percentile |
+| Steady scroll | every frame on time | every frame on time | every frame on time |
+| Hard fling: frames | 13.3 ms typical, at most one late | 26.5 ms typical, 50 % late | 13.3 ms typical, 13.4 to 13.5 ms at the 95th percentile, 1.3 to 2.1 % late |
+| Hard fling: rows on screen that were placeholders | 3 to 4 % | 26 % | none |
+| Search while typing, each letter | 28 to 32 ms typical | 42 ms | 39 to 40 ms typical, 70 to 92 ms at worst |
+| JavaScript heap at the end | 4.5 to 7.9 MB | 24 MB | 11 to 13 MB |
+
+In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms after starting the program (the first launch ever is the slow one; it was 670 to 820 ms warm with the old list); a jump shows real rows in 63 to 67 ms; a steady scroll never misses a frame; in a fling 6 to 10 % of frames are late, each by one frame, and no row is blank; search answers a letter in 46 to 49 ms typical, about 100 ms at worst. Memory right after the scroll and search runs, summed over the program and its web view processes: 370 to 420 MB private, 430 to 440 MB working set (it was 244 to 258 and 369 to 399). The program itself is still about 8 MB of that.
+
+### What the numbers say
+
+- **A richer row needs a list that does not build rows while it scrolls.** The list used to make a new row and throw one away for every row that scrolled past. With text rows that was free; with the web player's rows a fling missed every other frame. The rows on screen are now a fixed set of boxes that are given the row that arrived and moved there. That alone brought the fling back on time.
+- **Reading one page ahead removed the placeholders.** The page beyond the rows drawn, in the direction of travel, is asked for early. Section 3 said this would close the gap; it did.
+- **The look costs memory, and some frames in the app.** About 120 MB more across the web view's processes than the plain list, most of it in the GPU process, and a fling in the app drops a frame now and then where the plain list did not. The translucent bar that blurs the list moving under it is the first place to look.
+
+### Checked
+
+- **Every screen, in a browser on a silent output** (a made-up library: 600 tagged files with covers, 53 songs described by another Stash, 4 playlists, and the demo add-on): Home, the six Library tabs, an album of files and one of described songs, an artist, a playlist, search with the library's and the add-on's results, a track played straight from the add-on, a described song found and played through the add-on (Now playing named the add-on and "lossless"), Settings, and a 960 × 640 window. No errors from the page. A reload on any screen gets the page again (the core answers a screen's address with the page).
+- **In the real app, on the real sound card:** the page is on one origin and the core on another, and everything crossed: the lists, covers read from files, the colour taken from a cover, playing a file (the bar said `PCM · 16-bit/44.1 kHz`, Resampled, which is what the shared 48 kHz output does to it), and Save a library file.
+- **By the tests:** `crates/stashd/tests/api.rs` (a screen's address is the page and a missing file is missing; a file's picture, the folder's picture, a file without one stops offering it, an unplugged file is not judged, the picture's answer varies by origin), `crates/stash-core/src/covers.rs`, and the UI's own 53 tests (`npm test`).
+
+### Not covered yet
+
+- **Full-size covers.** The made-up covers are tiny. A folder of albums with 3,000 px pictures inside every file sends each one whole to a 40 px box; a small-picture cache in the core is the fix when it shows.
+- **Bit-perfect and exclusive wording on screen** were read from the engine's report, not looked at in the new bar with exclusive mode on.
+- **Lyrics:** the panel is there and says there are none; the core has no lyrics yet.
+- **Search finds songs only.** Albums and artists are reached from a song or from the Library tabs.
+- **A window under 1,100 px** hides the bar's volume and format, as the web player's medium layout does.
+- **When the queue ends, the bar goes away;** the web player keeps the last song there.
+- The folder dialog and Import were not clicked in the new Settings; their routes are the ones already tested.
