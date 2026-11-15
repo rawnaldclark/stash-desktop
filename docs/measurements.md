@@ -4,7 +4,7 @@ Milestone 1 asks four questions, each answered with numbers on real hardware:
 
 1. Does a 100,000-track library open, search and page fast enough that a list never waits? **Measured below.**
 2. Does the audio engine play gapless, and in an exclusive bit-perfect mode? **Gapless and bit-exact output: measured below. Exclusive mode on a real device: not yet.**
-3. Does a list of 100,000 rows and an album grid scroll smoothly in the window? *Not measured yet.*
+3. Does a list of 100,000 rows and an album grid scroll smoothly in the window? **The track list: measured below, in a browser window. The album grid, and the same list inside the desktop shell: not yet.**
 4. What do start-up time and memory look like for the whole app? *Not measured yet.*
 
 ## 1. The library database
@@ -65,3 +65,30 @@ The engine is libmpv (client API 2.6, the build `scripts/fetch-mpv.ps1` pins), l
 - **Compressed formats.** WAV has no encoder delay. Gapless FLAC should behave the same; AAC, MP3 and Opus carry padding the decoder must trim, and need their own test files.
 - **Streams over a real network.** The add-on test runs on one computer, where the next stream is ready at once. Over the internet the join depends on the next stream being open in time (`prefetch-playlist`); that needs a slow server to measure against. DASH and HLS streams are not measured either.
 - **Crossfade.** mpv has none; it needs a mixer of our own.
+
+## 3. The window
+
+The UI (`apps/desktop/ui`, Svelte) reaches the library only through the core's local API (`stashd serve`). Its track list holds just the rows on screen and a few around them, and asks for pages of 200 as it scrolls; a row whose page has not arrived is drawn as a placeholder.
+
+**How it was measured.** `stashd serve --db <100,000 tracks> --ui apps/desktop/ui/dist --bench-out result.json`, and the page opened with `?bench` in Microsoft Edge 157 (Chromium, the engine the desktop shell's web view uses on Windows), as an app window of 1384 × 861 on a 75 Hz display, with a fresh profile each time. The page drives itself and posts its numbers to the core. Three runs; the ranges below cover all three. Same machine as above.
+
+| | Result |
+|---|---|
+| First rows on screen | The page's script starts 440 to 510 ms after the window begins loading (the browser's own start), the first screenful has its data 110 to 120 ms later, and is painted by 635 to 695 ms. |
+| Jump anywhere in the library (30 jumps) to real rows on screen | 40 to 48 ms typical, 54 to 58 ms at the 95th percentile, 80 ms at worst |
+| Steady scroll, 225 rows a second, 240 frames | Every frame on time: 13.3 ms typical, 14.3 ms at worst (a 75 Hz frame is 13.3 ms). No row was ever blank. |
+| Hard fling, 2,250 rows a second, 240 frames | 13.3 ms typical, 13.4 ms at the 95th percentile; one frame of 26.6 ms in one run, none late in the others. On average 3 to 4 % of the rows on screen were placeholders, and for a frame or two the whole screen was. |
+| Search while typing "golden river", each letter until its results are on screen | 28 to 32 ms typical, 40 to 46 ms at worst |
+| JavaScript heap at the end | 4.5 to 7.9 MB |
+
+### What the numbers say
+
+- **The list is not the bottleneck.** With 100,000 rows the frame time is the display's, at a steady scroll and in a fling.
+- **A fling outruns the pages.** At 2,250 rows a second the list crosses a page of 200 rows every 90 ms, and placeholders show for a moment. Asking for the next page in the direction of travel before it is needed would close that.
+- **A jump costs about three frames**: one request to the core and the draw. It is the round trip, not the query (the page at the end of the library takes 6 ms in the core).
+
+### Not covered yet
+
+- The same list inside the desktop shell (Tauri and the system web view), with start-up time and memory for the whole app.
+- The album grid, with cover art.
+- A window that is covered by another one is not drawn by Chromium, so the measurement was run with occlusion tracking switched off.

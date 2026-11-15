@@ -18,10 +18,11 @@ A desktop music client for Windows, macOS and Linux, from the people who make [S
 crates/stash-core   the core: library database (SQLite + full-text search), the audio engine
                     (libmpv, loaded at run time) and the add-on client; soon the local API
 crates/stashd       the core without a window: a command line for now, the local server later
+apps/desktop/ui     the window's UI (Svelte): a track list over 100,000 rows and search, through the local API
 scripts/            fetch-mpv.ps1 downloads the pinned libmpv build the engine is tested against
 ```
 
-The window (a Tauri shell with a Svelte UI) will talk to the core only through the core's local API, the same API a phone remote will use. That keeps the shell replaceable and the core the part that has to be right.
+The window (a Tauri shell around the Svelte UI) talks to the core only through the core's local API (`stashd serve`), the same API a phone remote will use. That keeps the shell replaceable and the core the part that has to be right.
 
 ## Measurements
 
@@ -39,6 +40,8 @@ target/release/stashd bench --db test.db
 ```
 
 `synth` makes a library of made-up tracks (the same every time for the same seed); `bench` measures opening, searching and paging it.
+
+To see the UI: `cd apps/desktop/ui && npm install && npm run build`, then `target/release/stashd serve --db test.db --ui apps/desktop/ui/dist` and open http://127.0.0.1:47821.
 
 The audio tests need libmpv. On Windows, `powershell -ExecutionPolicy Bypass -File scripts/fetch-mpv.ps1` puts the pinned build in `third_party/mpv/` (it needs 7-Zip). Elsewhere, point `STASH_MPV_LIBRARY` at your system's libmpv. Without it those tests say they were skipped and the rest still run.
 
