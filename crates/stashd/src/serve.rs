@@ -67,53 +67,90 @@ fn allowed_origin(origin: &str, port: u16) -> bool {
         || origin == "tauri://localhost"
 }
 
-pub fn serve(options: Options) -> Result<()> {
-    let library =
-        Library::open(&options.db).with_context(|| format!("opening {}", options.db.display()))?;
-    let server = Server::http(("127.0.0.1", options.port))
-        .map_err(|e| anyhow!("cannot listen on 127.0.0.1:{}: {e}", options.port))?;
-    let port = server
-        .server_addr()
-        .to_ip()
-        .map(|a| a.port())
-        .unwrap_or(options.port);
-    println!("listening on http://127.0.0.1:{port}");
+/// The core, listening but not yet answering: the port is known, so a window can be pointed at it.
+pub struct Core {
+    library: Library,
+    server: Server,
+    options: Options,
+    port: u16,
+}
 
-    for mut request in server.incoming_requests() {
-        let host_ok = find(&request, "Host")
-            .is_some_and(|h| h == format!("127.0.0.1:{port}") || h == format!("localhost:{port}"));
-        let origin = find(&request, "Origin").map(str::to_string);
-        let origin_ok = origin.as_deref().is_none_or(|o| allowed_origin(o, port));
-
-        let mut stop = false;
-        let mut response = if !host_ok {
-            refuse(403, "this server answers only as 127.0.0.1 or localhost")
-        } else if !origin_ok {
-            refuse(403, "this page may not use the Stash core")
-        } else if *request.method() == Method::Options {
-            reply(204, "text/plain", Vec::new())
-        } else {
-            match route(&library, &options, &mut request) {
-                Ok((response, finished)) => {
-                    stop = finished;
-                    response
-                }
-                Err(e) => refuse(500, &format!("{e:#}")),
-            }
-        };
-        // The desktop window is another origin than this server: it is told it may read the answer.
-        if let Some(origin) = origin.filter(|o| allowed_origin(o, port)) {
-            response = response
-                .with_header(header("Access-Control-Allow-Origin", &origin))
-                .with_header(header("Access-Control-Allow-Headers", "Content-Type"))
-                .with_header(header("Vary", "Origin"));
-        }
-        let _ = request.respond(response);
-        if stop {
-            break;
-        }
+impl Core {
+    /// Opens the library and takes the port (`0` asks the system for a free one).
+    pub fn bind(options: Options) -> Result<Self> {
+        let library = Library::open(&options.db)
+            .with_context(|| format!("opening {}", options.db.display()))?;
+        let server = Server::http(("127.0.0.1", options.port))
+            .map_err(|e| anyhow!("cannot listen on 127.0.0.1:{}: {e}", options.port))?;
+        let port = server
+            .server_addr()
+            .to_ip()
+            .map(|a| a.port())
+            .unwrap_or(options.port);
+        Ok(Self {
+            library,
+            server,
+            options,
+            port,
+        })
     }
-    Ok(())
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Answers requests until a measurement arrives (when one is being collected), else for good.
+    pub fn run(self) -> Result<()> {
+        let Core {
+            library,
+            server,
+            options,
+            port,
+        } = self;
+        for mut request in server.incoming_requests() {
+            let host_ok = find(&request, "Host").is_some_and(|h| {
+                h == format!("127.0.0.1:{port}") || h == format!("localhost:{port}")
+            });
+            let origin = find(&request, "Origin").map(str::to_string);
+            let origin_ok = origin.as_deref().is_none_or(|o| allowed_origin(o, port));
+
+            let mut stop = false;
+            let mut response = if !host_ok {
+                refuse(403, "this server answers only as 127.0.0.1 or localhost")
+            } else if !origin_ok {
+                refuse(403, "this page may not use the Stash core")
+            } else if *request.method() == Method::Options {
+                reply(204, "text/plain", Vec::new())
+            } else {
+                match route(&library, &options, &mut request) {
+                    Ok((response, finished)) => {
+                        stop = finished;
+                        response
+                    }
+                    Err(e) => refuse(500, &format!("{e:#}")),
+                }
+            };
+            // The desktop window is another origin than this server: it is told it may read the answer.
+            if let Some(origin) = origin.filter(|o| allowed_origin(o, port)) {
+                response = response
+                    .with_header(header("Access-Control-Allow-Origin", &origin))
+                    .with_header(header("Access-Control-Allow-Headers", "Content-Type"))
+                    .with_header(header("Vary", "Origin"));
+            }
+            let _ = request.respond(response);
+            if stop {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Binds and runs in one go, saying where it listens.
+pub fn serve(options: Options) -> Result<()> {
+    let core = Core::bind(options)?;
+    println!("listening on http://127.0.0.1:{}", core.port());
+    core.run()
 }
 
 /// The answer to one request, and whether the server is done (a measurement arrived).

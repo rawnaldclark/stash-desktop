@@ -2,7 +2,7 @@
 
 A desktop music client for Windows, macOS and Linux, from the people who make [Stash](https://github.com/rawnaldclark/Stash) for Android.
 
-**Status: early prototype.** There is no app to download yet. What is here is the core and the measurements that decide whether the design holds.
+**Status: early prototype.** There is no app to download yet. What is here is the core, a first window, and the measurements that decide whether the design holds.
 
 ## What it is going to be
 
@@ -19,6 +19,7 @@ crates/stash-core   the core: library database (SQLite + full-text search), the 
                     (libmpv, loaded at run time) and the add-on client; soon the local API
 crates/stashd       the core without a window: a command line for now, the local server later
 apps/desktop/ui     the window's UI (Svelte): a track list over 100,000 rows and search, through the local API
+apps/desktop/src-tauri  the desktop shell (Tauri): one program holding the core and the UI, in a window
 scripts/            fetch-mpv.ps1 downloads the pinned libmpv build the engine is tested against
 ```
 
@@ -42,6 +43,8 @@ target/release/stashd bench --db test.db
 `synth` makes a library of made-up tracks (the same every time for the same seed); `bench` measures opening, searching and paging it.
 
 To see the UI: `cd apps/desktop/ui && npm install && npm run build`, then `target/release/stashd serve --db test.db --ui apps/desktop/ui/dist` and open http://127.0.0.1:47821.
+
+To run the desktop app on that library: build the UI as above, then `cargo build --release -p stash-desktop` and start `target/release/stash-desktop` with `STASH_DB` set to the path of `test.db`. Without `STASH_DB` it opens (and creates) an empty library in your user data folder; there is no way to add music from the window yet.
 
 The audio tests need libmpv. On Windows, `powershell -ExecutionPolicy Bypass -File scripts/fetch-mpv.ps1` puts the pinned build in `third_party/mpv/` (it needs 7-Zip). Elsewhere, point `STASH_MPV_LIBRARY` at your system's libmpv. Without it those tests say they were skipped and the rest still run.
 

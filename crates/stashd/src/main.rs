@@ -1,8 +1,6 @@
 //! `stashd`: the Stash desktop core without a window. For now it makes a test library and measures it; it will
 //! grow the audio engine, the add-on client and the local API that every shell talks to.
 
-mod serve;
-
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -62,7 +60,7 @@ fn main() -> Result<()> {
             ui,
             port,
             bench_out,
-        } => serve::serve(serve::Options {
+        } => stashd::serve::serve(stashd::serve::Options {
             db,
             ui,
             port,

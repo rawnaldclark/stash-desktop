@@ -4,8 +4,8 @@ Milestone 1 asks four questions, each answered with numbers on real hardware:
 
 1. Does a 100,000-track library open, search and page fast enough that a list never waits? **Measured below.**
 2. Does the audio engine play gapless, and in an exclusive bit-perfect mode? **Gapless and bit-exact output: measured below. Exclusive mode on a real device: not yet.**
-3. Does a list of 100,000 rows and an album grid scroll smoothly in the window? **The track list: measured below, in a browser window. The album grid, and the same list inside the desktop shell: not yet.**
-4. What do start-up time and memory look like for the whole app? *Not measured yet.*
+3. Does a list of 100,000 rows and an album grid scroll smoothly in the window? **The track list: measured below, in a browser window and in the desktop shell. The album grid: not yet.**
+4. What do start-up time and memory look like for the whole app? **Measured below.**
 
 ## 1. The library database
 
@@ -89,6 +89,40 @@ The UI (`apps/desktop/ui`, Svelte) reaches the library only through the core's l
 
 ### Not covered yet
 
-- The same list inside the desktop shell (Tauri and the system web view), with start-up time and memory for the whole app.
 - The album grid, with cover art.
 - A window that is covered by another one is not drawn by Chromium, so the measurement was run with occlusion tracking switched off.
+
+## 4. The whole app
+
+The desktop shell (`apps/desktop/src-tauri`, Tauri 2.12 on the system's WebView2 157) is one program of 10.9 MB holding the shell, the core and the built UI. It starts the core's local API on a free port inside its own process and opens a 1400 × 900 window on the UI. The library is the same 100,000 tracks; the machine is the same 2011 i7.
+
+**Start-up**, from starting the program to the first screenful of real rows painted, timed from outside the program:
+
+| Launch | Page begins loading | First rows have data | Painted |
+|---|---:|---:|---:|
+| First ever (the web view sets up its data folder) | 2,506 ms | 2,624 ms | 2,654 ms |
+| Second | 533 ms | 647 ms | 667 ms |
+| Third | 658 ms | 798 ms | 819 ms |
+
+Nearly all of it is the web view starting. From the page beginning to load, the first rows take about 115 to 140 ms.
+
+**In the window**, the same self-measurement as in section 3, three runs: a jump anywhere shows real rows in 40 to 48 ms (53 to 70 ms at the 95th percentile); a steady scroll never misses a frame; a 2,250 rows-a-second fling is on time at the 95th percentile (13.4 to 13.5 ms) with at most 1.3 % of frames late; search answers each typed letter in 33 to 38 ms. The shell changes nothing measurable against the plain browser window.
+
+**Memory**, summed over the program and the six web view processes below it:
+
+| | Private | Working set |
+|---|---:|---:|
+| The program itself (shell and core, library open) | 5.5 to 6.5 MB | 25 to 30 MB |
+| Everything, window open and untouched for 12 s | 155 MB | 295 MB |
+| Everything, right after the scroll and search runs | 244 to 258 MB | 369 to 399 MB |
+
+### What the numbers say
+
+- **The core is small; the web view is the cost.** The program that holds the library, the API and (later) the audio engine uses about 6 MB. The system web view's browser, GPU, renderer and utility processes are the other 150 MB at rest. That is the price of a web UI on any shell that uses one; what a Tauri shell avoids is shipping the browser (the program is 10.9 MB) and paying for a second copy of it.
+- **A warm start is under a second** on a fifteen-year-old CPU. The first-ever start pays about two seconds once.
+
+### Not covered yet
+
+- Memory with the audio engine playing, with cover art in an album grid, and after hours of use.
+- macOS (WKWebView) and Linux (WebKitGTK), where the web view is a different engine. Linux is the known risk for this shell.
+- A packaged install (installer size, code signing, the first-run experience on a PC without WebView2).

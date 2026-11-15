@@ -1,5 +1,5 @@
 // The window's only way to the library: the core's local API. Served by the core itself, the API is on this page's
-// own origin; in the desktop window the core's address is handed in as `?core=http://127.0.0.1:<port>`.
+// own origin; the desktop shell hands the core's address in before the page runs (`window.__STASH_CORE__`).
 
 export type TrackRow = {
   id: number;
@@ -16,7 +16,14 @@ export type TrackRow = {
 
 export type Counts = { tracks: number; albums: number; artists: number };
 
-const core = new URLSearchParams(location.search).get("core") ?? "";
+type Shell = { __STASH_CORE__?: string; __STASH_BENCH__?: boolean };
+const shell = window as unknown as Shell;
+const params = new URLSearchParams(location.search);
+
+const core = shell.__STASH_CORE__ ?? params.get("core") ?? "";
+
+/** The page was asked to measure itself: `?bench`, or the shell said so. */
+export const measuring = shell.__STASH_BENCH__ === true || params.has("bench");
 
 async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${core}${path}`, { signal });

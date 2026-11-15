@@ -1,0 +1,19 @@
+[package]
+name = "stash-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+stashd = { path = "../../../crates/stashd" }
+tauri = "2.12.5"
+
+[build-dependencies]
+tauri-build = "2.7.4"
+
+[features]
+# Serve the built UI from inside the program (no dev server).
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

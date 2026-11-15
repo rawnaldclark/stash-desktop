@@ -111,6 +111,8 @@ export async function measure(hooks: Hooks) {
   const memory = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
   return {
     userAgent: navigator.userAgent,
+    /** When the page began to load, as a wall-clock time: the marks in `firstRows` count from here. */
+    pageStartedAtMs: Math.round(performance.timeOrigin),
     window: { width: innerWidth, height: innerHeight, devicePixelRatio },
     library: { tracks: hooks.count },
     rowsOnScreen: hooks.drawn().last - hooks.drawn().first,

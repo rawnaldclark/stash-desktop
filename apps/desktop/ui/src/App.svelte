@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import VirtualList from "./lib/VirtualList.svelte";
-  import { counts as fetchCounts, postMeasurement, search, tracksAt, type Counts, type TrackRow } from "./lib/api";
+  import { counts as fetchCounts, measuring, postMeasurement, search, tracksAt, type Counts, type TrackRow } from "./lib/api";
   import { measure, type Drawn } from "./lib/bench";
 
   const ROW_HEIGHT = 34;
@@ -67,7 +67,7 @@
       failure = `The Stash core is not answering (${e instanceof Error ? e.message : e}).`;
       return;
     }
-    if (new URLSearchParams(location.search).has("bench")) {
+    if (measuring) {
       const result = await measure({
         count: counts.tracks,
         rowHeight: ROW_HEIGHT,
