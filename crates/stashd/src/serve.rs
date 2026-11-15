@@ -1351,10 +1351,21 @@ fn ui_file(root: &Path, path: &str) -> Reply {
         Some("png") => "image/png",
         Some("json") => "application/json",
         Some("woff2") => "font/woff2",
+        Some("ico") => "image/x-icon",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("txt") => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
     };
     match fs::read(&file) {
         Ok(bytes) => reply(200, content_type, bytes),
+        // The window is one page that draws its own screens: an address like `/library` or `/album/lib/7` is a
+        // screen of it, not a file, so a reload there gets the page again. A missing file with an extension
+        // stays missing.
+        Err(_) if file.extension().is_none() => match fs::read(root.join("index.html")) {
+            Ok(bytes) => reply(200, "text/html; charset=utf-8", bytes),
+            Err(_) => refuse(404, "no such file"),
+        },
         Err(_) => refuse(404, "no such file"),
     }
 }

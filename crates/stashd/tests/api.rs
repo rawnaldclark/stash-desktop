@@ -1522,3 +1522,72 @@ fn the_lists_and_the_queue_the_window_is_built_on() {
     client.post("/api/player/stop", json!({}));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_screen_of_the_window_is_the_page_and_a_missing_file_is_missing() {
+    let dir = std::env::temp_dir().join(format!("stash-api-ui-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ui = dir.join("ui");
+    std::fs::create_dir_all(ui.join("_app")).unwrap();
+    std::fs::write(
+        ui.join("index.html"),
+        "<!doctype html><title>the page</title>",
+    )
+    .unwrap();
+    std::fs::write(ui.join("_app").join("start.js"), "export {}").unwrap();
+    let core = Core::bind(Options {
+        db: dir.join("library.db"),
+        ui: Some(ui),
+        port: 0,
+        bench_out: None,
+        audio: None,
+        mpv: None,
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let fetch = |path: &str| {
+        let mut response = agent.get(&format!("{base}{path}")).call().unwrap();
+        let kind = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let status = response.status().as_u16();
+        (
+            status,
+            kind,
+            response.body_mut().read_to_string().unwrap_or_default(),
+        )
+    };
+
+    let (status, kind, body) = fetch("/");
+    assert_eq!((status, kind.starts_with("text/html")), (200, true));
+    assert!(body.contains("the page"));
+    // A screen's address is the page again, however deep.
+    for screen in ["/library", "/album/lib/7", "/settings"] {
+        let (status, kind, body) = fetch(screen);
+        assert_eq!(
+            (status, kind.starts_with("text/html")),
+            (200, true),
+            "{screen}"
+        );
+        assert!(body.contains("the page"), "{screen}");
+    }
+    // A real file is itself; a missing one is missing, not the page.
+    let (status, kind, _) = fetch("/_app/start.js");
+    assert_eq!((status, kind.starts_with("text/javascript")), (200, true));
+    assert_eq!(fetch("/_app/gone.js").0, 404);
+    // The API is never the page, and nothing climbs out of the folder.
+    assert_eq!(fetch("/api/nothing").0, 404);
+    assert!(!fetch("/api/nothing").2.contains("the page"));
+    assert_eq!(fetch("/..%2Flibrary.db").0 / 100, 4);
+    let _ = std::fs::remove_dir_all(&dir);
+}
