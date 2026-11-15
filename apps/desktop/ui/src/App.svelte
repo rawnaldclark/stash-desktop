@@ -1,28 +1,37 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import Addons from "./lib/Addons.svelte";
   import NowPlaying from "./lib/NowPlaying.svelte";
   import VirtualList from "./lib/VirtualList.svelte";
   import {
+    addons as fetchAddons,
     counts as fetchCounts,
     IDLE,
     measuring,
     nextTrack,
     player as fetchPlayer,
+    playFound,
     playFrom,
     playTracks,
     postMeasurement,
     previousTrack,
     search,
+    searchAddon,
     seekTo,
     setPaused,
     tracksAt,
+    type AddonGroup,
+    type AddonInfo,
     type Counts,
+    type FoundTrack,
     type PlayerState,
     type TrackRow,
   } from "./lib/api";
   import { measure, type Drawn } from "./lib/bench";
 
   const ROW_HEIGHT = 34;
+  /** An add-on is asked once the listener has stopped typing for this long: its answers cost more than the library's. */
+  const ADDON_SEARCH_PAUSE_MS = 350;
 
   let counts: Counts | null = $state(null);
   let failure: string | null = $state(null);
@@ -64,7 +73,7 @@
 
   function toggle(event: KeyboardEvent) {
     const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement;
-    if (event.code !== "Space" || typing || !playing.track) return;
+    if (event.code !== "Space" || typing || !playing.track || playing.status === "loading") return;
     event.preventDefault();
     act(setPaused(playing.status === "playing"));
   }
@@ -90,9 +99,52 @@
 
   $effect(() => runSearch(query));
 
+  // ---- Add-ons
+
+  let addons: AddonInfo[] = $state([]);
+  let addonsOpen = $state(false);
+  /** The add-ons a search asks: switched on, usable, and offering search. In the listener's order. */
+  const asked = $derived(addons.filter((a) => a.enabled && !a.problem && a.resources.includes("search")));
+  const addonName = $derived(addons.find((a) => a.id === playing.track?.addon?.addon)?.name ?? null);
+
+  /** What each asked add-on answered for `foundFor`; an add-on with no entry yet is still being asked. */
+  let found: Record<string, AddonGroup | { failed: string }> = $state({});
+  let foundFor: string | null = $state(null);
+
+  $effect(() => {
+    const text = query.trim();
+    const ids = asked.map((a) => a.id);
+    if (text === "" || ids.length === 0) {
+      found = {};
+      foundFor = null;
+      return;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      found = {};
+      foundFor = text;
+      for (const id of ids) {
+        searchAddon(id, text, 25, controller.signal)
+          .then((group) => {
+            if (!controller.signal.aborted && group) found[id] = group;
+          })
+          .catch(() => {
+            if (!controller.signal.aborted) found[id] = { failed: "The Stash core is not answering." };
+          });
+      }
+    }, ADDON_SEARCH_PAUSE_MS);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  });
+
+  const TIERS: Record<string, string> = { low: "Low", high: "High", lossless: "Lossless", hires: "Hi-res" };
+
   const whole = new Intl.NumberFormat();
 
-  function length(ms: number): string {
+  function length(ms: number | null): string {
+    if (ms === null) return "";
     const seconds = Math.round(ms / 1000);
     return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
   }
@@ -145,7 +197,9 @@
       });
       await postMeasurement(result).catch(() => {});
       document.title = "Stash (measured)";
+      return;
     }
+    addons = await fetchAddons().catch(() => []);
   });
 </script>
 
@@ -163,11 +217,28 @@
   {/if}
 {/snippet}
 
+{#snippet foundRow(addon: string, track: FoundTrack, index: number)}
+  <span class="n">{index + 1}</span>
+  <span class="title" class:now={playing.track?.addon?.addon === addon && playing.track.addon.track === track.id}>{track.title}</span>
+  <span class="artist">{track.artist}</span>
+  <span class="album">{track.album ?? ""}</span>
+  <span class="format">{track.max_tier ? TIERS[track.max_tier] : ""}</span>
+  <span class="time">{length(track.duration_ms)}</span>
+{/snippet}
+
 <header>
   <h1>Stash</h1>
-  <input type="search" placeholder="Search your library" bind:value={query} aria-label="Search your library" />
+  <input
+    type="search"
+    placeholder={asked.length ? "Search your library and add-ons" : "Search your library"}
+    bind:value={query}
+    aria-label={asked.length ? "Search your library and add-ons" : "Search your library"}
+  />
   {#if counts}
     <p class="counts">{whole.format(counts.tracks)} tracks · {whole.format(counts.albums)} albums · {whole.format(counts.artists)} artists</p>
+  {/if}
+  {#if counts && !measuring}
+    <button type="button" class="addons" onclick={() => (addonsOpen = true)}>Add-ons{addons.length ? ` (${addons.length})` : ""}</button>
   {/if}
 </header>
 
@@ -179,22 +250,53 @@
   {#if failure}
     <p class="message">{failure}</p>
   {:else if resultsFor !== null}
-    {#if results.length === 0}
-      <p class="message">Nothing in your library matches "{resultsFor}".</p>
-    {:else}
-      <div class="results" role="list">
-        {#each results as track, i (track.id)}
-          <div
-            class="row"
-            role="listitem"
-            style:height="{ROW_HEIGHT}px"
-            ondblclick={() => act(playTracks(results.slice(i).map((r) => r.id)))}
-          >
-            {@render trackRow(track, i)}
+    <div class="results">
+      {#if asked.length}
+        <h2>Your library</h2>
+      {/if}
+      {#if results.length === 0}
+        <p class="message" class:slim={asked.length > 0}>Nothing in your library matches "{resultsFor}".</p>
+      {:else}
+        <div role="list">
+          {#each results as track, i (track.id)}
+            <div
+              class="row"
+              role="listitem"
+              style:height="{ROW_HEIGHT}px"
+              ondblclick={() => act(playTracks(results.slice(i).map((r) => r.id)))}
+            >
+              {@render trackRow(track, i)}
+            </div>
+          {/each}
+        </div>
+      {/if}
+      {#each asked as addon (addon.id)}
+        {@const group = foundFor === null ? undefined : found[addon.id]}
+        <h2>{addon.name}</h2>
+        {#if group === undefined}
+          <p class="message slim">Asking {addon.name}…</p>
+        {:else if "failed" in group}
+          <p class="message slim trouble">{group.failed}</p>
+        {:else if group.error}
+          <p class="message slim trouble">{addon.name} gave no results: {group.error.message}.</p>
+        {:else if group.tracks.length === 0}
+          <p class="message slim">{addon.name} found nothing for "{foundFor}".</p>
+        {:else}
+          <div role="list">
+            {#each group.tracks as track, i (track.id)}
+              <div
+                class="row"
+                role="listitem"
+                style:height="{ROW_HEIGHT}px"
+                ondblclick={() => act(playFound(addon.id, group.tracks.slice(i)))}
+              >
+                {@render foundRow(addon.id, track, i)}
+              </div>
+            {/each}
           </div>
-        {/each}
-      </div>
-    {/if}
+        {/if}
+      {/each}
+    </div>
   {:else if counts}
     <VirtualList
       bind:this={list}
@@ -210,11 +312,16 @@
 
 <NowPlaying
   player={shown}
+  {addonName}
   onPause={(paused) => act(setPaused(paused))}
   onNext={() => act(nextTrack())}
   onPrevious={() => act(previousTrack())}
   onSeek={(seconds) => act(seekTo(seconds))}
 />
+
+{#if addonsOpen}
+  <Addons {addons} onChange={(changed) => (addons = changed)} onClose={() => (addonsOpen = false)} />
+{/if}
 
 <svelte:window onkeydown={toggle} />
 
@@ -239,7 +346,8 @@
     color: inherit;
     font: inherit;
   }
-  input:focus-visible {
+  input:focus-visible,
+  .addons:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
   }
@@ -247,6 +355,18 @@
     margin: 0 0 0 auto;
     color: var(--quiet);
     font-variant-numeric: tabular-nums;
+  }
+  .addons {
+    padding: 6px 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--field);
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+  }
+  .addons:hover {
+    background: var(--hover);
   }
   .columns,
   :global(.row) {
@@ -269,6 +389,13 @@
   .results {
     height: 100%;
     overflow-y: auto;
+  }
+  h2 {
+    margin: 0;
+    padding: 18px 16px 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--soft);
   }
   :global(.row span) {
     white-space: nowrap;
@@ -303,7 +430,14 @@
     background: var(--line);
   }
   .message {
+    margin: 0;
     padding: 32px 16px;
     color: var(--quiet);
+  }
+  .message.slim {
+    padding: 6px 16px 6px 92px;
+  }
+  .message.trouble {
+    color: var(--warn);
   }
 </style>

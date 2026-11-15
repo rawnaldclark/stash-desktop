@@ -1,17 +1,20 @@
 <script lang="ts">
   // The bar at the bottom: what is playing, the controls, how far in, and the signal path. The signal path says what
-  // the engine reports about the sound on its way to the sound card, not what a file's label claims.
+  // the engine reports about the sound on its way to the sound card, not what a file's label claims. For an add-on's
+  // track it also says which add-on, what the add-on said the stream is, and whether the sound agrees.
   import type { PlayerState, Signal } from "./api";
 
   type Props = {
     player: PlayerState;
+    /** The name of the add-on the track comes from, for an add-on's track. */
+    addonName: string | null;
     onPause: (paused: boolean) => void;
     onNext: () => void;
     onPrevious: () => void;
     onSeek: (seconds: number) => void;
   };
 
-  let { player, onPause, onNext, onPrevious, onSeek }: Props = $props();
+  let { player, addonName, onPause, onNext, onPrevious, onSeek }: Props = $props();
 
   function clock(ms: number): string {
     const seconds = Math.floor(ms / 1000);
@@ -51,7 +54,31 @@
     return { from, to, note: changes.length ? changes.join(", ") : "unchanged" };
   }
 
+  const TIERS: Record<string, string> = { low: "low", high: "high", lossless: "lossless", hires: "hi-res" };
+  const LOSSY = ["mp3", "aac", "opus", "vorbis"];
+
+  /** Where an add-on's track comes from, and whether the sound is what the add-on said: "Demo folder, lossless". */
+  function origin(): { text: string; disagrees: boolean } | null {
+    const from = addonName ?? (player.track?.addon ? "an add-on" : null);
+    if (!from) return null;
+    if (!player.tier) return { text: from, disagrees: false };
+    const codec = player.signal?.codec ?? "";
+    const rate = player.signal?.decoded.sample_rate ?? null;
+    const format = (player.signal?.decoded.format ?? "").replace(/p$/, "");
+    const said = TIERS[player.tier] ?? player.tier;
+    // The add-on said lossless and the engine is decoding a lossy codec, or it said hi-res and the samples are CD's.
+    if ((player.tier === "lossless" || player.tier === "hires") && LOSSY.includes(codec)) {
+      return { text: `${from} said ${said}; this is ${codecName(codec)}`, disagrees: true };
+    }
+    if (player.tier === "hires" && rate !== null && rate <= 48_000 && format === "s16") {
+      return { text: `${from} said ${said}; this is ${sampleFormat(format)} ${kHz(rate)}`, disagrees: true };
+    }
+    return { text: `${from}, ${said}`, disagrees: false };
+  }
+
   let bar: HTMLDivElement | undefined = $state();
+  /** The failure the listener has closed. */
+  let dismissed: string | null = $state(null);
 
   function seekFrom(event: MouseEvent) {
     if (!bar || player.duration_ms <= 0) return;
@@ -62,8 +89,18 @@
 
   const progress = $derived(player.duration_ms > 0 ? Math.min(100, (player.position_ms / player.duration_ms) * 100) : 0);
   const signal = $derived(player.signal ? path(player.signal) : null);
+  const from = $derived(origin());
+  const loading = $derived(player.status === "loading");
 </script>
 
+{#if player.track && player.error && player.error !== dismissed}
+  <p class="skipped" role="status">
+    <span>{player.error}.</span>
+    <button type="button" class="close" onclick={() => (dismissed = player.error)} aria-label="Close this message">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6 10.6 12 5 6.4z" /></svg>
+    </button>
+  </p>
+{/if}
 <footer class:idle={!player.track}>
   {#if !player.available}
     <p class="notice">No sound: {player.reason ?? "the player is not available"}.</p>
@@ -77,7 +114,13 @@
         <button type="button" onclick={onPrevious} aria-label="Previous track">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h2v14H6zM20 5v14L9 12z" /></svg>
         </button>
-        <button type="button" class="main" onclick={() => onPause(player.status === "playing")} aria-label={player.status === "playing" ? "Pause" : "Play"}>
+        <button
+          type="button"
+          class="main"
+          disabled={loading}
+          onclick={() => onPause(player.status === "playing")}
+          aria-label={player.status === "playing" ? "Pause" : "Play"}
+        >
           {#if player.status === "playing"}
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z" /></svg>
           {:else}
@@ -108,9 +151,13 @@
       </div>
     </div>
     <div class="signal" title="What the audio engine reports between the file and the sound card">
-      {#if signal}
+      {#if loading}
+        <span>Asking {addonName ?? "the add-on"} for the stream…</span>
+      {:else if signal}
         <span>{signal.from} → {signal.to}</span>
-        <span class="note" class:changed={signal.note !== "unchanged"}>{signal.note}</span>
+        <span class="note">
+          {#if from}<span class:changed={from.disagrees}>{from.text}</span>{" · "}{/if}<span class:changed={signal.note !== "unchanged"}>{signal.note}</span>
+        </span>
       {/if}
     </div>
   {:else}
@@ -162,8 +209,35 @@
   .note {
     color: var(--quiet);
   }
-  .note.changed {
+  .note .changed {
     color: var(--warn);
+  }
+  .skipped {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    padding: 6px 8px 6px 16px;
+    border-top: 1px solid var(--line);
+    background: var(--field);
+    color: var(--warn);
+    font-size: 12px;
+  }
+  .skipped span {
+    flex: 1;
+  }
+  button.close {
+    width: 22px;
+    height: 22px;
+    color: var(--quiet);
+  }
+  button.close svg {
+    width: 14px;
+    height: 14px;
+  }
+  button:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
   .middle {
     display: flex;

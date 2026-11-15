@@ -167,5 +167,22 @@ Not a measurement, a check of the whole path: library, local API, player, engine
 
 ### Not covered yet
 
-Exclusive mode from the window (it is an environment switch, `STASH_EXCLUSIVE=1`, not a setting yet), a queue view, volume, shuffle and repeat, and playing an add-on's track from the window.
+Exclusive mode from the window (it is an environment switch, `STASH_EXCLUSIVE=1`, not a setting yet), a queue view, volume, shuffle and repeat.
+
+## 7. Add-ons in the window
+
+Again a check of the whole path, not a measurement: an add-on added by its link, searched, and played from. The add-on is the demo add-on (`stashd demo-addon`): a folder of files served on this computer through the add-on contract (manifest, search, stream, media over HTTP with ranges), with every search and stream answer held back 0.3 to 0.7 s to stand in for a real one. No real add-on was used: that takes the listener's own link.
+
+How the player treats an add-on's track: where it plays from is a link the add-on makes on request, which costs the listener's allowance there and runs out. So the stream is asked for when the listener starts the track, or when the track before it has 30 s left, and not when the queue is made. The engine still has the next track before the current one ends.
+
+- **In a browser, on a silent output:** a link that is not an add-on is refused with the reason and nothing is kept; the demo's link adds it (name, version, server, what it offers); the search box then searches the library at every letter and the add-on 0.35 s after the last one, with its own heading and "Asking…" until it answers; a double-click on one of its rows shows the track at once with "Asking Demo folder for the stream…" and then plays it; the bar names the add-on and what it said the stream is (`Demo folder, lossless`) beside what the engine reports; a click half way along the bar seeks in the stream; next goes straight on when the engine already has the next track; a track the add-on does not have is passed over and named in a strip above the bar; switched off, the add-on is no longer asked.
+- **In the desktop app, on the real sound card:** the same through the app's own core: added, searched (4 tracks for "night"), the first played after its 0.3 s of asking (`PCM 16-bit 44.1 kHz → shared 32-bit float 48 kHz`, the add-on having said lossless), and the queue moved on to the add-on's next track by itself.
+- **By the tests:** `tests/player.rs` (an add-on's track is asked for late, not at queue time; a missing one is passed over; next and previous before the engine has the track; trouble with the add-on is said once and the queue is not marched through) and `crates/stashd/tests/api.rs` (add, refuse, list without the link, search, switch off, play over HTTP with a seek, kept across a restart, remove).
+
+### Not covered yet
+
+- **The join between two add-on tracks handed over late is not measured.** Section 3 proves the join bit-exact when the engine has both streams; here the second arrives up to 30 s before the first ends, by the same engine mechanism, but that path has no sample-for-sample proof of its own (the output that writes samples to a file does not run in real time).
+- A real add-on: DASH and HLS streams, an add-on that asks for a key, answers that arrive after seconds rather than tenths.
+- A stream link that runs out while the track is paused for hours, and reading an add-on's manifest again after it changes.
+- The bar says when an add-on's "lossless" is in fact a lossy codec, or its "hi-res" is CD format. That check is written and has not been seen to fire: the demo add-on tells the truth.
 

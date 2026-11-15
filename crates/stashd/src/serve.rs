@@ -547,10 +547,11 @@ fn addons_route(
                         Code::BadRequest | Code::InvalidResponse => 400,
                         _ => 502,
                     };
-                    return Ok(Some(reply_json(
-                        status,
-                        json!({ "error": addon_error(&e) }),
-                    )));
+                    let mut error = addon_error(&e);
+                    if e.code == Code::NotFound {
+                        error["message"] = json!("there is no add-on at that address");
+                    }
+                    return Ok(Some(reply_json(status, json!({ "error": error }))));
                 }
             };
             state.library.lock().unwrap().save_addon(
