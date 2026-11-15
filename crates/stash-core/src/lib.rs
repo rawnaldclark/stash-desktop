@@ -6,6 +6,7 @@
 pub mod addons;
 pub mod audio;
 pub mod db;
+pub mod eclipse;
 pub mod identity;
 pub mod import;
 pub mod library;

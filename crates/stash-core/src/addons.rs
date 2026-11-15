@@ -50,13 +50,23 @@ pub enum Delivery {
 }
 
 impl Delivery {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Delivery::None => "none",
             Delivery::Dash => "dash",
             Delivery::Hls => "hls",
         }
     }
+}
+
+/// Which way an add-on speaks: Stash's own contract, or the looser one of Eclipse and its family, which
+/// [`crate::eclipse`] reads into the same shapes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Dialect {
+    #[default]
+    V1,
+    Eclipse,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -69,6 +79,16 @@ pub struct Manifest {
     #[serde(default)]
     pub description: Option<String>,
     pub resources: Vec<String>,
+    /// The three below are the host's own notes on an Eclipse add-on, kept with the manifest; an add-on does not
+    /// set them.
+    #[serde(default)]
+    pub dialect: Dialect,
+    /// The add-on finds a song only by its ISRC.
+    #[serde(default)]
+    pub resolve_by_isrc: bool,
+    /// The add-on's own word for the quality to ask for.
+    #[serde(default)]
+    pub quality: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -173,6 +193,8 @@ pub enum Code {
     Network,
     /// The add-on answered, but not with what the contract allows.
     InvalidResponse,
+    /// The host will not use this add-on, and the message says why in the listener's words.
+    Refused,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -199,6 +221,7 @@ impl Code {
             Code::Timeout => "timeout",
             Code::Network => "network",
             Code::InvalidResponse => "invalid_response",
+            Code::Refused => "refused",
         }
     }
 }
@@ -206,6 +229,9 @@ impl Code {
 impl AddonError {
     /// The failure in a listener's words.
     pub fn in_words(&self) -> String {
+        if self.code == Code::Refused {
+            return self.message.clone();
+        }
         let what = match self.code {
             Code::BadRequest => "the add-on did not understand the request",
             Code::Unauthorized => "the add-on did not accept your key",
@@ -222,6 +248,7 @@ impl AddonError {
             Code::InvalidResponse => {
                 "the add-on answered with something the contract does not allow"
             }
+            Code::Refused => "",
         };
         match self.code {
             // The host's own messages say what was wrong with the answer.
@@ -232,7 +259,7 @@ impl AddonError {
         }
     }
 
-    fn host(code: Code, message: impl Into<String>) -> Self {
+    pub(crate) fn host(code: Code, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -271,7 +298,38 @@ impl Addon {
     pub fn from_link(link: &str) -> Result<Self> {
         let (url, base) = base_of(link)?;
         let agent = agent();
-        let manifest: Manifest = get_json(&agent, url.as_str())?;
+        let given: serde_json::Value = get_json(&agent, url.as_str())?;
+        let manifest = match given.get("stash").map(|v| v.as_u64()) {
+            Some(Some(1)) => {
+                let mut manifest: Manifest = serde_json::from_value(given).map_err(|e| {
+                    AddonError::invalid(format!("the manifest is not what the contract says: {e}"))
+                })?;
+                // The host's own notes are not an add-on's to set.
+                (manifest.dialect, manifest.resolve_by_isrc, manifest.quality) =
+                    (Dialect::V1, false, None);
+                manifest
+            }
+            Some(Some(0)) => {
+                return Err(AddonError::host(
+                    Code::Refused,
+                    "this add-on is made for Stash on the web, which Stash desktop cannot use yet",
+                ));
+            }
+            Some(_) => {
+                return Err(AddonError::host(
+                    Code::Refused,
+                    "this add-on needs a newer Stash",
+                ));
+            }
+            // No `stash` at all: an add-on made for Eclipse and its family, read through the contract's mapping.
+            None if crate::eclipse::is_manifest(&given) => crate::eclipse::manifest(&given)?,
+            None => {
+                return Err(AddonError::host(
+                    Code::Refused,
+                    "that address does not hold an add-on's manifest",
+                ));
+            }
+        };
         check_manifest(&manifest)?;
         Ok(Self {
             manifest,
@@ -336,6 +394,13 @@ impl Addon {
         let mut url = Url::parse(&format!("{}/search", self.base))
             .map_err(|e| AddonError::invalid(e.to_string()))?;
         let q: String = query.chars().take(200).collect();
+        if self.manifest.dialect == Dialect::Eclipse {
+            // An Eclipse add-on is sent only what Eclipse sends.
+            url.query_pairs_mut().append_pair("q", &q);
+            let mut tracks = crate::eclipse::search(&self.eclipse_get(url.as_str())?)?;
+            tracks.truncate(limit.clamp(1, 200) as usize);
+            return Ok(tracks);
+        }
         url.query_pairs_mut()
             .append_pair("q", &q)
             .append_pair("limit", &limit.clamp(1, 200).to_string());
@@ -349,6 +414,9 @@ impl Addon {
     /// give at `min_tier`.
     pub fn resolve(&self, wanted: &Wanted, min_tier: Option<Tier>) -> Result<Option<Track>> {
         self.offers("resolve")?;
+        if self.manifest.dialect == Dialect::Eclipse {
+            return self.eclipse_resolve(wanted);
+        }
         let mut url = Url::parse(&format!("{}/resolve", self.base))
             .map_err(|e| AddonError::invalid(e.to_string()))?;
         {
@@ -376,27 +444,61 @@ impl Addon {
         let Some(item) = response.item else {
             return Ok(None);
         };
-        if item.id.is_empty() {
-            return Err(AddonError::invalid(
-                "the add-on answered a track without an id",
+        checked_item(item, wanted, min_tier).map(Some)
+    }
+
+    /// An Eclipse add-on's answer to a request, or what its failure means.
+    fn eclipse_get(&self, url: &str) -> Result<serde_json::Value> {
+        let fetched = fetch(&self.agent, url)?;
+        if !(200..300).contains(&fetched.status) {
+            return Err(crate::eclipse::error(
+                fetched.status,
+                fetched.retry_after,
+                fetched.www_authenticate.as_deref(),
+                &fetched.body,
             ));
         }
-        if let (Some(asked), Some(theirs)) = (wanted.duration_ms, item.duration_ms) {
-            let allowed = 8_000.max(asked * 3 / 100);
-            if asked.abs_diff(theirs) > allowed {
-                return Err(AddonError::invalid(format!(
-                    "the add-on answered a track of another length ({theirs} ms for {asked} ms)"
-                )));
+        serde_json::from_str(&fetched.body)
+            .map_err(|e| AddonError::invalid(format!("the answer is not JSON: {e}")))
+    }
+
+    /// Asks an Eclipse add-on for a song: by its ISRC when that is the only way the add-on has (and the song has
+    /// one), else by its words.
+    fn eclipse_resolve(&self, wanted: &Wanted) -> Result<Option<Track>> {
+        let by_isrc = self.manifest.resolve_by_isrc;
+        if by_isrc && wanted.isrc.is_none() {
+            return Ok(None);
+        }
+        let route = if by_isrc { "resolve-isrc" } else { "resolve" };
+        let mut url = Url::parse(&format!("{}/{route}", self.base))
+            .map_err(|e| AddonError::invalid(e.to_string()))?;
+        {
+            let mut query = url.query_pairs_mut();
+            if !by_isrc {
+                query
+                    .append_pair("title", &wanted.title)
+                    .append_pair("artist", &wanted.artist);
+            }
+            if let Some(isrc) = &wanted.isrc {
+                query.append_pair("isrc", isrc);
+            }
+            if let (false, Some(ms)) = (by_isrc, wanted.duration_ms) {
+                query.append_pair("durationMs", &ms.to_string());
             }
         }
-        if let (Some(least), Some(best)) = (min_tier, item.max_tier)
-            && best < least
-        {
-            return Err(AddonError::invalid(
-                "the add-on answered a track below the quality that was asked for",
-            ));
-        }
-        Ok(Some(item))
+        let answer = match self.eclipse_get(url.as_str()) {
+            Ok(answer) => answer,
+            // Not having the song is an answer, not a failure.
+            Err(e) if e.code == Code::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let item = if by_isrc {
+            crate::eclipse::resolved_by_isrc(&answer, wanted)
+        } else {
+            crate::eclipse::resolved(&answer)
+        };
+        item.map(|item| checked_item(item, wanted, None))
+            .transpose()
     }
 
     /// Where to play the add-on's track `id` from, within what `want` accepts. The answer is checked: a tier outside
@@ -410,6 +512,11 @@ impl Addon {
             .map_err(|_| AddonError::invalid("the add-on's address has no path"))?
             .pop_if_empty()
             .push(id);
+        if self.manifest.dialect == Dialect::Eclipse {
+            url.query_pairs_mut()
+                .append_pair("quality", &crate::eclipse::quality(&self.manifest, want));
+            return self.eclipse_stream(url.as_str(), want);
+        }
         let deliveries: Vec<&str> = want.deliveries.iter().map(|d| d.as_str()).collect();
         url.query_pairs_mut()
             .append_pair("tier", want.tier.as_str())
@@ -419,6 +526,61 @@ impl Addon {
         check_stream(&info, want)?;
         Ok(info)
     }
+
+    fn eclipse_stream(&self, url: &str, want: &StreamRequest) -> Result<StreamInfo> {
+        let mut fetched = fetch(&self.agent, url)?;
+        // "Still preparing this song": a 503 that asks for a short wait is waited out once.
+        if fetched.status == 503
+            && let Some(wait) = fetched.retry_after.filter(|s| (1..=30).contains(s))
+        {
+            std::thread::sleep(Duration::from_secs(wait.min(5)));
+            fetched = fetch(&self.agent, url)?;
+        }
+        if !(200..300).contains(&fetched.status) {
+            return Err(crate::eclipse::error(
+                fetched.status,
+                fetched.retry_after,
+                fetched.www_authenticate.as_deref(),
+                &fetched.body,
+            ));
+        }
+        let answer: serde_json::Value = serde_json::from_str(&fetched.body)
+            .map_err(|e| AddonError::invalid(format!("the answer is not JSON: {e}")))?;
+        let streamed = crate::eclipse::stream(&answer)?;
+        if !streamed.asked_for(want) {
+            return Err(AddonError::host(
+                Code::QualityUnavailable,
+                "the add-on has it only in a quality that was not asked for",
+            ));
+        }
+        Ok(streamed.info)
+    }
+}
+
+/// The host's own checks on a track an add-on says is the song asked for: its length within 8 s or 3 %, and (when
+/// the add-on says how good it can give it) not below the quality asked for.
+fn checked_item(item: Track, wanted: &Wanted, min_tier: Option<Tier>) -> Result<Track> {
+    if item.id.is_empty() {
+        return Err(AddonError::invalid(
+            "the add-on answered a track without an id",
+        ));
+    }
+    if let (Some(asked), Some(theirs)) = (wanted.duration_ms, item.duration_ms) {
+        let allowed = 8_000.max(asked * 3 / 100);
+        if asked.abs_diff(theirs) > allowed {
+            return Err(AddonError::invalid(format!(
+                "the add-on answered a track of another length ({theirs} ms for {asked} ms)"
+            )));
+        }
+    }
+    if let (Some(least), Some(best)) = (min_tier, item.max_tier)
+        && best < least
+    {
+        return Err(AddonError::invalid(
+            "the add-on answered a track below the quality that was asked for",
+        ));
+    }
+    Ok(item)
 }
 
 /// The link as a URL, and the address everything else of the add-on is under.
@@ -450,7 +612,7 @@ fn agent() -> ureq::Agent {
 }
 
 /// A URL an add-on (or the listener's link) names: https, or http on this computer only; no credentials in it.
-fn checked_url(text: &str, what: &str) -> Result<Url> {
+pub(crate) fn checked_url(text: &str, what: &str) -> Result<Url> {
     if text.len() > URL_CAP {
         return Err(AddonError::invalid(format!(
             "{what} is longer than {URL_CAP} characters"
@@ -567,26 +729,53 @@ struct ErrorDetail {
     retry_after: Option<u64>,
 }
 
-/// GETs `url` and reads a JSON answer of type `T`, or the add-on's error (contract section 7).
-fn get_json<T: serde::de::DeserializeOwned>(agent: &ureq::Agent, url: &str) -> Result<T> {
+/// An answer as it came: its status, what it says about waiting and signing in, and its text.
+struct Fetched {
+    status: u16,
+    retry_after: Option<u64>,
+    www_authenticate: Option<String>,
+    body: String,
+}
+
+fn fetch(agent: &ureq::Agent, url: &str) -> Result<Fetched> {
     let mut response = agent.get(url).call().map_err(|e| match e {
         ureq::Error::Timeout(_) => {
             AddonError::host(Code::Timeout, "the add-on did not answer in time")
         }
         other => AddonError::host(Code::Network, other.to_string()),
     })?;
+    let header = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    };
+    let retry_after = header("retry-after").and_then(|v| v.trim().parse::<u64>().ok());
+    let www_authenticate = header("www-authenticate");
     let status = response.status().as_u16();
-    let header_retry = response
-        .headers()
-        .get("retry-after")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.trim().parse::<u64>().ok());
     let body = response
         .body_mut()
         .with_config()
         .limit(BODY_CAP)
         .read_to_string()
         .map_err(|e| AddonError::invalid(format!("the answer could not be read: {e}")))?;
+    Ok(Fetched {
+        status,
+        retry_after,
+        www_authenticate,
+        body,
+    })
+}
+
+/// GETs `url` and reads a JSON answer of type `T`, or the add-on's error (contract section 7).
+fn get_json<T: serde::de::DeserializeOwned>(agent: &ureq::Agent, url: &str) -> Result<T> {
+    let Fetched {
+        status,
+        retry_after: header_retry,
+        body,
+        ..
+    } = fetch(agent, url)?;
 
     if (200..300).contains(&status) {
         return serde_json::from_str(&body).map_err(|e| {

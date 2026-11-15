@@ -89,7 +89,9 @@ pub fn clean_text(text: &str, max: usize) -> String {
     let safe: String = text
         .chars()
         .map(|c| {
-            let turns_text = matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}');
+            // Characters that turn text around or hide in it: bidi marks, embeddings, overrides and isolates,
+            // zero-width characters, line and paragraph separators, the byte order mark.
+            let turns_text = matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2028}' | '\u{2029}' | '\u{2060}' | '\u{2066}'..='\u{2069}' | '\u{061C}' | '\u{FEFF}');
             if c.is_control() || turns_text { ' ' } else { c }
         })
         .collect();

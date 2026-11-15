@@ -30,6 +30,8 @@ pub struct DemoAddon {
     paths: HashMap<i64, String>,
     /// How long search and stream answers are held back, to see the window wait.
     delay: Duration,
+    /// Answer in the looser shapes of an add-on made for Eclipse and its family, to try that kind with.
+    eclipse: bool,
 }
 
 fn header(name: &str, value: &str) -> Header {
@@ -47,6 +49,23 @@ fn refusal(status: u16, code: &str, message: &str) -> Response<std::io::Cursor<V
         status,
         json!({ "error": { "code": code, "message": message } }),
     )
+}
+
+/// A track as a search or resolve answer gives it: the contract's shape, or Eclipse's (a number for an id, the length
+/// in seconds).
+fn row_json(row: &TrackRow, eclipse: bool) -> Value {
+    if eclipse {
+        json!({ "id": row.id, "title": row.title, "artist": row.artist, "album": row.album, "duration": row.duration_ms as f64 / 1000.0 })
+    } else {
+        json!({
+            "id": row.id.to_string(),
+            "title": row.title,
+            "artist": row.artist,
+            "album": row.album,
+            "durationMs": row.duration_ms,
+            "maxTier": quality(row).0,
+        })
+    }
 }
 
 /// The tier a file is, and its codec in the contract's words (left out where the contract has no word for it).
@@ -77,6 +96,12 @@ fn quality(row: &TrackRow) -> (&'static str, Option<&'static str>) {
 impl DemoAddon {
     /// Reads the music under `folder` and takes `port` on this computer (`0` asks the system for a free one).
     pub fn bind(folder: &Path, port: u16, delay: Duration) -> Result<Self> {
+        Self::bind_as(folder, port, delay, false)
+    }
+
+    /// As [`Self::bind`]; with `eclipse`, the add-on answers as one made for Eclipse does: no `stash` in its manifest,
+    /// ids as numbers, lengths in seconds, a quality word instead of a tier.
+    pub fn bind_as(folder: &Path, port: u16, delay: Duration, eclipse: bool) -> Result<Self> {
         let mut library = Library::open_in_memory()?;
         scan_folder(&mut library, folder, |_| {})
             .with_context(|| format!("reading {}", folder.display()))?;
@@ -101,6 +126,7 @@ impl DemoAddon {
             rows: rows.into_iter().map(|r| (r.id, r)).collect(),
             paths,
             delay,
+            eclipse,
         })
     }
 
@@ -146,6 +172,20 @@ impl DemoAddon {
         let path = url.path();
 
         if path == "/manifest.json" {
+            if self.eclipse {
+                let _ = request.respond(answer(
+                    200,
+                    json!({
+                        "id": "Demo.Folder.Eclipse",
+                        "name": "Demo folder (Eclipse)",
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "description": "A folder of your own files, served the way an Eclipse add-on serves them.",
+                        "resources": ["search", "stream", "resolve"],
+                        "types": ["track"],
+                    }),
+                ));
+                return;
+            }
             let _ = request.respond(answer(
                 200,
                 json!({
@@ -174,16 +214,7 @@ impl DemoAddon {
             let tracks: Vec<Value> = found
                 .unwrap_or_default()
                 .iter()
-                .map(|row| {
-                    json!({
-                        "id": row.id.to_string(),
-                        "title": row.title,
-                        "artist": row.artist,
-                        "album": row.album,
-                        "durationMs": row.duration_ms,
-                        "maxTier": quality(row).0,
-                    })
-                })
+                .map(|row| row_json(row, self.eclipse))
                 .collect();
             let _ = request.respond(answer(200, json!({ "tracks": tracks })));
         } else if path == "/resolve" {
@@ -208,16 +239,7 @@ impl DemoAddon {
                 })
                 .collect();
             same.sort_by_key(|row| row.id);
-            let item = same.first().map(|row| {
-                json!({
-                    "id": row.id.to_string(),
-                    "title": row.title,
-                    "artist": row.artist,
-                    "album": row.album,
-                    "durationMs": row.duration_ms,
-                    "maxTier": quality(row).0,
-                })
-            });
+            let item = same.first().map(|row| row_json(row, self.eclipse));
             let _ = request.respond(answer(200, json!({ "item": item })));
         } else if let Some(id) = path.strip_prefix("/stream/") {
             std::thread::sleep(self.delay);
@@ -225,6 +247,21 @@ impl DemoAddon {
                 let _ = request.respond(refusal(404, "not_found", "no such track"));
                 return;
             };
+            if self.eclipse {
+                // What an Eclipse add-on says of a stream: a codec word and a quality word, no tier.
+                let (tier, codec) = quality(row);
+                let _ = request.respond(answer(
+                    200,
+                    json!({
+                        "url": format!("http://127.0.0.1:{}/media/{}", self.port, row.id),
+                        "codec": if codec == Some("pcm") { Some("wav") } else { codec },
+                        "quality": if tier == "high" { "HIGH" } else { "LOSSLESS" },
+                        "bitDepth": row.bit_depth,
+                        "sampleRate": row.sample_rate,
+                    }),
+                ));
+                return;
+            }
             let (tier, codec) = quality(row);
             let place = |name: &str| TIERS.iter().position(|t| *t == name);
             let wanted = param("tier").as_deref().and_then(place).unwrap_or(3);

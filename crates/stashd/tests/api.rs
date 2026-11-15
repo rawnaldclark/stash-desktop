@@ -916,3 +916,112 @@ fn what_is_done_here_goes_out_as_a_library_file() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn an_add_on_made_for_eclipse_is_added_searched_and_played_from() {
+    let dir = std::env::temp_dir().join(format!("stash-api-eclipse-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let catalogue = dir.join("Catalogue");
+    std::fs::create_dir_all(&catalogue).unwrap();
+    for name in ["alpha", "bravo"] {
+        silence(&catalogue.join(format!("{name}.wav")));
+    }
+    let engine = engine();
+    let core = Core::bind(Options {
+        db: dir.join("library.db"),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: Some(Output::Silent),
+        mpv: engine.clone(),
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    let demo = DemoAddon::bind_as(&catalogue, 0, Duration::from_millis(20), true).unwrap();
+    let link = demo.link();
+    std::thread::spawn(move || demo.run());
+
+    // Its manifest has no `stash`, and its id is written with capitals: it is taken as the contract maps it.
+    let added = client.post("/api/addons", json!({ "link": link }));
+    let listed = &added["addons"][0];
+    assert_eq!(
+        (
+            listed["id"].as_str(),
+            listed["name"].as_str(),
+            listed["problem"].is_null()
+        ),
+        (
+            Some("demo.folder.eclipse"),
+            Some("Demo folder (Eclipse)"),
+            true
+        )
+    );
+    assert_eq!(listed["resources"], json!(["search", "stream", "resolve"]));
+    // An address with nothing at it is said to have no add-on.
+    let (status, refused) = client.send(
+        "/api/addons",
+        json!({ "link": link.replace("manifest.json", "nothing/manifest.json") }),
+    );
+    assert_eq!(
+        (status, refused["error"]["message"].as_str()),
+        (502, Some("there is no add-on at that address"))
+    );
+
+    // Its search rows have numbers for ids and lengths in seconds.
+    let (_, found) = client.get("/api/addons/search?q=bravo");
+    let track = found["groups"][0]["tracks"][0].clone();
+    assert_eq!(
+        (
+            track["title"].as_str(),
+            track["duration_ms"].as_u64(),
+            track["id"].is_string(),
+            track["max_tier"].is_null()
+        ),
+        (Some("bravo"), Some(2000), true, true)
+    );
+
+    // A library song known by its description: the add-on is asked whether it has it, in Eclipse's way.
+    let file = json!({ "kind": "stash-web-library", "v": 1, "likes": [{ "item": { "title": "alpha", "artist": "Unknown artist", "durationMs": 2000 }, "likedAt": 5 }] }).to_string();
+    assert_eq!(client.upload("/api/import", file.as_bytes()).0, 200);
+
+    if engine.is_none() {
+        eprintln!("SKIPPED the player: no libmpv found");
+        return;
+    }
+    client.post(
+        "/api/player/play",
+        json!({ "addon": "demo.folder.eclipse", "tracks": [track] }),
+    );
+    let playing = client.player_until("the Eclipse add-on's track playing", |s| {
+        s["status"] == "playing" && s["track"]["title"] == "bravo"
+    });
+    // It said "LOSSLESS" and a wav: read as lossless, and the engine agrees.
+    assert_eq!(
+        (playing["tier"].as_str(), playing["served_by"].as_str()),
+        (Some("lossless"), Some("demo.folder.eclipse"))
+    );
+    let signal = client.player_until("its signal path", |s| {
+        s["signal"]["decoded"]["sample_rate"].is_number()
+    })["signal"]
+        .clone();
+    assert_eq!(signal["codec"].as_str(), Some("pcm_s16le"));
+
+    client.post("/api/player/play", json!({ "liked": true }));
+    let liked = client.player_until("the liked song from the Eclipse add-on", |s| {
+        s["status"] == "playing" && s["track"]["title"] == "alpha"
+    });
+    assert_eq!(
+        (liked["served_by"].as_str(), liked["error"].is_null()),
+        (Some("demo.folder.eclipse"), true)
+    );
+    client.post("/api/player/stop", json!({}));
+    let _ = std::fs::remove_dir_all(&dir);
+}

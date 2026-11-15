@@ -113,6 +113,9 @@ enum Command {
         /// Hold every search and stream answer back this long, to see the window wait.
         #[arg(long, default_value_t = 0)]
         delay_ms: u64,
+        /// Answer the way an add-on made for Eclipse does, to try that kind of add-on with.
+        #[arg(long)]
+        eclipse: bool,
     },
     /// Measure opening, searching and paging a library, as a list or grid would use it.
     Bench {
@@ -204,9 +207,14 @@ fn main() -> Result<()> {
             dir,
             port,
             delay_ms,
+            eclipse,
         } => {
-            let addon =
-                stashd::demo_addon::DemoAddon::bind(&dir, port, Duration::from_millis(delay_ms))?;
+            let addon = stashd::demo_addon::DemoAddon::bind_as(
+                &dir,
+                port,
+                Duration::from_millis(delay_ms),
+                eclipse,
+            )?;
             println!(
                 "{} tracks. Add this link in Stash: {}",
                 addon.tracks(),

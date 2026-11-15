@@ -182,7 +182,7 @@ How the player treats an add-on's track: where it plays from is a link the add-o
 ### Not covered yet
 
 - **The join between two add-on tracks handed over late is not measured.** Section 3 proves the join bit-exact when the engine has both streams; here the second arrives up to 30 s before the first ends, by the same engine mechanism, but that path has no sample-for-sample proof of its own (the output that writes samples to a file does not run in real time).
-- A real add-on: DASH and HLS streams, an add-on that asks for a key, answers that arrive after seconds rather than tenths.
+- A real add-on: DASH and HLS streams, an add-on that asks for a key, answers that arrive after seconds rather than tenths. Add-ons made for Eclipse and its family (a manifest without `stash`) are read through the contract's mapping: checked against the contract's own examples (every manifest, search, resolve, stream and error example, when their folder is given to the test) and end to end against the demo add-on speaking that way (`stashd demo-addon --eclipse`); their settings, catalogs and albums are not used yet, and request headers a stream asks for are not sent.
 - A stream link that runs out while the track is paused for hours, and reading an add-on's manifest again after it changes.
 - The bar says when an add-on's "lossless" is in fact a lossy codec, or its "hi-res" is CD format. That check is written and has not been seen to fire: the demo add-on tells the truth.
 

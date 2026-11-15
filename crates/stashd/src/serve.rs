@@ -680,7 +680,7 @@ fn addons_route(
                 Ok(addon) => addon,
                 Err(e) => {
                     let status = match e.code {
-                        Code::BadRequest | Code::InvalidResponse => 400,
+                        Code::BadRequest | Code::InvalidResponse | Code::Refused => 400,
                         _ => 502,
                     };
                     let mut error = addon_error(&e);
