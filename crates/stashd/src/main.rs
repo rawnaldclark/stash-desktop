@@ -88,11 +88,12 @@ enum Command {
         seconds: f32,
     },
     /// Bring in a library from Stash on a phone or the web player: the file "Export for Stash on the web" or
-    /// "Save a backup" wrote. Only adds; importing the same file again changes nothing.
+    /// "Save a backup" wrote, or the Android app's backup (.zip) or its database (stash.db). Only adds; importing
+    /// the same file again changes nothing.
     Import {
         #[arg(long)]
         db: PathBuf,
-        /// The library file (stash-library-YYYY-MM-DD.json).
+        /// The file: stash-library-YYYY-MM-DD.json, a backup .zip, or stash.db.
         file: PathBuf,
     },
     /// Write the library as the file Stash on a phone or the web reads (likes, playlists, plays), to import there.
@@ -124,13 +125,8 @@ enum Command {
 }
 
 fn import(db: &Path, file: &Path) -> Result<()> {
-    let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
     let started = Instant::now();
-    let incoming = stash_core::import::web_library::read(&bytes, now_ms)?;
+    let incoming = stash_core::import::read_file(file)?;
     let read = started.elapsed();
     let opening = Instant::now();
     let mut library = Library::open(db).with_context(|| format!("opening {}", db.display()))?;
@@ -139,10 +135,11 @@ fn import(db: &Path, file: &Path) -> Result<()> {
     let summary = library.import(&incoming)?;
     let merged = merging.elapsed();
     println!(
-        "{} likes, {} playlists, {} plays in the file{}",
+        "{} likes, {} playlists, {} plays and {} other songs in the file{}",
         incoming.likes.len(),
         incoming.playlists.len(),
         incoming.plays.len(),
+        incoming.songs.len(),
         incoming
             .generator
             .as_deref()

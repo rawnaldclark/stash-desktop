@@ -8,6 +8,7 @@
 //! Importing adds. It never removes, reorders or un-likes, so the same file can be imported twice, and a newer one
 //! after an older one.
 
+pub mod android;
 pub mod web_library;
 
 use std::collections::{HashMap, HashSet};
@@ -52,7 +53,8 @@ pub struct Playlist {
 /// Everything one file holds.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Incoming {
-    /// What kind of file it was: "web-library" or "android-backup".
+    /// What kind of file it was: "web-library" (the shared library file) or "android-library" (the app's database
+    /// or its backup archive).
     pub source: &'static str,
     /// Who wrote it, in the file's own words.
     pub generator: Option<String>,
@@ -99,6 +101,43 @@ pub enum ImportError {
 impl From<rusqlite::Error> for ImportError {
     fn from(e: rusqlite::Error) -> Self {
         ImportError::Library(e.into())
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Reads whatever kind of Stash library `bytes` is: the shared library file, the Android app's backup archive, or
+/// the app's database itself.
+pub fn read_bytes(bytes: &[u8]) -> Result<Incoming, ImportError> {
+    if bytes.starts_with(android::SQLITE_MAGIC) {
+        android::read_database_bytes(bytes, now_ms())
+    } else if bytes.starts_with(b"PK") {
+        android::read_backup(std::io::Cursor::new(bytes), now_ms())
+    } else {
+        web_library::read(bytes, now_ms())
+    }
+}
+
+/// Reads the Stash library in the file at `path`, whatever kind it is. A database is read with the files beside it
+/// that hold its newest writes.
+pub fn read_file(path: &std::path::Path) -> Result<Incoming, ImportError> {
+    use std::io::Read;
+    let unreadable =
+        |e: std::io::Error| ImportError::Unreadable(format!("That file could not be read ({e})"));
+    let mut file = std::fs::File::open(path).map_err(unreadable)?;
+    let mut head = [0u8; 16];
+    let got = file.read(&mut head).map_err(unreadable)?;
+    if head[..got].starts_with(android::SQLITE_MAGIC) {
+        android::read_database(path, now_ms())
+    } else if head[..got].starts_with(b"PK") {
+        android::read_backup(std::fs::File::open(path).map_err(unreadable)?, now_ms())
+    } else {
+        web_library::read(&std::fs::read(path).map_err(unreadable)?, now_ms())
     }
 }
 

@@ -22,8 +22,8 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use stash_core::addons::{Addon, AddonError, Code, StreamRequest, Track};
 use stash_core::audio::{Output, find_library};
+use stash_core::import::ImportError;
 use stash_core::import::Song;
-use stash_core::import::{ImportError, web_library};
 use stash_core::player::{
     AddonTrack, Failure, Located, OnPlay, Player, QueueItem, Resolver, Settings,
 };
@@ -35,8 +35,9 @@ use url::Url;
 const PAGE_CAP: usize = 500;
 /// The largest body the API reads.
 const BODY_CAP: u64 = 256 * 1024;
-/// The largest file an import takes: the library file's own limit.
-const IMPORT_CAP: u64 = 64 * 1024 * 1024;
+/// The largest file an import takes. (The shared library file has its own, smaller limit; a phone's database or
+/// backup can be bigger.)
+const IMPORT_CAP: u64 = 512 * 1024 * 1024;
 /// How many requests are answered at once.
 const WORKERS: usize = 8;
 /// The longest text taken from an add-on's answer, or from the window about an add-on's track.
@@ -847,7 +848,8 @@ fn lists_route(state: &State, request: &mut Request, path: &str) -> Result<Optio
     Ok(Some(reply_json(200, answer)))
 }
 
-/// Takes in a library from another Stash: the request's body is the file. The file is read and checked with nothing
+/// Takes in a library from another Stash: the request's body is the file (the shared library file, the Android
+/// app's backup, or its database). The file is read and checked with nothing
 /// else waiting, then merged in one go.
 fn import_route(state: &State, request: &mut Request) -> Result<Reply> {
     let mut bytes = Vec::new();
@@ -859,7 +861,7 @@ fn import_route(state: &State, request: &mut Request) -> Result<Reply> {
     if bytes.len() as u64 > IMPORT_CAP {
         return Ok(refused(&ImportError::TooBig));
     }
-    let incoming = match web_library::read(&bytes, now_ms()) {
+    let incoming = match stash_core::import::read_bytes(&bytes) {
         Ok(incoming) => incoming,
         Err(e) => return Ok(refused(&e)),
     };

@@ -566,12 +566,12 @@
         {/each}
       </div>
       <div class="bring">
-        <input bind:this={picker} type="file" accept=".json,application/json" onchange={importFile} hidden />
+        <input bind:this={picker} type="file" accept=".json,.zip,.db,application/json,application/zip" onchange={importFile} hidden />
         <button type="button" class="plain-button" disabled={importing} onclick={() => picker?.click()}>
           {importing ? "Importing…" : "Import a library…"}
         </button>
         <button type="button" class="plain-button" onclick={saveFile}>Save a library file</button>
-        <p>One file carries likes, playlists and plays between this computer, Stash on your phone and the web player.</p>
+        <p>One file carries likes, playlists and plays between this computer, Stash on your phone and the web player. The phone's Backup (.zip) can be imported too.</p>
       </div>
     </nav>
   {/if}
