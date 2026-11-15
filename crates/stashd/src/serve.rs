@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use serde_json::json;
 use stash_core::Library;
+use stash_core::audio::{Output, find_library};
+use stash_core::player::Player;
 use tiny_http::{Header, Method, Request, Response, Server};
 use url::Url;
 
@@ -27,6 +29,10 @@ pub struct Options {
     pub port: u16,
     /// Where a measurement the UI posts to `/api/bench-result` is written; the server then stops.
     pub bench_out: Option<PathBuf>,
+    /// Where the player sends its sound; `None` runs the core without a player.
+    pub audio: Option<Output>,
+    /// The libmpv file for the player; without it, the one `STASH_MPV_LIBRARY` names or one beside the program.
+    pub mpv: Option<PathBuf>,
 }
 
 type Reply = Response<std::io::Cursor<Vec<u8>>>;
@@ -73,6 +79,8 @@ pub struct Core {
     server: Server,
     options: Options,
     port: u16,
+    /// The player, or the reason there is none (no audio engine found, or it would not start).
+    player: std::result::Result<Player, String>,
 }
 
 impl Core {
@@ -87,11 +95,19 @@ impl Core {
             .to_ip()
             .map(|a| a.port())
             .unwrap_or(options.port);
+        let player = match &options.audio {
+            None => Err("this core runs without a player".to_string()),
+            Some(output) => match options.mpv.clone().or_else(find_library) {
+                None => Err("the audio engine (libmpv) was not found".to_string()),
+                Some(engine) => Player::start(&engine, output).map_err(|e| e.to_string()),
+            },
+        };
         Ok(Self {
             library,
             server,
             options,
             port,
+            player,
         })
     }
 
@@ -106,6 +122,7 @@ impl Core {
             server,
             options,
             port,
+            player,
         } = self;
         for mut request in server.incoming_requests() {
             let host_ok = find(&request, "Host").is_some_and(|h| {
@@ -122,7 +139,7 @@ impl Core {
             } else if *request.method() == Method::Options {
                 reply(204, "text/plain", Vec::new())
             } else {
-                match route(&library, &options, &mut request) {
+                match route(&library, &options, &player, &mut request) {
                     Ok((response, finished)) => {
                         stop = finished;
                         response
@@ -154,7 +171,88 @@ pub fn serve(options: Options) -> Result<()> {
 }
 
 /// The answer to one request, and whether the server is done (a measurement arrived).
-fn route(library: &Library, options: &Options, request: &mut Request) -> Result<(Reply, bool)> {
+/// The body of a request as JSON (an empty body is `{}`).
+fn body_json(request: &mut Request) -> Result<serde_json::Value> {
+    let mut body = String::new();
+    request
+        .as_reader()
+        .take(BODY_CAP)
+        .read_to_string(&mut body)?;
+    if body.trim().is_empty() {
+        return Ok(json!({}));
+    }
+    serde_json::from_str(&body).context("the request's body is not JSON")
+}
+
+/// The player's state as the window reads it. Without a player: `available: false` and the reason.
+fn player_reply(player: &std::result::Result<Player, String>) -> Reply {
+    match player {
+        Ok(player) => {
+            let mut state = json!(player.state());
+            state["available"] = json!(true);
+            reply_json(200, state)
+        }
+        Err(why) => reply_json(
+            200,
+            json!({ "available": false, "reason": why, "status": "idle" }),
+        ),
+    }
+}
+
+/// One of the player's routes. `None`: the path is not one of them.
+fn player_route(
+    library: &Library,
+    player: &std::result::Result<Player, String>,
+    request: &mut Request,
+    path: &str,
+) -> Result<Option<Reply>> {
+    if *request.method() == Method::Get && path == "/api/player" {
+        return Ok(Some(player_reply(player)));
+    }
+    if *request.method() != Method::Post || !path.starts_with("/api/player/") {
+        return Ok(None);
+    }
+    let Ok(playing) = player else {
+        return Ok(Some(player_reply(player)));
+    };
+    let body = body_json(request)?;
+    match path {
+        // What to play: `{"ids": [...]}` in that order, or `{"offset": n}` for the library's rows from there on.
+        "/api/player/play" => {
+            let ids: Vec<i64> = match body.get("ids").and_then(|v| v.as_array()) {
+                Some(ids) => ids
+                    .iter()
+                    .filter_map(|v| v.as_i64())
+                    .take(PAGE_CAP)
+                    .collect(),
+                None => {
+                    let offset = body.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let count = body.get("count").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
+                    library.track_ids_at(offset, count.clamp(1, PAGE_CAP))?
+                }
+            };
+            playing.play(library.queue_items(&ids)?)?;
+        }
+        "/api/player/pause" => {
+            playing.set_paused(body.get("paused").and_then(|v| v.as_bool()).unwrap_or(true))?
+        }
+        "/api/player/next" => playing.next()?,
+        "/api/player/previous" => playing.previous()?,
+        "/api/player/seek" => {
+            playing.seek_to(body.get("seconds").and_then(|v| v.as_f64()).unwrap_or(0.0))?
+        }
+        "/api/player/stop" => playing.stop()?,
+        _ => return Ok(None),
+    }
+    Ok(Some(player_reply(player)))
+}
+
+fn route(
+    library: &Library,
+    options: &Options,
+    player: &std::result::Result<Player, String>,
+    request: &mut Request,
+) -> Result<(Reply, bool)> {
     let url =
         Url::parse(&format!("http://local{}", request.url())).context("the request's path")?;
     let param = |name: &str| {
@@ -169,6 +267,10 @@ fn route(library: &Library, options: &Options, request: &mut Request) -> Result<
     };
     let limit = |default: usize| number("limit", default).clamp(1, PAGE_CAP);
 
+    let path = url.path().to_string();
+    if let Some(response) = player_route(library, player, request, &path)? {
+        return Ok((response, false));
+    }
     let response = match (request.method(), url.path()) {
         (Method::Get, "/api/counts") => reply_json(200, json!(library.counts()?)),
         (Method::Get, "/api/tracks") => reply_json(

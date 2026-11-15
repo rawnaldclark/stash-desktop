@@ -115,6 +115,9 @@ pub struct Mpv {
 
 // mpv's client API is thread-safe: a handle may be used from any thread (client.h, "Threads").
 unsafe impl Send for Mpv {}
+// The same holds across threads at once: commands and properties may be used from any thread while another waits
+// for events. Only one thread may wait for events at a time; the player keeps that to its own thread.
+unsafe impl Sync for Mpv {}
 
 fn audio(message: impl Into<String>) -> Error {
     Error::Audio(message.into())

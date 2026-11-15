@@ -336,6 +336,44 @@ impl Library {
         Ok(rows)
     }
 
+    /// The tracks with these ids as a queue plays them, in the order asked. Ids the library does not have, tracks
+    /// whose file is marked missing, and tracks that are not files (add-on tracks need their add-on asked first) are
+    /// left out.
+    pub fn queue_items(&self, ids: &[i64]) -> Result<Vec<crate::player::QueueItem>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT t.id, t.title, a.name, al.title, t.locator
+             FROM tracks t JOIN artists a ON a.id = t.artist_id LEFT JOIN albums al ON al.id = t.album_id
+             WHERE t.id = ?1 AND t.origin = 'file' AND t.missing_since IS NULL",
+        )?;
+        let mut items = Vec::with_capacity(ids.len());
+        for id in ids {
+            let mut rows = stmt.query_map([id], |r| {
+                Ok(crate::player::QueueItem {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    artist: r.get(2)?,
+                    album: r.get(3)?,
+                    locator: r.get(4)?,
+                })
+            })?;
+            if let Some(item) = rows.next().transpose()? {
+                items.push(item);
+            }
+        }
+        Ok(items)
+    }
+
+    /// The ids of the tracks from `offset` on in title order: what plays when a row of the list is started.
+    pub fn track_ids_at(&self, offset: usize, limit: usize) -> Result<Vec<i64>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT id FROM tracks ORDER BY sort_key, id LIMIT ?1 OFFSET ?2")?;
+        let ids = stmt
+            .query_map(params![limit as i64, offset as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?;
+        Ok(ids)
+    }
+
     /// The page of albums at `offset` in title order, each with its track count: an album grid at any scroll position.
     pub fn albums_at(&self, offset: usize, limit: usize) -> Result<Vec<AlbumRow>> {
         let mut stmt = self.conn.prepare_cached(

@@ -7,6 +7,7 @@ pub mod addons;
 pub mod audio;
 pub mod db;
 pub mod library;
+pub mod player;
 pub mod scan;
 pub mod synth;
 

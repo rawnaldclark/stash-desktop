@@ -20,6 +20,8 @@ pub enum Output {
     Device { exclusive: bool },
     /// Nowhere, as fast as the decoder goes.
     Null,
+    /// Nowhere, at the speed of a sound card: a player with no sound, for tests of pausing and seeking.
+    Silent,
     /// A WAV file holding the output stream sample for sample, as fast as the decoder goes.
     PcmFile(PathBuf),
 }
@@ -73,6 +75,7 @@ impl Engine {
                 "audio-exclusive",
                 if *exclusive { "yes" } else { "no" }.into(),
             )),
+            Output::Silent => options.push(("ao", "null".into())),
             Output::Null => {
                 options.push(("ao", "null".into()));
                 options.push(("ao-null-untimed", "yes".into()));
@@ -105,10 +108,10 @@ impl Engine {
         self.mpv.set("pause", if paused { "yes" } else { "no" })
     }
 
-    /// Jumps to `seconds` from the start of the current track.
+    /// Jumps to `seconds` from the start of the current track, to the sample (not to the nearest packet).
     pub fn seek_to(&self, seconds: f64) -> Result<()> {
         self.mpv
-            .command(&["seek", &format!("{seconds:.3}"), "absolute"])
+            .command(&["seek", &format!("{seconds:.3}"), "absolute+exact"])
     }
 
     pub fn stop(&self) -> Result<()> {

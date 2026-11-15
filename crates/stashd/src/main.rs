@@ -42,6 +42,15 @@ enum Command {
         /// Write the measurement the UI posts to this file, then stop.
         #[arg(long)]
         bench_out: Option<PathBuf>,
+        /// The libmpv file for the player (else STASH_MPV_LIBRARY, else one beside this program).
+        #[arg(long)]
+        mpv: Option<PathBuf>,
+        /// Take the sound card for Stash alone: each track at its own format, other programs silent.
+        #[arg(long)]
+        exclusive: bool,
+        /// Run without a player.
+        #[arg(long)]
+        no_audio: bool,
     },
     /// Play a moment of silence at several formats and report what the sound card opened at for each.
     OutputCheck {
@@ -103,11 +112,16 @@ fn main() -> Result<()> {
             ui,
             port,
             bench_out,
+            mpv,
+            exclusive,
+            no_audio,
         } => stashd::serve::serve(stashd::serve::Options {
             db,
             ui,
             port,
             bench_out,
+            audio: (!no_audio).then_some(stash_core::audio::Output::Device { exclusive }),
+            mpv,
         }),
     }
 }

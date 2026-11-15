@@ -42,6 +42,10 @@ fn main() -> Result<()> {
         ui: None,
         port: 0,
         bench_out,
+        audio: Some(stash_core::audio::Output::Device {
+            exclusive: std::env::var_os("STASH_EXCLUSIVE").is_some_and(|v| v == "1"),
+        }),
+        mpv: None,
     })?;
     let port = core.port();
     std::thread::Builder::new()
