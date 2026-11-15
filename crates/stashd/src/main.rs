@@ -1,6 +1,8 @@
 //! `stashd`: the Stash desktop core without a window. For now it makes a test library and measures it; it will
 //! grow the audio engine, the add-on client and the local API that every shell talks to.
 
+mod serve;
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -28,6 +30,19 @@ enum Command {
         #[arg(long, default_value_t = 1)]
         seed: u64,
     },
+    /// Run the core's local API on this computer (and serve the built UI, if a folder is given).
+    Serve {
+        #[arg(long)]
+        db: PathBuf,
+        /// The folder of the built UI (index.html and its files).
+        #[arg(long)]
+        ui: Option<PathBuf>,
+        #[arg(long, default_value_t = 47821)]
+        port: u16,
+        /// Write the measurement the UI posts to this file, then stop.
+        #[arg(long)]
+        bench_out: Option<PathBuf>,
+    },
     /// Measure opening, searching and paging a library, as a list or grid would use it.
     Bench {
         #[arg(long)]
@@ -42,6 +57,17 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Synth { db, tracks, seed } => synth_library(&db, tracks, seed),
         Command::Bench { db, json } => bench(&db, json),
+        Command::Serve {
+            db,
+            ui,
+            port,
+            bench_out,
+        } => serve::serve(serve::Options {
+            db,
+            ui,
+            port,
+            bench_out,
+        }),
     }
 }
 
