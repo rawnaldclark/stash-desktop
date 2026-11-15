@@ -86,6 +86,9 @@ enum Command {
         /// How long each file is, in seconds.
         #[arg(long, default_value_t = 0.1)]
         seconds: f32,
+        /// Put a made-up cover inside each file (the same for the same album), to see pictures in the window.
+        #[arg(long)]
+        covers: bool,
     },
     /// Bring in a library from Stash on a phone or the web player: the file "Export for Stash on the web" or
     /// "Save a backup" wrote, or the Android app's backup (.zip) or its database (stash.db). Only adds; importing
@@ -234,8 +237,9 @@ fn main() -> Result<()> {
             tracks,
             seed,
             seconds,
+            covers,
         } => {
-            let written = synth::write_files(&dir, tracks, seed, seconds)
+            let written = synth::write_files(&dir, tracks, seed, seconds, covers)
                 .with_context(|| format!("writing into {}", dir.display()))?;
             println!("{written} files written under {}", dir.display());
             Ok(())

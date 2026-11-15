@@ -169,10 +169,28 @@ pub struct StoredAddon {
 /// ([`Library::search`]). Ranking 2,000 rows takes a few milliseconds; ranking 50,000 took about 170 ms.
 pub const RANK_CAP: usize = 2_000;
 
-const TRACK_COLUMNS: &str = "t.id, t.title, a.name, al.title, t.duration_ms, t.codec, t.sample_rate, t.bit_depth, t.origin, t.sort_key, t.liked_at_ms IS NOT NULL, t.art_url, t.album_id, t.artist_id, t.added_at * 1000, t.isrc, t.liked_at_ms";
-const ALBUM_COLUMNS: &str = "al.id, al.title, a.name, al.artist_id, al.year,
+/// A track's picture as an address: the one another Stash gave for it, else, for a file that is here and is not
+/// known to have no picture, the core's own address for the file's picture ([`crate::covers::ADDRESS`]).
+macro_rules! art {
+    () => {
+        "COALESCE(t.art_url, CASE WHEN t.origin = 'file' AND t.missing_since IS NULL AND IFNULL(t.cover, 1) <> 0 THEN '/api/art/track/' || t.id END)"
+    };
+}
+
+const TRACK_COLUMNS: &str = concat!(
+    "t.id, t.title, a.name, al.title, t.duration_ms, t.codec, t.sample_rate, t.bit_depth, t.origin, t.sort_key, t.liked_at_ms IS NOT NULL, ",
+    art!(),
+    ", t.album_id, t.artist_id, t.added_at * 1000, t.isrc, t.liked_at_ms"
+);
+const ALBUM_COLUMNS: &str = concat!(
+    "al.id, al.title, a.name, al.artist_id, al.year,
     (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id),
-    (SELECT t.art_url FROM tracks t WHERE t.album_id = al.id AND t.art_url IS NOT NULL LIMIT 1)";
+    (SELECT ",
+    art!(),
+    " FROM tracks t WHERE t.album_id = al.id AND ",
+    art!(),
+    " IS NOT NULL ORDER BY t.art_url IS NULL, t.disc_no, t.track_no LIMIT 1)"
+);
 
 fn album_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AlbumRow> {
     Ok(AlbumRow {
@@ -186,10 +204,16 @@ fn album_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AlbumRow> {
     })
 }
 
-const ARTIST_COLUMNS: &str = "a.id, a.name,
+const ARTIST_COLUMNS: &str = concat!(
+    "a.id, a.name,
     (SELECT COUNT(*) FROM tracks t WHERE t.artist_id = a.id),
     (SELECT COUNT(*) FROM albums al WHERE al.artist_id = a.id),
-    (SELECT t.art_url FROM tracks t WHERE t.artist_id = a.id AND t.art_url IS NOT NULL LIMIT 1)";
+    (SELECT ",
+    art!(),
+    " FROM tracks t WHERE t.artist_id = a.id AND ",
+    art!(),
+    " IS NOT NULL ORDER BY t.art_url IS NULL LIMIT 1)"
+);
 
 fn artist_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArtistRow> {
     Ok(ArtistRow {
@@ -269,6 +293,27 @@ impl Library {
     }
 
     /// What the library holds for the file at `path`, if anything.
+    /// Where the file of track `id` is, to read its picture from: `None` for a track that is not a file here, or
+    /// whose file is marked missing.
+    pub fn file_of(&self, id: i64) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT locator FROM tracks WHERE id = ?1 AND origin = 'file' AND missing_since IS NULL AND locator <> ''",
+        )?;
+        let mut rows = stmt.query_map([id], |r| r.get(0))?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// Keeps whether the file of track `id` has a picture, so one without is not offered (or read) again. A scan
+    /// that finds the file changed forgets it.
+    pub fn set_cover(&self, id: i64, has: bool) -> Result<()> {
+        self.conn
+            .prepare_cached(
+                "UPDATE tracks SET cover = ?2 WHERE id = ?1 AND IFNULL(cover, -1) <> ?2",
+            )?
+            .execute(params![id, has as i64])?;
+        Ok(())
+    }
+
     pub fn file_state(&self, path: &str) -> Result<Option<FileState>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, file_size, file_mtime, missing_since IS NOT NULL FROM tracks
@@ -447,9 +492,13 @@ impl Library {
     /// left out.
     pub fn queue_items(&self, ids: &[i64]) -> Result<Vec<crate::player::QueueItem>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT t.id, t.title, a.name, al.title, t.locator, t.art_url, t.duration_ms
+            concat!(
+                "SELECT t.id, t.title, a.name, al.title, t.locator, ",
+                art!(),
+                ", t.duration_ms
              FROM tracks t JOIN artists a ON a.id = t.artist_id LEFT JOIN albums al ON al.id = t.album_id
-             WHERE t.id = ?1 AND ((t.origin = 'file' AND t.missing_since IS NULL) OR t.origin = 'described')",
+             WHERE t.id = ?1 AND ((t.origin = 'file' AND t.missing_since IS NULL) OR t.origin = 'described')"
+            ),
         )?;
         let mut items = Vec::with_capacity(ids.len());
         for id in ids {
@@ -878,7 +927,8 @@ impl<'t> Writer<'t> {
             change_track: tx.prepare(
                 "UPDATE tracks SET title = ?1, artist_id = ?2, album_id = ?3, disc_no = ?4, track_no = ?5, duration_ms = ?6,
                                    isrc = ?7, codec = ?8, sample_rate = ?9, bit_depth = ?10, sort_key = ?11,
-                                   file_size = ?12, file_mtime = ?13, missing_since = NULL, words_key = ?15
+                                   file_size = ?12, file_mtime = ?13, missing_since = NULL, words_key = ?15,
+                                   cover = NULL
                  WHERE id = ?14",
             )?,
             drop_fts: tx.prepare("DELETE FROM tracks_fts WHERE rowid = ?1")?,

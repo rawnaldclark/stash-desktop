@@ -230,14 +230,18 @@ pub fn tracks(count: usize, seed: u64) -> impl Iterator<Item = NewTrack> {
 }
 
 /// Writes `count` made-up tracks as real files under `root` (`Artist/Album/NN Title.wav`): `seconds` of
-/// silence each, with ID3 tags, so a folder scan has something true to read. Returns how many were written.
+/// silence each, with ID3 tags, so a folder scan has something true to read. With `covers`, each file also carries
+/// its album's made-up cover (a small two-colour picture, the same for the same album). Returns how many were
+/// written.
 pub fn write_files(
     root: &std::path::Path,
     count: usize,
     seed: u64,
     seconds: f32,
+    covers: bool,
 ) -> std::io::Result<usize> {
     use lofty::config::WriteOptions;
+    use lofty::picture::{MimeType, Picture, PictureType};
     use lofty::prelude::*;
     use lofty::tag::{Tag, TagType};
 
@@ -266,11 +270,20 @@ pub fn write_files(
         std::fs::create_dir_all(&folder)?;
         let path = folder.join(format!("{:02} {}.wav", track.track_no, track.title));
         std::fs::write(&path, &wav)?;
+        let picture = covers.then(|| cover(&format!("{}/{album}", track.artist)));
         let mut tag = Tag::new(TagType::Id3v2);
         tag.set_title(track.title);
         tag.set_artist(track.artist);
         tag.set_album(album);
         tag.set_track(track.track_no);
+        if let Some(picture) = picture {
+            tag.push_picture(
+                Picture::unchecked(picture)
+                    .pic_type(PictureType::CoverFront)
+                    .mime_type(MimeType::Bmp)
+                    .build(),
+            );
+        }
         tag.save_to_path(&path, WriteOptions::default())
             .map_err(std::io::Error::other)?;
         written += 1;
@@ -278,9 +291,64 @@ pub fn write_files(
     Ok(written)
 }
 
+/// A made-up cover for `name`: a 48 by 48 picture running from one colour to another, both chosen by the name, as
+/// an uncompressed BMP (the one image a few lines can write).
+fn cover(name: &str) -> Vec<u8> {
+    const SIDE: u32 = 48;
+    let mut hash: u32 = 2_166_136_261;
+    for byte in name.bytes() {
+        hash = (hash ^ u32::from(byte)).wrapping_mul(16_777_619);
+    }
+    let from = [
+        hash as u8 | 0x40,
+        (hash >> 8) as u8 | 0x20,
+        (hash >> 16) as u8 | 0x40,
+    ];
+    let to = [
+        (hash >> 20) as u8 & 0x5F,
+        (hash >> 12) as u8 & 0x3F,
+        (hash >> 4) as u8 & 0x5F,
+    ];
+    let pixels = SIDE * SIDE * 3;
+    let mut bmp = Vec::with_capacity(54 + pixels as usize);
+    bmp.extend_from_slice(b"BM");
+    bmp.extend_from_slice(&(54 + pixels).to_le_bytes());
+    bmp.extend_from_slice(&0u32.to_le_bytes());
+    bmp.extend_from_slice(&54u32.to_le_bytes());
+    bmp.extend_from_slice(&40u32.to_le_bytes());
+    bmp.extend_from_slice(&SIDE.to_le_bytes());
+    bmp.extend_from_slice(&SIDE.to_le_bytes());
+    bmp.extend_from_slice(&1u16.to_le_bytes());
+    bmp.extend_from_slice(&24u16.to_le_bytes());
+    bmp.extend_from_slice(&0u32.to_le_bytes());
+    bmp.extend_from_slice(&pixels.to_le_bytes());
+    bmp.extend_from_slice(&[0; 16]);
+    for y in 0..SIDE {
+        for x in 0..SIDE {
+            let along = (x + y) * 255 / (2 * SIDE - 2);
+            for channel in 0..3 {
+                let mixed = (u32::from(from[channel]) * (255 - along)
+                    + u32::from(to[channel]) * along)
+                    / 255;
+                bmp.push(mixed as u8);
+            }
+        }
+    }
+    bmp
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_made_up_cover_is_a_picture_and_the_same_for_the_same_album() {
+        let one = cover("Band/Record");
+        assert_eq!(&one[..2], b"BM");
+        assert_eq!(one.len(), 54 + 48 * 48 * 3);
+        assert_eq!(one, cover("Band/Record"));
+        assert_ne!(one, cover("Band/Another record"));
+    }
 
     #[test]
     fn the_same_seed_makes_the_same_library_of_the_asked_size() {

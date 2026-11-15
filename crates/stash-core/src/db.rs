@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
@@ -204,6 +204,11 @@ const V6: &str = "
     ) WITHOUT ROWID;
 ";
 
+/// Whether a file has a picture (inside it or beside it): unknown until its picture is first asked for.
+const V7: &str = "
+    ALTER TABLE tracks ADD COLUMN cover INTEGER;
+";
+
 /// Opens (or creates) the library at `path` and migrates it to [`SCHEMA_VERSION`].
 pub fn open(path: &std::path::Path) -> Result<Connection> {
     prepare(Connection::open(path)?)
@@ -278,6 +283,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V6)?;
         tx.pragma_update(None, "user_version", 6)?;
+        tx.commit()?;
+    }
+    if found < 7 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V7)?;
+        tx.pragma_update(None, "user_version", 7)?;
         tx.commit()?;
     }
     Ok(())

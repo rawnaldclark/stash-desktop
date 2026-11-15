@@ -79,6 +79,15 @@ fn reply(status: u16, content_type: &str, body: Vec<u8>) -> Reply {
         .with_header(header("Cache-Control", "no-store"))
 }
 
+/// A picture the window may keep for a while: unlike every other answer, which is as things are this moment.
+fn reply_picture(content_type: &str, body: Vec<u8>) -> Reply {
+    Response::from_data(body)
+        .with_status_code(200)
+        .with_header(header("Content-Type", content_type))
+        .with_header(header("Cache-Control", "private, max-age=3600"))
+        .with_header(header("X-Content-Type-Options", "nosniff"))
+}
+
 fn reply_json(status: u16, value: Value) -> Reply {
     reply(status, "application/json", value.to_string().into_bytes())
 }
@@ -1233,12 +1242,28 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
     if let Some(response) = scan_route(state, request, &path)? {
         return Ok((response, false));
     }
-    // One album or one artist: /api/albums/{id}, /api/artists/{id}
+    // One album or one artist: /api/albums/{id}, /api/artists/{id}; the picture of a file: /api/art/track/{id}
     if *request.method() == Method::Get {
         let one = |prefix: &str| {
             path.strip_prefix(prefix)
                 .and_then(|id| id.parse::<i64>().ok())
         };
+        if let Some(id) = one(stash_core::covers::ADDRESS) {
+            // The file is read without the library held: a large picture on a slow disk holds nothing else up.
+            let Some(file) = library().file_of(id)? else {
+                return Ok((refuse(404, "no such file in the library"), false));
+            };
+            let cover = stash_core::covers::of_file(Path::new(&file));
+            library().set_cover(id, cover.is_some())?;
+            return Ok((
+                match cover {
+                    // The picture of a file changes only when the file does; the window may keep it for the hour.
+                    Some(cover) => reply_picture(cover.content_type, cover.bytes),
+                    None => refuse(404, "this file has no picture"),
+                },
+                false,
+            ));
+        }
         if let Some(id) = one("/api/albums/") {
             return Ok((
                 match library().album(id)? {

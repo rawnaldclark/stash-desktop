@@ -1591,3 +1591,117 @@ fn a_screen_of_the_window_is_the_page_and_a_missing_file_is_missing() {
     assert_eq!(fetch("/..%2Flibrary.db").0 / 100, 4);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_files_picture_is_served_and_a_file_without_one_stops_offering_it() {
+    let dir = std::env::temp_dir().join(format!("stash-api-art-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let with = dir.join("With");
+    let without = dir.join("Without");
+    let beside = dir.join("Beside");
+    for folder in [&without, &beside] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    stash_core::synth::write_files(&with, 3, 4, 0.1, true).unwrap();
+    silence(&without.join("bare.wav"));
+    silence(&beside.join("kept.wav"));
+    std::fs::write(beside.join("Folder.png"), b"\x89PNG\r\n\x1a\nthe rest").unwrap();
+    let db = dir.join("library.db");
+    {
+        let mut library = Library::open(&db).unwrap();
+        scan_folder(&mut library, &dir, |_| {}).unwrap();
+    }
+    let core = Core::bind(Options {
+        db,
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: None,
+        mpv: None,
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let picture = |address: &str| {
+        let mut response = agent.get(&format!("{base}{address}")).call().unwrap();
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string()
+        };
+        let (kind, kept) = (header("content-type"), header("cache-control"));
+        let status = response.status().as_u16();
+        (
+            status,
+            kind,
+            kept,
+            response.body_mut().read_to_vec().unwrap_or_default(),
+        )
+    };
+    let client = Client {
+        agent: agent.clone(),
+        base: base.clone(),
+    };
+    let row = |title: &str| {
+        let (_, found) = client.get(&format!("/api/search?q={title}&limit=1"));
+        found["rows"][0].clone()
+    };
+
+    // Every file is offered a picture at first: whether it has one is not known until it is asked for.
+    let bare = row("bare");
+    let address = bare["art"].as_str().unwrap().to_string();
+    assert_eq!(address, format!("/api/art/track/{}", bare["id"]));
+    let (status, ..) = picture(&address);
+    assert_eq!(status, 404);
+    // Asked once and found without: the row no longer offers one.
+    assert!(row("bare")["art"].is_null());
+
+    // The picture inside a file, as the image its bytes are, and the window may keep it.
+    let (_, all) = client.get("/api/tracks?offset=0&limit=10");
+    let inside = all["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["album"].is_string())
+        .unwrap()
+        .clone();
+    let (status, kind, kept, bytes) = picture(inside["art"].as_str().unwrap());
+    assert_eq!((status, kind.as_str()), (200, "image/bmp"));
+    assert!(kept.contains("max-age"), "{kept}");
+    assert_eq!(&bytes[..2], b"BM");
+    // Its album and its artist show the same picture.
+    let (_, album) = client.get(&format!("/api/albums/{}", inside["album_id"]));
+    assert!(
+        album["album"]["art"]
+            .as_str()
+            .unwrap()
+            .starts_with("/api/art/track/")
+    );
+    let (_, artist) = client.get(&format!("/api/artists/{}", inside["artist_id"]));
+    assert!(
+        artist["artist"]["art"]
+            .as_str()
+            .unwrap()
+            .starts_with("/api/art/track/")
+    );
+
+    // The folder's picture, for a file with none inside.
+    let kept_row = row("kept");
+    let (status, kind, _, _) = picture(kept_row["art"].as_str().unwrap());
+    assert_eq!((status, kind.as_str()), (200, "image/png"));
+    assert!(row("kept")["art"].is_string());
+
+    // Not a track, not a number.
+    assert_eq!(picture("/api/art/track/999999").0, 404);
+    assert_eq!(picture("/api/art/track/..%2Fx").0, 404);
+    let _ = std::fs::remove_dir_all(&dir);
+}
