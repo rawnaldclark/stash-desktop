@@ -152,7 +152,14 @@ fn a_track_that_cannot_be_played_is_named_and_the_queue_goes_on() {
     let state = until(&player, "the second track after the first failed", |s| {
         s.index == Some(1) && s.status == "playing"
     });
-    assert_eq!(state.error.as_deref(), Some("Gone could not be played"));
+    assert!(
+        state
+            .error
+            .as_deref()
+            .is_some_and(|e| e.starts_with("Gone could not be played: loading failed")),
+        "{:?}",
+        state.error
+    );
     assert_eq!(state.track.and_then(|t| t.id), Some(2));
 
     // A new queue while the old one is on the same place in its own (here: the second track of two, then the first
@@ -482,6 +489,88 @@ fn a_play_counts_once_half_the_track_was_really_played() {
     player.next().unwrap();
     until(&player, "the end of the queue", |s| s.status == "idle");
     assert_eq!(titles(), ["One", "Three"]);
+    drop(player);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_stream_that_does_not_start_is_asked_for_once_more() {
+    let Some(library) = library() else { return };
+    let dir = scratch("player-retry");
+    let good = dir.join("good.wav");
+    write_wav(&good, RATE, &signal(RATE as usize * 3 / 2));
+    // An add-on whose first link for "flaky" leads nowhere and whose second is good; "dead" never has a good one.
+    let asked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let resolver: Resolver = {
+        let (asked, good, nowhere) = (Arc::clone(&asked), good.clone(), dir.join("nowhere.wav"));
+        Arc::new(move |item: &QueueItem| {
+            let track = item
+                .addon
+                .as_ref()
+                .expect("an add-on's track")
+                .track
+                .clone();
+            let earlier = asked
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|t| **t == track)
+                .count();
+            asked.lock().unwrap().push(track.clone());
+            let path = if track == "dead" || (track == "flaky" && earlier == 0) {
+                &nowhere
+            } else {
+                &good
+            };
+            Ok(Located {
+                locator: path.to_string_lossy().into_owned(),
+                tier: None,
+                addon: Some("fake".into()),
+            })
+        })
+    };
+    let settings = Settings {
+        resolver: Some(resolver),
+        ask_ahead_seconds: 0.3,
+        ..Settings::default()
+    };
+    let player = Player::start_with(&library, &Output::Silent, settings).unwrap();
+
+    player
+        .play(vec![
+            from_addon("flaky", "Flaky"),
+            from_addon("dead", "Dead"),
+            from_addon("fine", "Fine"),
+        ])
+        .unwrap();
+    // The first link fails in the engine; the stream is asked for again and plays, with nothing left to say.
+    let flaky = until(
+        &player,
+        "the flaky track playing after its second link",
+        |s| s.status == "playing" && s.index == Some(0) && s.position_ms > 100,
+    );
+    assert_eq!(flaky.error, None);
+    assert_eq!(asked.lock().unwrap().clone(), ["flaky", "flaky"]);
+    // A stream that fails twice is left: the queue moves on and says why, in the engine's words.
+    let fine = until(&player, "the third track, the second being dead", |s| {
+        s.status == "playing" && s.index == Some(2)
+    });
+    assert!(
+        fine.error
+            .as_deref()
+            .is_some_and(|e| e.starts_with("Dead could not be played: loading failed")),
+        "{:?}",
+        fine.error
+    );
+    assert_eq!(
+        asked
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|t| *t == "dead")
+            .count(),
+        2
+    );
     drop(player);
     let _ = std::fs::remove_dir_all(&dir);
 }

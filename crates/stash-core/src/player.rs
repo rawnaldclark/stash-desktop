@@ -194,6 +194,12 @@ struct Shared {
     /// A seek asked for while the next track was still loading; it is done when the track has loaded.
     pending_seek: Option<f64>,
     heard: Option<Heard>,
+    /// The engine's last complaints about the track it is on: said with the failure when the track cannot be played.
+    complaints: Vec<String>,
+    /// Queue places whose stream failed in the engine and was asked for again, in this run of the queue.
+    retried: std::collections::HashSet<usize>,
+    /// A queue place to ask for again: its stream did not start.
+    retry: Option<usize>,
 }
 
 impl Shared {
@@ -452,6 +458,30 @@ impl Ctx {
         }
     }
 
+    /// Starts again the queue place whose stream did not start, asking for the stream anew.
+    fn retry_failed(&self) {
+        let generation = {
+            let mut shared = self.shared.lock().unwrap();
+            let Some(place) = shared.retry.take() else {
+                return;
+            };
+            shared.generation += 1;
+            shared.slots.clear();
+            shared.pos = None;
+            shared.starting = Some(place);
+            shared.ahead = place;
+            shared.extending = false;
+            shared.tries = 0;
+            shared.not_before = None;
+            shared.gave_up = false;
+            shared.pending_seek = None;
+            shared.error = None;
+            shared.generation
+        };
+        let _ = self.engine.stop();
+        self.run(true, move |ctx| ctx.start(generation));
+    }
+
     /// Called every time the engine reports something, and a few times a second besides: if the engine has nothing
     /// after the current track and the queue has, the next one is located and handed over.
     fn keep_ahead(&self) {
@@ -542,14 +572,56 @@ impl Player {
                             {
                                 ctx.shared.lock().unwrap().accepted = Some(text);
                             }
-                            Event::EndFile(EndReason::Error(_)) => {
+                            Event::Log {
+                                prefix,
+                                level,
+                                text,
+                            } if matches!(level.as_str(), "error" | "fatal") => {
+                                let mut shared = ctx.shared.lock().unwrap();
+                                if shared.complaints.len() < 6 {
+                                    shared.complaints.push(format!("{prefix}: {}", text.trim()));
+                                }
+                            }
+                            Event::EndFile(EndReason::Error(code)) => {
+                                let reason = ctx.engine.mpv().error_text(code);
                                 let mut shared = ctx.shared.lock().unwrap();
                                 let what = shared
                                     .index()
+                                    .or(shared.starting)
                                     .and_then(|i| shared.queue.get(i))
                                     .map(|t| t.title.clone())
                                     .unwrap_or_else(|| "A track".into());
-                                shared.error = Some(format!("{what} could not be played"));
+                                // The engine's own words, without any address in them: a stream's address is the
+                                // listener's key to it.
+                                let said: Vec<String> = std::iter::once(reason)
+                                    .chain(shared.complaints.drain(..))
+                                    .map(|line| {
+                                        line.split(' ')
+                                            .map(|word| {
+                                                if word.contains("://") {
+                                                    "(the stream)"
+                                                } else {
+                                                    word
+                                                }
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join(" ")
+                                    })
+                                    .filter(|line| !line.is_empty())
+                                    .collect();
+                                shared.error = Some(format!(
+                                    "{what} could not be played: {}",
+                                    said.join("; ")
+                                ));
+                                // A stream that did not start is asked for once more: its link may have run out, or
+                                // the first try at its server failed. A file that cannot be played stays that way.
+                                let place = shared.index().or(shared.starting);
+                                if let Some(place) = place
+                                    && shared.queue.get(place).is_some_and(|t| t.asks())
+                                    && shared.retried.insert(place)
+                                {
+                                    shared.retry = Some(place);
+                                }
                             }
                             // The engine only says its place when the number changes. A new playlist that starts on
                             // the same place as the old one (first track to first track) changes nothing, so the
@@ -564,6 +636,7 @@ impl Player {
                                     .map(|i| i as usize);
                                 let mut shared = ctx.shared.lock().unwrap();
                                 shared.pos = pos;
+                                shared.complaints.clear();
                                 if shared.slot().is_some() {
                                     shared.starting = None;
                                 }
@@ -577,6 +650,7 @@ impl Player {
                             Event::Shutdown => break,
                             _ => {}
                         }
+                        ctx.retry_failed();
                         ctx.keep_ahead();
                         ctx.listen(&mut last);
                     }
@@ -618,6 +692,8 @@ impl Player {
             shared.gave_up = false;
             shared.error = None;
             shared.pending_seek = None;
+            shared.retried.clear();
+            shared.retry = None;
             (shared.generation, shared.queue[place].asks())
         };
         if waits {

@@ -260,6 +260,11 @@ impl Mpv {
         )
     }
 
+    /// mpv's own words for one of its error codes: "loading failed", "audio output initialization failed".
+    pub fn error_text(&self, code: i32) -> String {
+        unsafe { text((self.api.error_string)(code)) }
+    }
+
     /// The next event, waiting up to `timeout_seconds` for one.
     pub fn wait_event(&self, timeout_seconds: f64) -> Event {
         // Safety: mpv returns a pointer to an event that stays valid until the next wait_event on this handle; it is
