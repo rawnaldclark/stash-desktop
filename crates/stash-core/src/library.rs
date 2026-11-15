@@ -94,6 +94,26 @@ pub struct Counts {
     pub tracks: u64,
     pub albums: u64,
     pub artists: u64,
+    pub liked: u64,
+    pub playlists: u64,
+}
+
+/// A playlist as a list of playlists shows it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PlaylistRow {
+    pub id: i64,
+    pub name: String,
+    pub tracks: u64,
+    /// A shared mix someone else owns.
+    pub followed: bool,
+}
+
+/// What the library knows a song by, for asking an add-on for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Described {
+    pub wanted: crate::addons::Wanted,
+    /// What sources call it: (source id, that source's id for it).
+    pub refs: Vec<(String, String)>,
 }
 
 pub struct Library {
@@ -150,17 +170,15 @@ impl Library {
     }
 
     pub fn counts(&self) -> Result<Counts> {
-        let n = |table: &str| -> Result<u64> {
-            Ok(self
-                .conn
-                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
-                    r.get::<_, i64>(0)
-                })? as u64)
+        let count = |sql: &str| -> Result<u64> {
+            Ok(self.conn.query_row(sql, [], |r| r.get::<_, i64>(0))? as u64)
         };
         Ok(Counts {
-            tracks: n("tracks")?,
-            albums: n("albums")?,
-            artists: n("artists")?,
+            tracks: count("SELECT COUNT(*) FROM tracks")?,
+            albums: count("SELECT COUNT(*) FROM albums")?,
+            artists: count("SELECT COUNT(*) FROM artists")?,
+            liked: count("SELECT COUNT(*) FROM tracks WHERE liked_at_ms IS NOT NULL")?,
+            playlists: count("SELECT COUNT(*) FROM playlists")?,
         })
     }
 
@@ -380,6 +398,137 @@ impl Library {
             }
         }
         Ok(items)
+    }
+
+    /// The listener's playlists, in their order.
+    pub fn playlists(&self) -> Result<Vec<PlaylistRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT p.id, p.name, (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id), p.follow_id IS NOT NULL
+             FROM playlists p ORDER BY p.position, p.id",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(PlaylistRow {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    tracks: r.get::<_, i64>(2)? as u64,
+                    followed: r.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The page of a playlist's tracks at `offset`, in the playlist's order.
+    pub fn playlist_tracks_at(
+        &self,
+        playlist: i64,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<TrackRow>> {
+        let sql = format!(
+            "SELECT {TRACK_COLUMNS}
+             FROM (SELECT track_id, position FROM playlist_items WHERE playlist_id = ?1 ORDER BY position LIMIT ?2 OFFSET ?3) i
+             JOIN tracks t ON t.id = i.track_id {TRACK_JOINS} ORDER BY i.position"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt
+            .query_map(params![playlist, limit as i64, offset as i64], track_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The ids of a playlist's tracks from `offset` on: what plays when one of its rows is started.
+    pub fn playlist_track_ids(
+        &self,
+        playlist: i64,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT track_id FROM playlist_items WHERE playlist_id = ?1 ORDER BY position LIMIT ?2 OFFSET ?3",
+        )?;
+        let ids = stmt
+            .query_map(params![playlist, limit as i64, offset as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?;
+        Ok(ids)
+    }
+
+    /// The page of liked tracks at `offset`, the newest like first.
+    pub fn liked_at(&self, offset: usize, limit: usize) -> Result<Vec<TrackRow>> {
+        let sql = format!(
+            "SELECT {TRACK_COLUMNS}
+             FROM (SELECT id, liked_at_ms FROM tracks WHERE liked_at_ms IS NOT NULL ORDER BY liked_at_ms DESC, id LIMIT ?1 OFFSET ?2) l
+             JOIN tracks t ON t.id = l.id {TRACK_JOINS} ORDER BY l.liked_at_ms DESC, t.id"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt
+            .query_map(params![limit as i64, offset as i64], track_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn liked_ids_at(&self, offset: usize, limit: usize) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id FROM tracks WHERE liked_at_ms IS NOT NULL ORDER BY liked_at_ms DESC, id LIMIT ?1 OFFSET ?2",
+        )?;
+        let ids = stmt
+            .query_map(params![limit as i64, offset as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?;
+        Ok(ids)
+    }
+
+    /// What the library knows the song `id` by, and what sources call it.
+    pub fn describe(&self, id: i64) -> Result<Option<Described>> {
+        use rusqlite::OptionalExtension;
+        let wanted = self
+            .conn
+            .prepare_cached(
+                "SELECT t.title, a.name, al.title, t.duration_ms, t.isrc, t.explicit
+                 FROM tracks t JOIN artists a ON a.id = t.artist_id LEFT JOIN albums al ON al.id = t.album_id
+                 WHERE t.id = ?1",
+            )?
+            .query_row([id], |r| {
+                Ok(crate::addons::Wanted {
+                    title: r.get(0)?,
+                    artist: r.get(1)?,
+                    album: r.get(2)?,
+                    duration_ms: Some(r.get::<_, i64>(3)? as u64).filter(|ms| *ms > 0),
+                    isrc: r.get(4)?,
+                    explicit: r.get(5)?,
+                })
+            })
+            .optional()?;
+        let Some(wanted) = wanted else {
+            return Ok(None);
+        };
+        let refs = self
+            .conn
+            .prepare_cached(
+                "SELECT source, ref FROM track_refs WHERE track_id = ?1 ORDER BY source",
+            )?
+            .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Some(Described { wanted, refs }))
+    }
+
+    /// Keeps what `source` calls the song `id` (in place of what it called it before).
+    pub fn set_ref(&mut self, id: i64, source: &str, theirs: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO track_refs(track_id, source, ref) VALUES (?1, ?2, ?3)
+             ON CONFLICT(track_id, source) DO UPDATE SET ref = excluded.ref",
+            params![id, source, theirs],
+        )?;
+        Ok(())
+    }
+
+    /// Forgets what `source` calls the song `id` (it no longer knows that name).
+    pub fn drop_ref(&mut self, id: i64, source: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM track_refs WHERE track_id = ?1 AND source = ?2",
+            params![id, source],
+        )?;
+        Ok(())
     }
 
     /// The add-ons the listener added, in the listener's order.
@@ -799,7 +948,9 @@ mod tests {
             Counts {
                 tracks: 5,
                 albums: 4,
-                artists: 3
+                artists: 3,
+                liked: 0,
+                playlists: 0,
             }
         );
     }

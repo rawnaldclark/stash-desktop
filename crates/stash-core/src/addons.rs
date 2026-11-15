@@ -89,6 +89,23 @@ pub struct Track {
     pub max_tier: Option<Tier>,
 }
 
+/// A song the host knows, as it asks an add-on for it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Wanted {
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    /// The recording's own length. Left out when the host cannot vouch for it.
+    pub duration_ms: Option<u64>,
+    pub isrc: Option<String>,
+    pub explicit: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct ResolveResponse {
+    item: Option<Track>,
+}
+
 #[derive(Deserialize)]
 struct SearchResponse {
     tracks: Vec<Track>,
@@ -324,6 +341,62 @@ impl Addon {
             .append_pair("limit", &limit.clamp(1, 200).to_string());
         let response: SearchResponse = get_json(&self.agent, url.as_str())?;
         Ok(response.tracks)
+    }
+
+    /// The add-on's own track for a song the host knows, or `None` when it does not have that song. Which of its
+    /// tracks is the same song is the add-on's to decide (the contract's rules); the host checks the two things it
+    /// can: a track whose length is off by more than 8 s or 3 % is refused, and so is one the add-on says it cannot
+    /// give at `min_tier`.
+    pub fn resolve(&self, wanted: &Wanted, min_tier: Option<Tier>) -> Result<Option<Track>> {
+        self.offers("resolve")?;
+        let mut url = Url::parse(&format!("{}/resolve", self.base))
+            .map_err(|e| AddonError::invalid(e.to_string()))?;
+        {
+            let mut query = url.query_pairs_mut();
+            query
+                .append_pair("title", &wanted.title)
+                .append_pair("artist", &wanted.artist);
+            if let Some(album) = &wanted.album {
+                query.append_pair("album", album);
+            }
+            if let Some(ms) = wanted.duration_ms {
+                query.append_pair("durationMs", &ms.to_string());
+            }
+            if let Some(isrc) = &wanted.isrc {
+                query.append_pair("isrc", isrc);
+            }
+            if let Some(explicit) = wanted.explicit {
+                query.append_pair("explicit", if explicit { "true" } else { "false" });
+            }
+            if let Some(tier) = min_tier {
+                query.append_pair("minTier", tier.as_str());
+            }
+        }
+        let response: ResolveResponse = get_json(&self.agent, url.as_str())?;
+        let Some(item) = response.item else {
+            return Ok(None);
+        };
+        if item.id.is_empty() {
+            return Err(AddonError::invalid(
+                "the add-on answered a track without an id",
+            ));
+        }
+        if let (Some(asked), Some(theirs)) = (wanted.duration_ms, item.duration_ms) {
+            let allowed = 8_000.max(asked * 3 / 100);
+            if asked.abs_diff(theirs) > allowed {
+                return Err(AddonError::invalid(format!(
+                    "the add-on answered a track of another length ({theirs} ms for {asked} ms)"
+                )));
+            }
+        }
+        if let (Some(least), Some(best)) = (min_tier, item.max_tier)
+            && best < least
+        {
+            return Err(AddonError::invalid(
+                "the add-on answered a track below the quality that was asked for",
+            ));
+        }
+        Ok(Some(item))
     }
 
     /// Where to play the add-on's track `id` from, within what `want` accepts. The answer is checked: a tier outside

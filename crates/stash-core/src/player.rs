@@ -43,9 +43,17 @@ pub struct QueueItem {
     pub album: Option<String>,
     /// Set for a track an add-on serves; where it plays from is asked for when it is about to play.
     pub addon: Option<AddonTrack>,
-    /// For a file: its path. Not shown to the window.
+    /// For a file: its path. Not shown to the window. Empty for a song the library knows by its description, which
+    /// is asked for like an add-on's track: of each of the listener's add-ons in turn.
     #[serde(skip)]
     pub locator: String,
+}
+
+impl QueueItem {
+    /// Where it plays from has to be asked for.
+    fn asks(&self) -> bool {
+        self.addon.is_some() || self.locator.is_empty()
+    }
 }
 
 /// Where an add-on's track plays from right now.
@@ -55,6 +63,8 @@ pub struct Located {
     pub locator: String,
     /// What the add-on says the stream is: "low", "high", "lossless", "hires".
     pub tier: Option<String>,
+    /// The id of the add-on that serves it.
+    pub addon: Option<String>,
 }
 
 /// Why an add-on's track could not be located.
@@ -66,8 +76,9 @@ pub struct Failure {
     pub miss: bool,
 }
 
-/// Asks an add-on where a track plays from. Called on a thread of its own; it may take as long as the network does.
-pub type Resolver = Arc<dyn Fn(&AddonTrack) -> std::result::Result<Located, Failure> + Send + Sync>;
+/// Asks where a track plays from: its add-on, or for a song known by its description, the listener's add-ons in turn.
+/// Called on a thread of its own; it may take as long as the network does.
+pub type Resolver = Arc<dyn Fn(&QueueItem) -> std::result::Result<Located, Failure> + Send + Sync>;
 
 pub struct Settings {
     /// Without one, the queue can hold files only.
@@ -122,6 +133,8 @@ pub struct PlayerState {
     pub duration_ms: u64,
     /// What the add-on said this stream is. The signal path says what it turned out to be.
     pub tier: Option<String>,
+    /// The id of the add-on the stream comes from.
+    pub served_by: Option<String>,
     pub signal: Option<Signal>,
     /// The last track that could not be played, and why.
     pub error: Option<String>,
@@ -132,6 +145,7 @@ struct Slot {
     /// Its place in the queue.
     queue: usize,
     tier: Option<String>,
+    addon: Option<String>,
 }
 
 #[derive(Default)]
@@ -190,13 +204,16 @@ struct Ctx {
 
 impl Ctx {
     fn locate(&self, item: &QueueItem) -> std::result::Result<Located, Failure> {
-        match (&item.addon, &self.resolver) {
-            (None, _) => Ok(Located {
+        if !item.asks() {
+            return Ok(Located {
                 locator: item.locator.clone(),
                 tier: None,
-            }),
-            (Some(track), Some(resolve)) => resolve(track),
-            (Some(_), None) => Err(Failure {
+                addon: None,
+            });
+        }
+        match &self.resolver {
+            Some(resolve) => resolve(item),
+            None => Err(Failure {
                 message: "this player has no add-ons".into(),
                 miss: false,
             }),
@@ -263,6 +280,7 @@ impl Ctx {
                             shared.slots = vec![Slot {
                                 queue: place,
                                 tier: located.tier,
+                                addon: located.addon,
                             }];
                             shared.pos = None;
                             shared.ahead = place + 1;
@@ -314,6 +332,7 @@ impl Ctx {
                     Ok(()) => shared.slots.push(Slot {
                         queue: place,
                         tier: located.tier,
+                        addon: located.addon,
                     }),
                     Err(e) => shared.error = Some(could_not(&item, &e.to_string())),
                 }
@@ -359,10 +378,7 @@ impl Ctx {
                 Some(pos) if pos + 1 < shared.slots.len() || pos >= shared.slots.len() => return,
                 Some(_) => {}
             }
-            (
-                shared.generation,
-                shared.queue[shared.ahead].addon.is_some(),
-            )
+            (shared.generation, shared.queue[shared.ahead].asks())
         };
         if waits && self.shared.lock().unwrap().pos.is_some() {
             // An add-on's track is asked for late. With no end in sight (a stream of unknown length) it is asked
@@ -504,7 +520,7 @@ impl Player {
             shared.gave_up = false;
             shared.error = None;
             shared.pending_seek = None;
-            (shared.generation, shared.queue[place].addon.is_some())
+            (shared.generation, shared.queue[place].asks())
         };
         if waits {
             // What was playing stops now, not when the add-on has answered.
@@ -568,7 +584,7 @@ impl Player {
                         .map(|s| s.queue);
                     match before {
                         // The engine still has the file before this one.
-                        Some(place) if shared.queue[place].addon.is_none() => Back::Engine,
+                        Some(place) if !shared.queue[place].asks() => Back::Engine,
                         // An add-on's track is asked for again: the link it gave may no longer work.
                         Some(place) => Back::To(place),
                         None => Back::To(current - 1),
@@ -612,7 +628,7 @@ impl Player {
     }
 
     pub fn state(&self) -> PlayerState {
-        let (queue_len, index, starting, track, tier, accepted, error) = {
+        let (queue_len, index, starting, track, tier, served_by, accepted, error) = {
             let shared = self.ctx.shared.lock().unwrap();
             let index = shared.index();
             let track = index
@@ -625,6 +641,7 @@ impl Player {
                 shared.starting,
                 track,
                 shared.slot().and_then(|s| s.tier.clone()),
+                shared.slot().and_then(|s| s.addon.clone()),
                 shared.accepted.clone(),
                 shared.error.clone(),
             )
@@ -693,6 +710,7 @@ impl Player {
             position_ms: if playing { seconds("time-pos") } else { 0 },
             duration_ms: if playing { seconds("duration") } else { 0 },
             tier,
+            served_by,
             signal,
             error,
         }

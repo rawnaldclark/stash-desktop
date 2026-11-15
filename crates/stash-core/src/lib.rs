@@ -14,7 +14,8 @@ pub mod scan;
 pub mod synth;
 
 pub use library::{
-    AlbumRow, Counts, FileState, Library, NewTrack, Origin, ScanChange, StoredAddon, TrackRow,
+    AlbumRow, Counts, Described, FileState, Library, NewTrack, Origin, PlaylistRow, ScanChange,
+    StoredAddon, TrackRow,
 };
 
 /// What can go wrong in the core.

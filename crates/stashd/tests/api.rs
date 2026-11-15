@@ -77,6 +77,20 @@ impl Client {
         response.body_mut().read_json().unwrap()
     }
 
+    /// A file sent as a request's body.
+    fn upload(&self, path: &str, bytes: &[u8]) -> (u16, Value) {
+        let mut response = self
+            .agent
+            .post(&format!("{}{path}", self.base))
+            .header("Content-Type", "application/octet-stream")
+            .send(bytes)
+            .unwrap();
+        (
+            response.status().as_u16(),
+            response.body_mut().read_json().unwrap_or(Value::Null),
+        )
+    }
+
     /// A POST whatever its status.
     fn send(&self, path: &str, body: Value) -> (u16, Value) {
         let mut response = self
@@ -144,7 +158,10 @@ fn a_client_reads_the_library_and_drives_the_player_over_http() {
     // The library.
     assert_eq!(
         client.get("/api/counts"),
-        (200, json!({ "tracks": 5, "albums": 0, "artists": 1 }))
+        (
+            200,
+            json!({ "tracks": 5, "albums": 0, "artists": 1, "liked": 0, "playlists": 0 })
+        )
     );
     let (_, page) = client.get("/api/tracks?offset=1&limit=2");
     let titles: Vec<&str> = page["rows"]
@@ -452,5 +469,214 @@ fn a_client_reads_the_library_and_drives_the_player_over_http() {
     let stopped = client.post("/api/player/stop", json!({}));
     assert_eq!(stopped["queue_len"].as_u64(), Some(0));
     client.player_until("idle", |s| s["status"] == "idle");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_library_file_is_imported_and_its_songs_play_through_an_add_on() {
+    let dir = std::env::temp_dir().join(format!("stash-api-import-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    // The music is the add-on's, not the library's: the library starts empty.
+    let catalogue = dir.join("Catalogue");
+    std::fs::create_dir_all(&catalogue).unwrap();
+    for name in ["alpha", "bravo", "charlie", "delta", "echo"] {
+        silence(&catalogue.join(format!("{name}.wav")));
+    }
+    let db = dir.join("library.db");
+    let engine = engine();
+    let core = Core::bind(Options {
+        db: db.clone(),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: Some(Output::Silent),
+        mpv: engine.clone(),
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+
+    // What is not a Stash library file is refused in words, and nothing comes in.
+    let (status, refused) = client.upload("/api/import", b"just some text");
+    assert_eq!(
+        (status, refused["error"]["message"].as_str()),
+        (400, Some("That file is not a Stash library file"))
+    );
+    let (status, refused) = client.upload("/api/import", br#"{"kind":"stash-web-library","v":9}"#);
+    assert_eq!(
+        (status, refused["error"]["message"].as_str()),
+        (
+            400,
+            Some("That file comes from a newer Stash than this one")
+        )
+    );
+
+    // A file as the Android app or the web player writes it. The songs are known to the demo add-on as files without
+    // tags, so by "Unknown artist".
+    let song =
+        |title: &str| json!({ "title": title, "artist": "Unknown artist", "durationMs": 2000 });
+    let mut stale = song("charlie");
+    stale["refs"] = json!({ "demo.folder": "999999", "youtube": "AE005nZeF-A" });
+    let mut wrong_length = song("echo");
+    wrong_length["durationMs"] = json!(95_000);
+    let file = json!({
+        "kind": "stash-web-library", "v": 1, "generator": "Stash for Android 0.9.125",
+        "likes": [
+            { "item": song("bravo"), "likedAt": 1_759_838_400_300i64 },
+            { "item": { "title": "Nowhere", "artist": "Nobody" }, "likedAt": 1_759_838_400_200i64 },
+            { "item": song("alpha"), "likedAt": 1_759_838_400_100i64 }
+        ],
+        "playlists": [{ "id": "app-7", "name": "Mix", "items": [stale, wrong_length, song("delta")] }],
+        "history": [{ "item": song("alpha"), "playedAt": 1_759_838_402_000i64 }]
+    })
+    .to_string();
+    let (status, imported) = client.upload("/api/import", file.as_bytes());
+    assert_eq!(status, 200, "{imported}");
+    assert_eq!(
+        (imported["source"].as_str(), imported["generator"].as_str()),
+        (Some("web-library"), Some("Stash for Android 0.9.125"))
+    );
+    assert_eq!(
+        imported["summary"],
+        json!({ "songs_added": 6, "songs_already": 0, "likes_added": 3, "likes_already": 0, "playlists_added": 1, "playlists_merged": 0, "playlist_songs_added": 0, "plays_added": 1, "plays_already": 0 })
+    );
+    assert_eq!(
+        imported["counts"],
+        json!({ "tracks": 6, "albums": 0, "artists": 2, "liked": 3, "playlists": 1 })
+    );
+
+    // What came in is listed: liked songs newest like first, the playlist in its order.
+    let titles = |rows: &Value| {
+        rows["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["title"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    let (_, liked) = client.get("/api/liked");
+    assert_eq!(titles(&liked), ["bravo", "Nowhere", "alpha"]);
+    assert_eq!(
+        (
+            liked["rows"][0]["origin"].as_str(),
+            liked["rows"][0]["liked"].as_bool()
+        ),
+        (Some("described"), Some(true))
+    );
+    let (_, playlists) = client.get("/api/playlists");
+    assert_eq!(
+        playlists,
+        json!({ "rows": [{ "id": 1, "name": "Mix", "tracks": 3, "followed": false }] })
+    );
+    assert_eq!(
+        titles(&client.get("/api/playlists/1/tracks").1),
+        ["charlie", "echo", "delta"]
+    );
+    assert_eq!(
+        titles(&client.get("/api/playlists/1/tracks?offset=2&limit=5").1),
+        ["delta"]
+    );
+    // And found by search, like anything else in the library.
+    assert_eq!(titles(&client.get("/api/search?q=nowh").1), ["Nowhere"]);
+
+    if engine.is_none() {
+        eprintln!("SKIPPED the player: no libmpv found");
+        return;
+    }
+
+    // With no add-on there is nowhere to play a described song from, and the player says so.
+    client.post("/api/player/play", json!({ "liked": true }));
+    let nowhere = client.player_until("the refusal without add-ons", |s| {
+        s["status"] == "idle" && s["error"].is_string()
+    });
+    assert_eq!(
+        nowhere["error"].as_str(),
+        Some(
+            "alpha could not be played: it is not a file here, and there is no add-on to play it from"
+        )
+    );
+
+    let demo = DemoAddon::bind(&catalogue, 0, Duration::from_millis(60)).unwrap();
+    let link = demo.link();
+    std::thread::spawn(move || demo.run());
+    client.post("/api/addons", json!({ "link": link }));
+
+    // The liked songs from the top: bravo is asked of the add-on (does it have this song?), then streamed.
+    let asked = client.post("/api/player/play", json!({ "liked": true }));
+    assert_eq!(
+        (
+            asked["status"].as_str(),
+            asked["track"]["title"].as_str(),
+            asked["queue_len"].as_u64()
+        ),
+        (Some("loading"), Some("bravo"), Some(3))
+    );
+    let bravo = client.player_until("bravo playing", |s| {
+        s["status"] == "playing" && s["track"]["title"] == "bravo"
+    });
+    assert_eq!(
+        (
+            bravo["served_by"].as_str(),
+            bravo["tier"].as_str(),
+            bravo["track"]["addon"].is_null(),
+            bravo["track"]["id"].is_number()
+        ),
+        (Some("demo.folder"), Some("lossless"), true, true)
+    );
+    // On by itself: the add-on does not have "Nowhere", so alpha is next, and the song left out is named.
+    let alpha = client.player_until("alpha, past the song no add-on has", |s| {
+        s["status"] == "playing" && s["track"]["title"] == "alpha"
+    });
+    assert_eq!(
+        (alpha["index"].as_u64(), alpha["error"].as_str()),
+        (
+            Some(2),
+            Some("Nowhere could not be played: none of your add-ons has it")
+        )
+    );
+
+    // The playlist: charlie came in with a name the add-on no longer knows; the add-on is asked for the song again.
+    // echo is in the add-on's folder under the same words but is a recording of another length: not the same song.
+    client.post("/api/player/play", json!({ "playlist": 1 }));
+    let charlie = client.player_until("charlie playing", |s| {
+        s["status"] == "playing" && s["track"]["title"] == "charlie"
+    });
+    assert_eq!(charlie["served_by"].as_str(), Some("demo.folder"));
+    let delta = client.player_until("delta, past echo", |s| {
+        s["status"] == "playing" && s["track"]["title"] == "delta"
+    });
+    assert_eq!(
+        (delta["index"].as_u64(), delta["error"].as_str()),
+        (
+            Some(2),
+            Some("echo could not be played: none of your add-ons has it")
+        )
+    );
+    client.post("/api/player/stop", json!({}));
+
+    // What the add-on calls each song it played is kept with the song; the stale name was replaced, the other
+    // source's name left alone.
+    let library = Library::open(&db).unwrap();
+    let refs = |title: &str| {
+        let id = library.search(title, 1).unwrap()[0].id;
+        library.describe(id).unwrap().unwrap().refs
+    };
+    let charlie_refs = refs("charlie");
+    assert_eq!(charlie_refs.len(), 2);
+    assert!(
+        charlie_refs
+            .iter()
+            .any(|(source, theirs)| source == "demo.folder" && theirs != "999999")
+    );
+    assert!(charlie_refs.contains(&("youtube".to_string(), "AE005nZeF-A".to_string())));
+    assert_eq!(refs("bravo").len(), 1);
+    assert!(refs("Nowhere").is_empty());
+    assert!(refs("echo").is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }

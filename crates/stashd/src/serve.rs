@@ -6,6 +6,8 @@
 //!
 //! The API reads the library (counts, a page of tracks or albums at any position, search), drives the player, and
 //! keeps the listener's add-ons: adding one from a link, their order, searching them, and playing what they find.
+//! It takes in a library from another Stash (`POST /api/import`) and lists what came with it: liked songs and
+//! playlists.
 //! Several requests are answered at once, so an add-on that is slow to answer holds up its own answer and nothing
 //! else.
 
@@ -20,6 +22,7 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use stash_core::addons::{Addon, AddonError, Code, StreamRequest, Track};
 use stash_core::audio::{Output, find_library};
+use stash_core::import::{ImportError, web_library};
 use stash_core::player::{AddonTrack, Failure, Located, Player, QueueItem, Resolver, Settings};
 use stash_core::{Library, StoredAddon};
 use tiny_http::{Header, Method, Request, Response, Server};
@@ -29,6 +32,8 @@ use url::Url;
 const PAGE_CAP: usize = 500;
 /// The largest body the API reads.
 const BODY_CAP: u64 = 256 * 1024;
+/// The largest file an import takes: the library file's own limit.
+const IMPORT_CAP: u64 = 64 * 1024 * 1024;
 /// How many requests are answered at once.
 const WORKERS: usize = 8;
 /// The longest text taken from an add-on's answer, or from the window about an add-on's track.
@@ -138,34 +143,132 @@ fn load_addons(library: &Library) -> Result<Vec<Arc<Loaded>>> {
         .collect())
 }
 
-/// How the player asks an add-on where a track plays from.
-fn resolver(registry: Registry) -> Resolver {
-    Arc::new(move |wanted: &AddonTrack| {
+/// Where one add-on's track plays from.
+fn stream_from(addon: &Addon, id: &str, track: &str) -> std::result::Result<Located, AddonError> {
+    addon
+        .stream(track, &StreamRequest::default())
+        .map(|info| Located {
+            locator: info.url,
+            tier: Some(info.tier.as_str().to_string()),
+            addon: Some(id.to_string()),
+        })
+}
+
+/// How the player finds where a track plays from.
+///
+/// An add-on's own track is asked of that add-on. A song the library knows by its description is asked of the
+/// listener's add-ons in their order: the name an add-on gave the song before is tried first, else the add-on is
+/// asked whether it has the song (the contract's `resolve`: which of its tracks is the same song is the add-on's to
+/// say). The first add-on that gives a stream wins, and the name it gave is kept for next time.
+fn resolver(registry: Registry, library: Arc<Mutex<Library>>) -> Resolver {
+    Arc::new(move |item: &QueueItem| {
         let gone = |why: &str| Failure {
             message: why.to_string(),
             miss: true,
         };
-        let loaded = registry
+        if let Some(wanted) = &item.addon {
+            let loaded = registry
+                .read()
+                .unwrap()
+                .iter()
+                .find(|a| a.stored.id == wanted.addon)
+                .cloned()
+                .ok_or_else(|| gone("its add-on was removed"))?;
+            if !loaded.stored.enabled {
+                return Err(gone("its add-on is switched off"));
+            }
+            let addon = loaded.addon.as_ref().map_err(|why| gone(why))?;
+            return stream_from(addon, &loaded.stored.id, &wanted.track).map_err(|e| Failure {
+                message: e.in_words(),
+                miss: e.is_miss(),
+            });
+        }
+
+        let Some(id) = item.id else {
+            return Err(gone("it has nowhere to play from"));
+        };
+        let described = library
+            .lock()
+            .unwrap()
+            .describe(id)
+            .map_err(|e| Failure {
+                message: e.to_string(),
+                miss: false,
+            })?
+            .ok_or_else(|| gone("it is no longer in the library"))?;
+        let addons: Vec<Arc<Loaded>> = registry
             .read()
             .unwrap()
             .iter()
-            .find(|a| a.stored.id == wanted.addon)
+            .filter(|a| {
+                a.usable()
+                    .is_some_and(|addon| addon.offers_resource("stream"))
+            })
             .cloned()
-            .ok_or_else(|| gone("its add-on was removed"))?;
-        if !loaded.stored.enabled {
-            return Err(gone("its add-on is switched off"));
+            .collect();
+        if addons.is_empty() {
+            return Err(gone(
+                "it is not a file here, and there is no add-on to play it from",
+            ));
         }
-        let addon = loaded.addon.as_ref().map_err(|why| gone(why))?;
-        match addon.stream(&wanted.track, &StreamRequest::default()) {
-            Ok(info) => Ok(Located {
-                locator: info.url,
-                tier: Some(info.tier.as_str().to_string()),
-            }),
-            Err(e) => Err(Failure {
+        // Trouble with an add-on is not "it does not have the song": it is said, and asking again may help.
+        let mut trouble: Option<AddonError> = None;
+        for loaded in &addons {
+            let Some(addon) = loaded.usable() else {
+                continue;
+            };
+            let addon_id = loaded.stored.id.as_str();
+            let known = described
+                .refs
+                .iter()
+                .find(|(source, _)| source == addon_id)
+                .map(|(_, theirs)| theirs.clone());
+            if let Some(track) = &known {
+                match stream_from(addon, addon_id, track) {
+                    Ok(located) => return Ok(located),
+                    // The add-on no longer knows that name: it is forgotten, and the add-on is asked for the song.
+                    Err(e) if e.code == Code::NotFound => {
+                        let _ = library.lock().unwrap().drop_ref(id, addon_id);
+                    }
+                    Err(e) if e.is_miss() => continue,
+                    Err(e) => {
+                        trouble = Some(e);
+                        continue;
+                    }
+                }
+            }
+            if !addon.offers_resource("resolve") {
+                continue;
+            }
+            let track = match addon.resolve(&described.wanted, None) {
+                Ok(Some(track)) => track,
+                // It does not have the song, or what it answered cannot be this song.
+                Ok(None) => continue,
+                Err(e) if e.is_miss() || e.code == Code::InvalidResponse => continue,
+                Err(e) => {
+                    trouble = Some(e);
+                    continue;
+                }
+            };
+            match stream_from(addon, addon_id, &track.id) {
+                Ok(located) => {
+                    let _ = library.lock().unwrap().set_ref(id, addon_id, &track.id);
+                    return Ok(located);
+                }
+                Err(e) if e.is_miss() => continue,
+                Err(e) => {
+                    trouble = Some(e);
+                    continue;
+                }
+            }
+        }
+        Err(match trouble {
+            Some(e) => Failure {
                 message: e.in_words(),
-                miss: e.is_miss(),
-            }),
-        }
+                miss: false,
+            },
+            None => gone("none of your add-ons has it"),
+        })
     })
 }
 
@@ -192,7 +295,7 @@ fn found_track(track: &Track) -> Option<Value> {
 
 /// What everything that answers requests shares.
 struct State {
-    library: Mutex<Library>,
+    library: Arc<Mutex<Library>>,
     options: Options,
     port: u16,
     /// The player, or the reason there is none (no audio engine found, or it would not start).
@@ -238,13 +341,14 @@ impl Core {
             .map(|a| a.port())
             .unwrap_or(options.port);
         let addons: Registry = Arc::new(RwLock::new(load_addons(&library)?));
+        let library = Arc::new(Mutex::new(library));
         let player = match &options.audio {
             None => Err("this core runs without a player".to_string()),
             Some(output) => match options.mpv.clone().or_else(find_library) {
                 None => Err("the audio engine (libmpv) was not found".to_string()),
                 Some(engine) => {
                     let settings = Settings {
-                        resolver: Some(resolver(Arc::clone(&addons))),
+                        resolver: Some(resolver(Arc::clone(&addons), Arc::clone(&library))),
                         ..Settings::default()
                     };
                     Player::start_with(&engine, output, settings).map_err(|e| e.to_string())
@@ -254,7 +358,7 @@ impl Core {
         Ok(Self {
             server,
             state: State {
-                library: Mutex::new(library),
+                library,
                 options,
                 port,
                 player,
@@ -408,24 +512,27 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
     let body = body_json(request)?;
     match path {
         // What to play: `{"ids": [...]}` (library tracks, in that order), `{"offset": n}` (the library's rows from
-        // there on), or `{"addon": id, "tracks": [...]}` (tracks an add-on found, in that order).
+        // there on; with `"playlist": id` that playlist's, with `"liked": true` the liked songs'), or
+        // `{"addon": id, "tracks": [...]}` (tracks an add-on found, in that order).
         "/api/player/play" => {
             let items = if let Some(addon) = body.get("addon").and_then(Value::as_str) {
                 addon_queue(addon, body.get("tracks"))
             } else {
                 let library = state.library.lock().unwrap();
-                let ids: Vec<i64> = match body.get("ids").and_then(Value::as_array) {
-                    Some(ids) => ids
-                        .iter()
+                let offset = body.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let count = body.get("count").and_then(Value::as_u64).unwrap_or(200) as usize;
+                let count = count.clamp(1, PAGE_CAP);
+                let ids: Vec<i64> = if let Some(ids) = body.get("ids").and_then(Value::as_array) {
+                    ids.iter()
                         .filter_map(Value::as_i64)
                         .take(PAGE_CAP)
-                        .collect(),
-                    None => {
-                        let offset = body.get("offset").and_then(Value::as_u64).unwrap_or(0);
-                        let count = body.get("count").and_then(Value::as_u64).unwrap_or(200);
-                        library
-                            .track_ids_at(offset as usize, (count as usize).clamp(1, PAGE_CAP))?
-                    }
+                        .collect()
+                } else if let Some(playlist) = body.get("playlist").and_then(Value::as_i64) {
+                    library.playlist_track_ids(playlist, offset, count)?
+                } else if body.get("liked").and_then(Value::as_bool) == Some(true) {
+                    library.liked_ids_at(offset, count)?
+                } else {
+                    library.track_ids_at(offset, count)?
                 };
                 library.queue_items(&ids)?
             };
@@ -590,6 +697,39 @@ fn addons_route(
     Ok(Some(state.addons_reply()))
 }
 
+/// Takes in a library from another Stash: the request's body is the file. The file is read and checked with nothing
+/// else waiting, then merged in one go.
+fn import_route(state: &State, request: &mut Request) -> Result<Reply> {
+    let mut bytes = Vec::new();
+    request
+        .as_reader()
+        .take(IMPORT_CAP + 1)
+        .read_to_end(&mut bytes)?;
+    let refused = |e: &ImportError| refuse(400, &e.to_string());
+    if bytes.len() as u64 > IMPORT_CAP {
+        return Ok(refused(&ImportError::TooBig));
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let incoming = match web_library::read(&bytes, now_ms) {
+        Ok(incoming) => incoming,
+        Err(e) => return Ok(refused(&e)),
+    };
+    let mut library = state.library.lock().unwrap();
+    let summary = library.import(&incoming)?;
+    Ok(reply_json(
+        200,
+        json!({
+            "source": incoming.source,
+            "generator": incoming.generator,
+            "summary": summary,
+            "counts": library.counts()?,
+        }),
+    ))
+}
+
 /// The answer to one request, and whether the server is done (a measurement arrived).
 fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
     let url =
@@ -614,12 +754,32 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     let library = || state.library.lock().unwrap();
+    if *request.method() == Method::Post && path == "/api/import" {
+        return Ok((import_route(state, request)?, false));
+    }
+    // A playlist's tracks: /api/playlists/{id}/tracks
+    if *request.method() == Method::Get
+        && let Some(id) = path
+            .strip_prefix("/api/playlists/")
+            .and_then(|rest| rest.strip_suffix("/tracks"))
+            .and_then(|id| id.parse::<i64>().ok())
+    {
+        let rows = library().playlist_tracks_at(id, number("offset", 0), limit(200))?;
+        return Ok((reply_json(200, json!({ "rows": rows })), false));
+    }
     let response = match (request.method(), url.path()) {
         (Method::Get, "/api/counts") => reply_json(200, json!(library().counts()?)),
         (Method::Get, "/api/tracks") => reply_json(
             200,
             json!({ "rows": library().tracks_at(number("offset", 0), limit(200))? }),
         ),
+        (Method::Get, "/api/liked") => reply_json(
+            200,
+            json!({ "rows": library().liked_at(number("offset", 0), limit(200))? }),
+        ),
+        (Method::Get, "/api/playlists") => {
+            reply_json(200, json!({ "rows": library().playlists()? }))
+        }
         (Method::Get, "/api/albums") => reply_json(
             200,
             json!({ "rows": library().albums_at(number("offset", 0), limit(120))? }),

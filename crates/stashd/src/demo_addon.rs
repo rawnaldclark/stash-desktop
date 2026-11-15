@@ -1,7 +1,8 @@
 //! A demo add-on: a folder of your own music files, served on this computer the way an add-on serves a catalogue.
 //!
 //! It is for trying the window and for the tests, and it is the smallest whole example of what Stash asks of an
-//! add-on: a manifest, a search, and for each track a place to play it from. It answers on this computer only.
+//! add-on: a manifest, a search, an answer to "do you have this song", and for each track a place to play it from.
+//! It answers on this computer only.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -11,6 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
+use stash_core::identity::words_key;
 use stash_core::scan::scan_folder;
 use stash_core::{Library, TrackRow};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
@@ -153,7 +155,7 @@ impl DemoAddon {
                     "version": env!("CARGO_PKG_VERSION"),
                     "kind": "server",
                     "description": "A folder of your own files, served as an add-on on this computer.",
-                    "resources": ["search", "stream"],
+                    "resources": ["search", "resolve", "stream"],
                     "stream": { "cors": false, "manifests": ["none"], "tiers": ["high", "lossless", "hires"] },
                 }),
             ));
@@ -184,6 +186,39 @@ impl DemoAddon {
                 })
                 .collect();
             let _ = request.respond(answer(200, json!({ "tracks": tracks })));
+        } else if path == "/resolve" {
+            std::thread::sleep(self.delay);
+            // The same song here is the same words, and a length within the contract's bounds when one is asked.
+            let (Some(title), Some(artist)) = (param("title"), param("artist")) else {
+                let _ =
+                    request.respond(refusal(400, "bad_request", "title and artist are required"));
+                return;
+            };
+            let words = words_key(&title, &artist);
+            let asked = param("durationMs").and_then(|v| v.parse::<u64>().ok());
+            let mut same: Vec<&TrackRow> = self
+                .rows
+                .values()
+                .filter(|row| words_key(&row.title, &row.artist) == words)
+                .filter(|row| {
+                    asked.is_none_or(|ms| {
+                        row.duration_ms == 0
+                            || ms.abs_diff(row.duration_ms) <= 8_000.max(ms * 3 / 100)
+                    })
+                })
+                .collect();
+            same.sort_by_key(|row| row.id);
+            let item = same.first().map(|row| {
+                json!({
+                    "id": row.id.to_string(),
+                    "title": row.title,
+                    "artist": row.artist,
+                    "album": row.album,
+                    "durationMs": row.duration_ms,
+                    "maxTier": quality(row).0,
+                })
+            });
+            let _ = request.respond(answer(200, json!({ "item": item })));
         } else if let Some(id) = path.strip_prefix("/stream/") {
             std::thread::sleep(self.delay);
             let Some(row) = id.parse::<i64>().ok().and_then(|id| self.rows.get(&id)) else {

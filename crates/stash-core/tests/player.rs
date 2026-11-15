@@ -194,7 +194,8 @@ impl FakeAddon {
 
     fn resolver(self: &Arc<Self>) -> Resolver {
         let addon = Arc::clone(self);
-        Arc::new(move |wanted: &AddonTrack| {
+        Arc::new(move |item: &QueueItem| {
+            let wanted = item.addon.as_ref().expect("an add-on's track");
             addon
                 .asked
                 .lock()
@@ -205,6 +206,7 @@ impl FakeAddon {
                 Some(path) => Ok(Located {
                     locator: path.to_string_lossy().into_owned(),
                     tier: Some("lossless".into()),
+                    addon: Some(wanted.addon.clone()),
                 }),
                 None if wanted.track == "broken" => Err(Failure {
                     message: "the add-on could not be reached".into(),

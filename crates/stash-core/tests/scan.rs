@@ -129,7 +129,9 @@ fn a_scan_reads_tags_names_untagged_files_and_leaves_out_what_is_not_music() {
         Counts {
             tracks: 5,
             albums: 2,
-            artists: 5
+            artists: 5,
+            liked: 0,
+            playlists: 0,
         }
     );
     assert_eq!(titles(&library, "creep"), ["Creep / Radiohead"]);
