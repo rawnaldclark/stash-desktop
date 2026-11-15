@@ -2,6 +2,9 @@
   // A list of any length that only ever holds the rows on screen (and a few around them). Rows come in pages from
   // `fetchPage`, asked for as the list scrolls; a row whose page has not arrived yet is drawn as a placeholder, so
   // dragging the scrollbar anywhere never waits. Every row has the same height: the position of row n is n × height.
+  //
+  // The list scrolls by itself (it fills its parent), or, given `scroller`, it lies in a page that scrolls (the
+  // window's main column): it is then as tall as all its rows and draws the ones the page shows.
   import type { Snippet } from "svelte";
 
   type Props = {
@@ -10,20 +13,25 @@
     pageSize?: number;
     fetchPage: (offset: number, limit: number, signal: AbortSignal) => Promise<Row[]>;
     row: Snippet<[Row | undefined, number]>;
+    /** The element that scrolls, when the list does not scroll by itself. */
+    scroller?: HTMLElement | null;
     /** Called after rows were drawn: how many of the rows on screen had their data. */
     onDrawn?: (state: { first: number; last: number; loaded: number }) => void;
     /** A row was double-clicked. */
     onActivate?: (index: number, data: Row | undefined) => void;
   };
 
-  let { count, rowHeight = 34, pageSize = 200, fetchPage, row, onDrawn, onActivate }: Props = $props();
+  let { count, rowHeight = 34, pageSize = 200, fetchPage, row, scroller = null, onDrawn, onActivate }: Props = $props();
 
   const OVERSCAN = 12;
   const KEEP_PAGES = 24;
 
   let viewport: HTMLDivElement | undefined = $state();
+  /** How far the list is scrolled: its own scroll, or how far its top is above the top of the page's scroller. */
   let scrollTop = $state(0);
   let height = $state(0);
+  /** Where the list begins inside the page's scroller (what is above it there: a heading, the tabs). */
+  let offsetTop = 0;
   /** Bumped whenever a page arrives, so the rows are drawn again. The pages themselves are plain data. */
   let arrivals = $state(0);
 
@@ -43,6 +51,29 @@
     const out: { index: number; data: Row | undefined }[] = [];
     for (let i = first; i < last; i++) out.push({ index: i, data: pages.get(Math.floor(i / pageSize))?.[i % pageSize] });
     return out;
+  });
+
+  // In a page that scrolls: the list follows the page's scroller.
+  $effect(() => {
+    const outer = scroller;
+    const own = viewport;
+    if (!outer || !own) return;
+    const place = () => {
+      offsetTop = own.getBoundingClientRect().top - outer.getBoundingClientRect().top + outer.scrollTop;
+      height = outer.clientHeight;
+      scrollTop = Math.max(0, outer.scrollTop - offsetTop);
+    };
+    const scrolled = () => (scrollTop = Math.max(0, outer.scrollTop - offsetTop));
+    place();
+    outer.addEventListener("scroll", scrolled, { passive: true });
+    // What is above the list can change its height (a line wraps, a notice appears), and the window can be resized.
+    const resized = new ResizeObserver(place);
+    resized.observe(outer);
+    if (own.parentElement) resized.observe(own.parentElement);
+    return () => {
+      outer.removeEventListener("scroll", scrolled);
+      resized.disconnect();
+    };
   });
 
   $effect(() => {
@@ -91,7 +122,8 @@
 
   /** Scrolls so that row `index` is at the top. */
   export function scrollToIndex(index: number) {
-    if (viewport) viewport.scrollTop = index * rowHeight;
+    if (scroller) scroller.scrollTop = offsetTop + index * rowHeight;
+    else if (viewport) viewport.scrollTop = index * rowHeight;
   }
 
   /** Reads the rows again where the list is (something in them changed); what is on screen stays until it arrives. */
@@ -106,15 +138,30 @@
   }
 
   export function scrollBy(pixels: number) {
-    if (viewport) viewport.scrollTop += pixels;
+    if (scroller) scroller.scrollTop += pixels;
+    else if (viewport) viewport.scrollTop += pixels;
+  }
+
+  // Scrolling by itself: the list's own box is measured.
+  function own(node: HTMLDivElement) {
+    const measure = () => {
+      if (!scroller) height = node.clientHeight;
+    };
+    const resized = new ResizeObserver(measure);
+    resized.observe(node);
+    measure();
+    return { destroy: () => resized.disconnect() };
   }
 </script>
 
 <div
   class="viewport"
+  class:paged={!!scroller}
   bind:this={viewport}
-  bind:clientHeight={height}
-  onscroll={() => (scrollTop = viewport?.scrollTop ?? 0)}
+  use:own
+  onscroll={() => {
+    if (!scroller) scrollTop = viewport?.scrollTop ?? 0;
+  }}
   role="list"
 >
   <div class="spacer" style:height="{count * rowHeight}px">
@@ -133,6 +180,12 @@
     height: 100%;
     overflow-y: auto;
     contain: strict;
+  }
+  /* in a page that scrolls, the list is as tall as its rows and the page does the scrolling */
+  .viewport.paged {
+    height: auto;
+    overflow: visible;
+    contain: layout style;
   }
   .spacer {
     position: relative;

@@ -1,0 +1,100 @@
+/* ===== Now playing: the big lyrics (a grid swap, not an overlay), from the Stash web player.
+   Left column = the cover + controls (NowPlaying.svelte); the panel becomes the right column and its lyric column takes the big sizes. ===== */
+
+.wp-g.np .main, .wp-g.np .head, .wp-g.np .side, .wp-g.np .bar { display: none; }
+
+/* ambient: the app's three orbs rotating on the compositor, over the base colour */
+.fs-amb { position: absolute; inset: 0; z-index: 0; overflow: hidden; background: var(--fs-base); --os: min(1cqi, 1cqb); }
+.fs-amb::after { content: ""; position: absolute; inset: 0; background: linear-gradient(135deg, transparent 40%, color-mix(in oklab, var(--np-vib) 12%, transparent)); }
+.orb { position: absolute; inset: 0; transform: rotate(var(--a0)); }
+.orb b { position: absolute; border-radius: 50%; }
+.o1 { --a0: 0deg; --od: var(--orbit-1); --oc: color-mix(in srgb, var(--np-dom) calc(var(--orb-a) * 150%), transparent); }
+.o2 { --a0: 120deg; --od: var(--orbit-2); --oc: color-mix(in srgb, var(--np-vib) calc(var(--orb-b) * 150%), transparent); }
+.o3 { --a0: 240deg; --od: var(--orbit-3); --oc: color-mix(in srgb, var(--np-mut) calc(var(--orb-c) * 150%), transparent); }
+.o1 b { width: calc(130 * var(--os)); height: calc(130 * var(--os)); left: calc(50% + 18 * var(--os) - 65 * var(--os)); top: calc(50% - 65 * var(--os)); }
+.o2 b { width: calc(110.5 * var(--os)); height: calc(110.5 * var(--os)); left: calc(50% + 18 * var(--os) - 55.25 * var(--os)); top: calc(50% - 55.25 * var(--os)); }
+.o3 b { width: calc(91 * var(--os)); height: calc(91 * var(--os)); left: calc(50% + 18 * var(--os) - 45.5 * var(--os)); top: calc(50% - 45.5 * var(--os)); }
+.fs-amb .orb b { background: radial-gradient(circle closest-side, var(--oc) 0%, var(--oc) 30%, transparent 100%); }
+@media (prefers-reduced-motion: no-preference) { .orb { animation: orbit var(--od) linear infinite; } }
+@keyframes orbit { from { transform: rotate(var(--a0)); } to { transform: rotate(calc(var(--a0) + 360deg)); } }
+@media (prefers-reduced-transparency: reduce), (forced-colors: active) { .fs-amb .orb { display: none; } }
+
+/* the left column */
+.fsl { position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column; justify-content: center; padding: 64px 32px 32px 48px; min-width: 0; min-height: 0; --wp-text-2: var(--wp-text-2w); }
+.fs-icons { position: absolute; left: 16px; top: 16px; display: flex; gap: 8px; }
+.fs-ic { position: relative; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; color: var(--wp-text); background: color-mix(in srgb, var(--wp-main) 55%, transparent) !important; border: 1px solid var(--bar-ring) !important; transition: transform var(--dur-short) var(--ease-out-expo), color var(--dur-short); }
+.fs-ic::before { content: ""; position: absolute; inset: -2px; }
+.fs-ic .ic { width: 22px; height: 22px; }
+.fs-ic:active { transform: scale(var(--press-scale)); }
+.fs-t, .fs-b { display: grid; justify-items: center; min-width: 0; }
+.fs-t { --art: min(360px, calc(42cqi - 96px), calc(100cqb - 330px)); }
+.fs-b { margin-top: 16px; gap: 16px; --art: min(360px, calc(42cqi - 96px), calc(100cqb - 330px)); }
+.fs-art { position: relative; width: var(--art); height: var(--art); flex: none; }
+/* the cover: a large rounded square, a soft shadow lit by the album's colour; it never turns */
+.fs-cov { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 16px; box-shadow: var(--shadow-object), 0 30px 70px -24px color-mix(in oklab, var(--np-vib) 45%, transparent); }
+.fs-meta { display: grid; grid-template-columns: minmax(0, 1fr); justify-items: center; margin-top: 24px; min-width: 0; max-width: 100%; text-align: center; }
+.fs-title { font: 700 28px/1.15 var(--font-display); letter-spacing: -.01em; color: var(--wp-text); max-width: 100%; overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
+.fs-artist { margin-top: 4px; font: 400 15px/1.3 var(--font-body); color: var(--wp-text-2); max-width: 100%; overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
+.fs-artist a:hover { color: var(--wp-text); text-decoration: underline; text-underline-offset: .2em; }
+.fs-act { display: flex; align-items: center; gap: 4px; margin-top: 16px; }
+.fs-next { margin-top: 16px; text-align: center; max-width: 100%; }
+.fs-next .caps { letter-spacing: .12em; }
+.fs-nx { margin-top: 2px; font: 400 13px/1.3 var(--font-body); color: var(--wp-text); overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
+.fs-b .prg.fs-prog { width: var(--art, 360px); }
+.tr-fs { gap: 12px; height: auto; }
+.tr-fs .ib { width: 40px; height: 40px; }
+.tr-fs .ib:first-child, .tr-fs .ib:last-child { width: 36px; height: 36px; }
+.tr-fs .play { width: 56px; height: 56px; } .tr-fs .play .ic { width: 30px; height: 30px; }
+.fs-empty { margin: auto; max-width: 28ch; text-align: center; font: 500 18px/1.4 var(--font-display); color: var(--wp-text-2); }
+@media (prefers-reduced-motion: no-preference) {
+	.fs-art { animation: fs-art-in 420ms var(--ease-settle) both; }
+	.fs-meta, .fs-act, .fs-next, .fs-b { animation: fs-rise 320ms var(--ease-out-expo) both; }
+	.fs-meta { animation-delay: 80ms; } .fs-act { animation-delay: 120ms; } .fs-next { animation-delay: 160ms; } .fs-b { animation-delay: 200ms; }
+	.fs-amb { animation: fs-fade 300ms var(--ease-standard) both; }
+}
+@keyframes fs-art-in { from { opacity: 0; transform: scale(.94); } }
+@keyframes fs-rise { from { opacity: 0; transform: translateY(8px); } }
+@keyframes fs-fade { from { opacity: 0; } }
+
+/* ----- two columns (the window is at least 900 wide): the cover and controls left, the panel right */
+@container wp (min-width: 900px) {
+	.wp-g.np { grid-template-columns: minmax(0, 42fr) minmax(0, 58fr); grid-template-rows: 56px minmax(0, 1fr); --lyr-max: 52px; --lyr-pad: 48px; --anchor-pct: 22; --bar-clear: 0px; }
+	.wp-g.np .fsl { position: relative; inset: auto; grid-column: 1; grid-row: 1 / -1; }
+	.wp-g.np .panel { grid-column: 2; grid-row: 1 / -1; background: transparent; border-left: 0; --wp-text-2: var(--wp-text-2w); }
+	.wp-g.np .pn-lyrics { grid-column: 2; grid-row: 2; --wp-text-2: var(--wp-text-2w); }
+	.wp-g.np .seg { background: color-mix(in srgb, var(--wp-side) 72%, transparent); }
+	.wp-g.np .pn-close, .wp-g.np .pn-title { display: none; }
+	.wp-g.np .lyr { -webkit-mask-image: linear-gradient(transparent 0, #000 64px, #000 calc(100% - 120px), transparent); mask-image: linear-gradient(transparent 0, #000 64px, #000 calc(100% - 120px), transparent); }
+	.wp-g.np .pn-queue { padding-bottom: 24px; }
+}
+/* a short two-column window: UP NEXT goes and the gaps tighten */
+@container wp (min-width: 900px) and (max-height: 540px) {
+	.wp-g.np .fsl { padding-top: 24px; padding-bottom: 20px; }
+	.fs-next { display: none; }
+	.fs-meta { margin-top: 14px; } .fs-act { margin-top: 8px; } .fs-b { margin-top: 12px; gap: 10px; }
+	.fs-t, .fs-b { --art: min(360px, calc(42cqi - 96px), calc(100cqb - 252px)); }
+}
+/* ----- compact (under 900): top icons, a header row, the lyrics full width, progress and transport pinned at the bottom */
+@container wp (max-width: 899.98px) {
+	.wp-g.np { --lyr-max: 34px; --lyr-pad: 20px; --anchor-pct: 16; --bar-clear: 0px; }
+	.wp-g.np .pn-title { display: none; }
+	.wp-g.np .fsl { position: absolute; inset: 0 0 var(--tabs-h) 0; display: grid; grid-template-rows: var(--fs-head) minmax(0, 1fr) var(--fs-foot); padding: 0; justify-content: stretch; }
+	.wp-g.np .pn-lyrics { position: absolute; grid-column: auto; grid-row: auto; left: 0; right: 0; top: var(--fs-head); bottom: calc(var(--fs-foot) + var(--tabs-h)); }
+	.fs-t { grid-row: 1; display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; grid-template-areas: "art meta act"; align-items: center; column-gap: 12px; justify-items: stretch; padding: 76px 20px 0 20px; --art: 64px; }
+	.fs-art { grid-area: art; width: 64px; height: 64px; }
+	.fs-art .fs-cov { border-radius: 8px; box-shadow: none; }
+	.fs-meta { grid-area: meta; margin-top: 0; justify-items: start; text-align: left; }
+	.fs-title { font-size: 22px; }
+	.fs-artist { font-size: 14px; margin-top: 2px; }
+	.fs-act { grid-area: act; margin-top: 0; }
+	.fs-next { display: none; }
+	.fs-b { grid-row: 3; margin-top: 0; padding: 0 20px 16px; align-content: end; gap: 14px; justify-items: stretch; --art: 100%; }
+	.fs-b .prg.fs-prog { width: 100%; }
+	.tr-fs { justify-content: space-between; max-width: 420px; width: 100%; justify-self: center; }
+	.tr-fs .play { width: 64px; height: 64px; } .tr-fs .play .ic { width: 34px; height: 34px; }
+}
+
+.fs-fmt { margin-top: 8px; }
+/* volume beside the actions (no extra row, so the cover keeps its room) */
+.fs-vol { margin: 0 0 0 4px; }
+.fs-vol .vol-s { width: 96px; }

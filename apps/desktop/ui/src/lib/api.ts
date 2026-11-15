@@ -1,285 +1,195 @@
-// The window's only way to the library, the player and the add-ons: the core's local API. Served by the core
-// itself, the API is on this page's own origin; the desktop shell hands the core's address in before the page runs
-// (`window.__STASH_CORE__`).
+/**
+ * The UI <-> engine boundary, from the Stash web player. The UI never touches audio, storage or the network directly; it talks to
+ * these interfaces. On the desktop `app.ts` implements them over the core's local API (`core.ts`): the core owns the library, the
+ * queue and the sound.
+ */
+import type { Readable } from 'svelte/store';
+import type { SearchResult } from './sources/search';
+import type { Album, Artist, Artwork, Descriptor, Lyrics, LyricLine, LyricWord, Track } from './sources/contract';
+import type { LibraryItem } from './identity';
+import type { AddonInfo, Counts, Signal, Tier } from './core';
 
-export type TrackRow = {
-  id: number;
-  title: string;
-  artist: string;
-  album: string | null;
-  duration_ms: number;
-  codec: string | null;
-  sample_rate: number | null;
-  bit_depth: number | null;
-  /** "described": a song known by its description (imported); it plays through the add-ons. */
-  origin: "file" | "addon" | "described";
-  sort_key: string;
-  liked: boolean;
-};
+export type { Readable, SearchResult, Counts, Album, Artist, Artwork, Descriptor, Lyrics, LyricLine, LyricWord, Track, LibraryItem, Signal, Tier };
 
-export type Counts = { tracks: number; albums: number; artists: number; liked: number; playlists: number };
+/** A queue entry: a library item plus an id for this particular slot (the same song can be queued twice). */
+export type QueueItem = LibraryItem & { qid: string };
 
-type Shell = { __STASH_CORE__?: string; __STASH_BENCH__?: boolean };
-const shell = window as unknown as Shell;
-const params = new URLSearchParams(location.search);
+export type RepeatMode = 'off' | 'all' | 'one';
 
-const core = shell.__STASH_CORE__ ?? params.get("core") ?? "";
+/** How a list came to be playing ("Your likes", a playlist's name, "Search"...): shown as "Playing from ..." in Up next. */
+export type PlayOptions = { from?: string };
 
-/** The page was asked to measure itself: `?bench`, or the shell said so. */
-export const measuring = shell.__STASH_BENCH__ === true || params.has("bench");
-
-/** A request the core (or an add-on behind it) refused, in words for the listener. */
-export class Refused extends Error {}
-
-async function answer<T>(path: string, response: Response): Promise<T> {
-  if (response.ok) return (await response.json()) as T;
-  const body = (await response.json().catch(() => null)) as { error?: { message?: string } } | null;
-  throw new Refused(body?.error?.message || `${path}: ${response.status}`);
+export interface PlayerState {
+	current: QueueItem | null;
+	/** The place of the song playing in the whole queue; -1 when nothing is loaded. */
+	index: number;
+	/**
+	 * The part of the queue the window holds: the core's queue can be the whole library, so only the songs from `queueStart` on are
+	 * read (the one playing and what follows it). `queue[i]` is the song at place `queueStart + i`.
+	 */
+	queue: QueueItem[];
+	/** The place in the whole queue of `queue[0]`. */
+	queueStart: number;
+	/** How many songs the whole queue has. */
+	queueLength: number;
+	playing: boolean;
+	/** An add-on is being asked where the song plays from. */
+	buffering: boolean;
+	positionMs: number;
+	durationMs: number;
+	volume: number;
+	shuffle: boolean;
+	repeat: RepeatMode;
+	/** A short, user-facing message for a toast; null when none. */
+	error: string | null;
+	/** What the queue is playing from (Up next's "Playing from ..."); null when unknown. */
+	from: string | null;
+	/** False when the core has no audio engine; `reason` says why. */
+	available: boolean;
+	reason: string | null;
+	/** What the engine reports about the sound between the file and the sound card; null when nothing is loaded. */
+	signal: Signal | null;
+	/** The bit depth of the file playing, when the library knows it (the engine reports only what it decodes to). */
+	sourceBitDepth: number | null;
+	/** What the add-on said the stream is, for an add-on's stream. */
+	tier: Tier | null;
+	/** The add-on the stream comes from, by id. */
+	servedBy: string | null;
+	/** Stash has the sound card to itself (Settings › Sound). */
+	exclusive: boolean;
 }
 
-async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
-  return answer<T>(path, await fetch(`${core}${path}`, { signal }));
+export interface PlayerAPI {
+	state: Readable<PlayerState>;
+	/** Precise position in ms for the LYRICS animator (not throttled like state.positionMs). */
+	now(): number;
+	/** Precise playback position in ms for the progress bar and for seeking relative to it. */
+	position(): number;
+	/** Replaces the queue and plays from `startIndex`. */
+	playItems(items: LibraryItem[], startIndex?: number, opts?: PlayOptions): Promise<void>;
+	/** Replaces the queue with the whole library in title order and plays from row `offset` (the list is too long to hand over song by song). */
+	playLibrary(offset: number, opts?: PlayOptions): Promise<void>;
+	play(): void;
+	pause(): void;
+	toggle(): void;
+	next(): void;
+	prev(): void;
+	seek(ms: number): void;
+	/** Play the song at queue position `i` (keeps the queue; a hard cut). */
+	jumpTo(i: number): void;
+	enqueue(items: LibraryItem[], opts?: { next?: boolean }): void;
+	removeAt(i: number): void;
+	move(from: number, to: number): void;
+	setShuffle(on: boolean): void;
+	setRepeat(m: RepeatMode): void;
+	setVolume(v: number): void;
+	/** Takes the sound card for Stash alone, or gives it back. */
+	setExclusive(on: boolean): void;
+	/** Every song of the queue, in order (read from the core a page at a time): what "Save as playlist" keeps. */
+	wholeQueue(): Promise<LibraryItem[]>;
 }
 
-async function post<T>(path: string, body: unknown): Promise<T> {
-  const sent = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
-  return answer<T>(path, await fetch(`${core}${path}`, sent));
+export interface SearchAPI {
+	/**
+	 * Per-source sections ("Your library", then each add-on) plus a merged "Top results"; `failed` lists add-ons that did not answer.
+	 * The library answers at once and an add-on can take seconds: `onLibrary` is handed the library's part as soon as it is there
+	 * (only when add-ons are still being asked).
+	 */
+	search(q: string, opts?: { signal?: AbortSignal; onLibrary?: (r: SearchResult) => void }): Promise<SearchResult>;
 }
 
-export const counts = () => get<Counts>("/api/counts");
-
-export const tracksAt = (offset: number, limit: number, signal?: AbortSignal) =>
-  get<{ rows: TrackRow[] }>(`/api/tracks?offset=${offset}&limit=${limit}`, signal).then((r) => r.rows);
-
-export const search = (query: string, limit: number, signal?: AbortSignal) =>
-  get<{ rows: TrackRow[] }>(`/api/search?q=${encodeURIComponent(query)}&limit=${limit}`, signal).then((r) => r.rows);
-
-// ---- The listener's lists, and bringing a library in from another Stash
-
-export type PlaylistRow = { id: number; name: string; tracks: number; followed: boolean };
-
-export const likedAt = (offset: number, limit: number, signal?: AbortSignal) =>
-  get<{ rows: TrackRow[] }>(`/api/liked?offset=${offset}&limit=${limit}`, signal).then((r) => r.rows);
-
-export const playlists = () => get<{ rows: PlaylistRow[] }>("/api/playlists").then((r) => r.rows);
-
-export const playlistTracksAt = (id: number, offset: number, limit: number, signal?: AbortSignal) =>
-  get<{ rows: TrackRow[] }>(`/api/playlists/${id}/tracks?offset=${offset}&limit=${limit}`, signal).then((r) => r.rows);
-
-/** What an import changed. */
-export type Imported = {
-  source: string;
-  /** Who wrote the file, in the file's own words. */
-  generator: string | null;
-  summary: {
-    songs_added: number;
-    songs_already: number;
-    likes_added: number;
-    likes_already: number;
-    playlists_added: number;
-    playlists_merged: number;
-    playlist_songs_added: number;
-    plays_added: number;
-    plays_already: number;
-  };
-  counts: Counts;
-};
-
-/** Hands the core a library file from the Android app or the web player. The file goes as it is: the core reads it. */
-export async function importLibrary(file: Blob): Promise<Imported> {
-  const sent = { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file };
-  return answer<Imported>("/api/import", await fetch(`${core}/api/import`, sent));
+/** Album and artist pages. On the desktop only the library has them (`sourceId` 'library'). */
+export interface BrowseAPI {
+	album(sourceId: string, id: string): Promise<Album>;
+	artist(sourceId: string, id: string): Promise<Artist>;
 }
 
-/** The core's answer to a change the listener made: the playlists and the counts as they now are. */
-export type Changed = { playlists: PlaylistRow[]; counts: Counts; id?: number; liked?: boolean; added?: number; done?: boolean };
+export type Playlist = {
+	/** The core's numeric id, as a string. */
+	id: string;
+	name: string;
+	items: LibraryItem[];
+	createdAt: number;
+	updatedAt: number;
+	/** A shared mix this playlist follows: its songs are not edited here. */
+	followed?: boolean;
+};
 
-/** Likes a song of the library, or takes the like back. */
-export const likeTrack = (id: number, liked: boolean) => post<Changed>("/api/tracks/like", { id, liked });
-/** Makes a track an add-on found a song of the library; the answer's `id` is its row. */
-export const keepFound = (addon: string, track: FoundTrack) => post<Changed>("/api/tracks/keep", { addon, track });
-export const createPlaylist = (name: string) => post<Changed>("/api/playlists", { name });
-export const renamePlaylist = (id: number, name: string) => post<Changed>(`/api/playlists/${id}/rename`, { name });
-export const deletePlaylist = (id: number) => post<Changed>(`/api/playlists/${id}/delete`, {});
-export const addToPlaylist = (id: number, ids: number[]) => post<Changed>(`/api/playlists/${id}/add`, { ids });
-/** Takes the song at place `index` (0 is the top) out of a playlist. */
-export const removeFromPlaylist = (id: number, index: number) => post<Changed>(`/api/playlists/${id}/remove`, { index });
-export const moveInPlaylist = (id: number, from: number, to: number) => post<Changed>(`/api/playlists/${id}/move`, { from, to });
+/** A play that counted. `playedAt` is when the play STARTED (epoch ms). */
+export type HistoryEntry = { item: LibraryItem; playedAt: number };
 
-/** The library as the file the Android app and the web player import, and how much is in it. */
-export async function exportLibrary(): Promise<{ blob: Blob; likes: number; lists: number; plays: number }> {
-  const response = await fetch(`${core}/api/export`);
-  if (!response.ok) throw new Refused(`/api/export: ${response.status}`);
-  const text = await response.text();
-  const file = JSON.parse(text) as { likes?: unknown[]; playlists?: unknown[]; history?: unknown[] };
-  return {
-    blob: new Blob([text], { type: "application/json" }),
-    likes: file.likes?.length ?? 0,
-    lists: file.playlists?.length ?? 0,
-    plays: file.history?.length ?? 0,
-  };
+export interface LibraryAPI {
+	likes: Readable<LibraryItem[]>;
+	playlists: Readable<Playlist[]>;
+	history: Readable<HistoryEntry[]>;
+	/** How much the library holds; null until the core has answered. */
+	counts: Readable<Counts | null>;
+	/** The likes, the playlists and the history have been read once. */
+	loaded: Readable<boolean>;
+	/** Goes up when the library changed under the lists (an import, a scan): a list that reads its own pages reads them again. */
+	changed: Readable<number>;
+	like(item: LibraryItem): Promise<void>;
+	unlike(item: LibraryItem): Promise<void>;
+	createPlaylist(name: string): Promise<Playlist>;
+	renamePlaylist(id: string, name: string): Promise<void>;
+	deletePlaylist(id: string): Promise<void>;
+	addToPlaylist(id: string, items: LibraryItem[]): Promise<void>;
+	removeFromPlaylist(id: string, index: number): Promise<void>;
+	/** Moves the song at `from` to position `to` (both in range; otherwise ignored). */
+	moveInPlaylist(id: string, from: number, to: number): Promise<void>;
+	/** Reads the counts, the likes, the playlists and the history again (an import or a scan changed the library under them). */
+	reload(): Promise<void>;
 }
 
-// ---- Add-ons
-
-export type Tier = "low" | "high" | "lossless" | "hires";
-
-/** An add-on the listener added. Its link is kept by the core and not shown: a link can carry a key. */
-export type AddonInfo = {
-  id: string;
-  name: string;
-  version: string | null;
-  description: string | null;
-  /** The server it is on. */
-  host: string | null;
-  resources: string[];
-  enabled: boolean;
-  /** Why it cannot be used, when it cannot. */
-  problem: string | null;
-};
-
-/** A track an add-on found. */
-export type FoundTrack = {
-  id: string;
-  title: string;
-  artist: string;
-  album: string | null;
-  duration_ms: number | null;
-  max_tier: Tier | null;
-  explicit: boolean | null;
-};
-
-export type AddonGroup = {
-  addon: { id: string; name: string };
-  tracks: FoundTrack[];
-  error: { code: string; message: string; retry_after: number | null } | null;
-};
-
-type Listed = { addons: AddonInfo[] };
-
-export const addons = () => get<Listed>("/api/addons").then((r) => r.addons);
-/** Adds the add-on at `link` (the address of its manifest). */
-export const addAddon = (link: string) => post<Listed>("/api/addons", { link }).then((r) => r.addons);
-export const removeAddon = (id: string) => post<Listed>("/api/addons/remove", { id }).then((r) => r.addons);
-export const setAddonEnabled = (id: string, enabled: boolean) =>
-  post<Listed>("/api/addons/enabled", { id, enabled }).then((r) => r.addons);
-export const orderAddons = (ids: string[]) => post<Listed>("/api/addons/order", { ids }).then((r) => r.addons);
-
-/** Asks one add-on for tracks. */
-export const searchAddon = (id: string, query: string, limit: number, signal?: AbortSignal) =>
-  get<{ groups: AddonGroup[] }>(
-    `/api/addons/search?q=${encodeURIComponent(query)}&addon=${encodeURIComponent(id)}&limit=${limit}`,
-    signal,
-  ).then((r) => r.groups[0] ?? null);
-
-// ---- The player
-
-export type Format = { sample_rate: number | null; format: string | null };
-
-/** What the engine reports about the sound between the file and the sound card. */
-export type Signal = {
-  codec: string | null;
-  decoded: Format;
-  output: Format;
-  driver: string | null;
-  mode: string | null;
-  resampled: boolean;
-  converted: boolean;
-};
-
-export type PlayerState = {
-  /** False when the core has no audio engine; `reason` says why. */
-  available: boolean;
-  reason?: string;
-  /** "loading": an add-on is being asked where the track plays from. */
-  status: "idle" | "loading" | "playing" | "paused";
-  index: number | null;
-  queue_len: number;
-  track: {
-    /** The library's row, for a track of the library. */
-    id: number | null;
-    title: string;
-    artist: string;
-    album: string | null;
-    /** Set for a track an add-on serves. */
-    addon: { addon: string; track: string } | null;
-  } | null;
-  position_ms: number;
-  duration_ms: number;
-  /** What the add-on said the stream is. */
-  tier: Tier | null;
-  /** The id of the add-on the stream comes from. */
-  served_by: string | null;
-  /** 0 to 100. */
-  volume: number;
-  /** Stash has the sound card to itself. */
-  exclusive: boolean;
-  signal: Signal | null;
-  error: string | null;
-};
-
-/** Nothing playing. */
-export const IDLE: PlayerState = {
-  available: true,
-  status: "idle",
-  index: null,
-  queue_len: 0,
-  track: null,
-  position_ms: 0,
-  duration_ms: 0,
-  tier: null,
-  served_by: null,
-  volume: 100,
-  exclusive: false,
-  signal: null,
-  error: null,
-};
-
-/** The core's answer with every field present (a core without a player sends only a few). */
-const whole = (answer: Partial<PlayerState>): PlayerState => ({ ...IDLE, ...answer });
-const told = (path: string, body: unknown) => post<Partial<PlayerState>>(path, body).then(whole);
-
-export const player = () => get<Partial<PlayerState>>("/api/player").then(whole);
-/** Plays the library's rows from `offset` on, in the list's order. */
-export const playFrom = (offset: number) => told("/api/player/play", { offset });
-/** Plays the liked songs from `offset` on, the newest like first. */
-export const playLiked = (offset: number) => told("/api/player/play", { liked: true, offset });
-/** Plays a playlist from `offset` on. */
-export const playPlaylist = (playlist: number, offset: number) => told("/api/player/play", { playlist, offset });
-/** Plays these library tracks, in this order. */
-export const playTracks = (ids: number[]) => told("/api/player/play", { ids });
-/** Plays these tracks an add-on found, in this order. */
-export const playFound = (addon: string, tracks: FoundTrack[]) =>
-  told("/api/player/play", { addon, tracks: tracks.map(({ id, title, artist, album }) => ({ id, title, artist, album })) });
-export const setPaused = (paused: boolean) => told("/api/player/pause", { paused });
-export const nextTrack = () => told("/api/player/next", {});
-export const previousTrack = () => told("/api/player/previous", {});
-export const seekTo = (seconds: number) => told("/api/player/seek", { seconds });
-export const setVolume = (percent: number) => told("/api/player/volume", { percent });
-/** Takes the sound card for Stash alone, or gives it back. */
-export const setExclusive = (exclusive: boolean) => told("/api/player/exclusive", { exclusive });
-/** Plays the queue from `index` on. */
-export const jumpTo = (index: number) => told("/api/player/jump", { index });
-
-/** A track of the queue, with its place in it. */
-export type QueueRow = { place: number; id: number | null; title: string; artist: string; album: string | null };
-export const queueAt = (offset: number, limit: number) =>
-  get<{ rows: QueueRow[] }>(`/api/player/queue?offset=${offset}&limit=${limit}`).then((r) => r.rows);
-
-// ---- Music folders
-
-export type ScanReport = { files: number; added: number; changed: number; unchanged: number; unreadable: number; missing: number; seconds: number };
-export type Scanning = {
-  scan: { running: boolean; folder: string | null; report: ScanReport | null; error: string | null; finished: number };
-  /** The music folders the listener added. */
-  folders: string[];
-};
-export const scanning = () => get<Scanning>("/api/scan");
-/** Asks for a folder with the system's own dialog; null when the listener closed it. */
-export const pickFolder = () => post<{ folder: string | null }>("/api/scan/pick", {}).then((r) => r.folder);
-/** Scans `folder` and remembers it; without one, scans the remembered folders again. */
-export const scan = (folder?: string) => post<Scanning>("/api/scan", folder ? { folder } : {});
-
-export async function postMeasurement(result: unknown): Promise<void> {
-  await fetch(`${core}/api/bench-result`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(result) });
+export interface LyricsAPI {
+	forTrack(item: QueueItem): Promise<Lyrics | null>;
 }
+
+/** An add-on the listener added, as Settings lists it. Its link is never part of it. */
+export type SourceStatus = AddonInfo;
+
+/** The listener's add-ons: where music beyond their own files comes from. The order is theirs: the first is asked first. */
+export interface SourcesAPI {
+	status: Readable<SourceStatus[]>;
+	/** Reads the list again. */
+	reload(): Promise<void>;
+	/** Adds the add-on at `link` (the address of its manifest). Rejects with the core's words when it is refused. */
+	add(link: string): Promise<void>;
+	remove(id: string): Promise<void>;
+	setEnabled(id: string, on: boolean): Promise<void>;
+	/** The add-ons' ids in the order they are asked. */
+	order(ids: string[]): Promise<void>;
+}
+
+export interface AppAPI {
+	player: PlayerAPI;
+	search: SearchAPI;
+	browse: BrowseAPI;
+	library: LibraryAPI;
+	lyrics: LyricsAPI;
+	sources: SourcesAPI;
+}
+
+export const INITIAL_PLAYER_STATE: PlayerState = {
+	current: null,
+	index: -1,
+	queue: [],
+	queueStart: 0,
+	queueLength: 0,
+	playing: false,
+	buffering: false,
+	positionMs: 0,
+	durationMs: 0,
+	volume: 1,
+	shuffle: false,
+	repeat: 'off',
+	error: null,
+	from: null,
+	available: true,
+	reason: null,
+	signal: null,
+	sourceBitDepth: null,
+	tier: null,
+	servedBy: null,
+	exclusive: false
+};

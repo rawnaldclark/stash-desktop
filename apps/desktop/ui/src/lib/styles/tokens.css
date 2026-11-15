@@ -1,0 +1,230 @@
+/* The Stash web player's tokens (the Stash design tokens + the web player tokens), copied as they are. */
+/* =====================================================================
+   Stash design tokens: "The Page Plays Along" (2026-10).
+   Colours name their app source (core/ui/.../theme/Color.kt unless noted).
+   Dark is the default; light follows prefers-color-scheme, or Settings > Appearance (vite.config.ts themeSwitch scopes the light blocks).
+   ===================================================================== */
+
+/* Fonts: two variable WOFF2s (Space Grotesk 500-700, Inter 400-700 at opsz 14), self-hosted, SIL OFL. */
+@font-face { font-family: "Space Grotesk"; src: url(/fonts/space-grotesk-var.woff2) format("woff2"); font-weight: 500 700; font-style: normal; font-display: swap; }
+@font-face { font-family: "Inter"; src: url(/fonts/inter-var.woff2) format("woff2"); font-weight: 400 700; font-style: normal; font-display: swap; }
+/* Metric-matched fallbacks (computed from the font files against Arial) so the swap doesn't move the layout. */
+@font-face { font-family: "Space Grotesk Fallback"; src: local("Arial"); size-adjust: 111.7%; ascent-override: 88.09%; descent-override: 26.14%; line-gap-override: 0%; }
+@font-face { font-family: "Inter Fallback"; src: local("Arial"); size-adjust: 107.61%; ascent-override: 90.03%; descent-override: 22.42%; line-gap-override: 0%; }
+
+/* Registered so the stage can crossfade album colours (AmbientBackground CROSSFADE_MS = 800). */
+@property --np-dom  { syntax: '<color>'; inherits: true;  initial-value: #2e1b6e; }
+@property --np-vib  { syntax: '<color>'; inherits: true;  initial-value: #8b5cf6; }
+@property --np-mut  { syntax: '<color>'; inherits: true;  initial-value: #3b3358; }
+@property --np-text { syntax: '<color>'; inherits: true;  initial-value: #ae8df9; }
+/* The goal record's light (animated only where scroll-driven animations exist). */
+@property --sweep   { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
+
+:root {
+  color-scheme: dark;
+
+  /* Brand: same in both themes */
+  --purple:       #8b5cf6;  /* StashPurple: goal light, replica primary (dark) */
+  --purple-light: #a78bfa;  /* StashPurpleLight: links on dark 7.4:1 */
+  --purple-dark:  #7c3aed;  /* StashPurpleDark: primary button fill, white label 5.7:1 */
+  --cyan:         #06b6d4;  /* StashCyan */
+  --cyan-light:   #22d3ee;  /* StashCyanLight: eyebrows + focus on dark 11.2:1 */
+  --cyan-dark:    #0891b2;  /* StashCyanDark */
+  --red:          #ef4444;  /* StashError: the liked heart (LikeButton uses colorScheme.error) */
+  --cream:        #f2ece2;  /* StashSwitch thumbOn: switch thumb, goal needle */
+
+  /* Neutrals, dark */
+  --bg:       #06060c;      /* StashBackground */
+  --surface:  #0d0d18;      /* StashSurface: inputs, code field */
+  --elevated: #1a1a2e;      /* StashElevatedSurface */
+  --text:     #e8e8f0;      /* StashTextPrimary 16.6:1 */
+  --text-2:   #a0a0b8;      /* StashTextSecondary 7.9:1 */
+  --text-3:   #606078;      /* StashTextTertiary 3.3:1: decoration and >=24px only */
+  --placeholder: #8a8aa3;   /* AA placeholder (5.6:1 on --surface) */
+  --text-3-aa: #8c8ca6;     /* AA lift of --text-3 for numerals (5.9:1): the same lift the replica's nav uses */
+  --glass:           rgb(255 255 255 / .04);  /* StashGlassBackground */
+  --glass-hover:     rgb(255 255 255 / .08);  /* StashGlassBackgroundHover */
+  --hairline:        rgb(255 255 255 / .06);  /* StashGlassBorder: section rules, grid lines */
+  --hairline-strong: rgb(255 255 255 / .14);  /* StashGlassBorderBright: decorative chip and button hairlines */
+  --field-border:    var(--text-3);           /* the email field's boundary: 3.3:1 on the page, 3.2:1 on its own surface (WCAG 1.4.11 needs 3:1); the hairlines above are decoration */
+
+  /* Site roles built from the palette */
+  --link:          var(--purple-light);
+  --eyebrow:       var(--cyan-light);         /* the app's UPDATED DAILY / RECENTLY DOWNLOADED form */
+  --focus:         var(--cyan-light);         /* 2px outline, 3px offset */
+  --action:        var(--purple-dark);        /* one primary action per view */
+  --action-hover:  #6d28d9;                   /* white label 7.1:1 */
+  --on-action:     #ffffff;
+  --header-bg:     rgb(6 6 12 / .72);
+  --brand-spill:   rgb(124 58 237 / .22);     /* goal record, gate pages, 404: brand-lit, never album-lit */
+  --stage-spill-a: 26%;                       /* album spill behind the phone: vibrant share */
+  --stage-spill-b: 16%;                       /* dominant share */
+  --grain-opacity: .045;
+  --wm-accent: #c084fc;                       /* wordmark_stash_dark.xml */
+  --wm-base:   #ffffff;
+  --grain: url(/assets/grain-dark.webp);
+  --mark-rim: #2a2a35;                        /* a 1 px rim so the near-black record shows on the dark page (favicon does the same) */
+
+  /* Phone frame (Pixel-style) */
+  --phone-bezel: 8px;
+  --phone-frame: #121218;
+  --phone-ring:  rgb(255 255 255 / .10);
+
+  /* Type (families from Type.kt) */
+  --font-display: "Space Grotesk", "Space Grotesk Fallback", system-ui, sans-serif;
+  --font-body:    "Inter", "Inter Fallback", system-ui, sans-serif;
+  --fw-medium: 500;  /* Space Grotesk Medium = the app's "semibold" TTF: every heading */
+  --fw-label:  600;  /* Inter SemiBold: eyebrows, buttons, labels */
+  --fw-bold:   700;  /* only where the app is Bold: the lyrics */
+  --fs-display: clamp(2rem, 1.2rem + 3.6vw, 4rem);      /* H1 fallback; hero column uses clamp(2rem, 10.8cqi, 4rem) */
+  --fs-h2:      clamp(2rem, 1.3rem + 2.4vw, 3.25rem);   /* 32 to 52 */
+  --fs-h3:      1.375rem;                               /* 22 */
+  --fs-lede:    clamp(1.0625rem, 1rem + .35vw, 1.25rem);/* 17 to 20 */
+  --fs-body:    1.0625rem;                              /* 17 */
+  --fs-small:   .875rem;                                /* 14 */
+  --fs-eyebrow: .78125rem;                              /* 12.5, uppercase, +.12em, Inter 600 */
+  --fs-figure:  clamp(3.5rem, 2rem + 5vw, 6rem);        /* goal money only, tabular */
+  --lh-display: 1.02; --lh-h2: 1.06; --lh-h3: 1.2; --lh-lede: 1.55; --lh-body: 1.6; --lh-small: 1.5;
+  --ls-display: -.035em; --ls-h2: -.03em; --ls-h3: -.015em; --ls-eyebrow: .12em; --ls-figure: -.02em;
+
+  /* Space: 4px base */
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px; --space-4: 16px;  --space-5: 24px;  --space-6: 32px;
+  --space-7: 48px; --space-8: 64px; --space-9: 96px; --space-10: 128px; --space-11: 160px;
+  --gutter: clamp(16px, 4vw, 48px);
+  --content-max: 1240px;
+  --section-pad: clamp(72px, 9vw, 128px);
+  --header-h: 64px;                                     /* 56px under 640px */
+  --measure: 64ch; --measure-lede: 40ch; --measure-legal: 68ch;
+
+  /* Radii: Shape.kt */
+  --radius-xs: 4px;     /* extraSmall: covers, sleeves */
+  --radius-sm: 8px;     /* small: mini player, tiles */
+  --radius-md: 12px;    /* medium: EVERY button and input (the app's Sync button is 12dp) */
+  --radius-lg: 16px;    /* large: GlassCard: code card, receipt */
+  --radius-xl: 20px;    /* extraLarge: sheets, album art */
+  --radius-pill: 999px; /* chips only, as in the app */
+
+  /* Shadows: material, one light from above */
+  --shadow-button: inset 0 1px 0 rgb(255 255 255 / .18), 0 1px 2px rgb(0 0 0 / .4), 0 8px 24px -12px rgb(124 58 237 / .7);
+  --shadow-object: 0 50px 100px -30px rgb(0 0 0 / .7), 0 24px 48px -24px rgb(0 0 0 / .5);
+  --shadow-card:   inset 0 1px 0 rgb(255 255 255 / .06), 0 1px 2px rgb(0 0 0 / .4), 0 16px 40px -16px rgb(0 0 0 / .55);
+  --shadow-input:  inset 0 1px 2px rgb(0 0 0 / .35);
+  --glow-needle:   0 0 0 3px rgb(139 92 246 / .25), 0 0 14px rgb(139 92 246 / .55);
+
+  /* Motion: Motion.kt names where they exist */
+  --dur-short:    180ms;  /* StashMotion.DUR_SHORT_MS: hover, press, screen fade */
+  --dur-med:      260ms;  /* StashMotion.DUR_MED_MS: title swap, chevrons */
+  --dur-line:     300ms;  /* LyricsSyllableRenderer line alpha tween */
+  --dur-live:     250ms;  /* LiveLyricsBar line change */
+  --dur-sheet:    300ms;  /* lyrics sheet slide */
+  --dur-scroll:   400ms;  /* lyric column step */
+  --dur-settle:   600ms;  /* record slide, cover settle */
+  --dur-entrance: 700ms;  /* first paint, once */
+  --dur-colour:   800ms;  /* AmbientBackground CROSSFADE_MS */
+  --loop:         24s;    /* the demo window */
+  --stagger:      40ms;   /* StashMotion.SECTION_STAGGER_MS */
+  --stagger-hero: 60ms;
+  --press-scale:  .97;    /* StashMotion.PRESS_SCALE */
+  --ease-standard: cubic-bezier(.4, 0, .2, 1);   /* Compose tween default (FastOutSlowIn) */
+  --ease-enter:    cubic-bezier(0, 0, .2, 1);    /* StashMotion.EaseEnter */
+  --ease-exit:     cubic-bezier(.4, 0, 1, 1);    /* StashMotion.EaseExit */
+  --ease-out-expo: cubic-bezier(.16, 1, .3, 1);  /* web entrances + feedback */
+  --ease-settle: linear(0, .072 5%, .232 10%, .42 15%, .598 20%, .748 25%, .862 30%, .943 35%, .995 40%,
+                 1.023 45%, 1.036 50%, 1.038 55%, 1.034 60%, 1.028 65%, 1.021 70%, 1.014 75%, 1.009 80%,
+                 1.004 85%, 1.002 90%, 1 95%, 1);  /* 3.8% overshoot spring */
+  --orbit-1: 12s; --orbit-2: 16s; --orbit-3: 20s;  /* AmbientBackground */
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --bg: #f6f3ff;         /* StashBackgroundLight */
+    --surface: #ffffff;    /* StashSurfaceLight */
+    --elevated: #eee7fc;   /* StashElevatedSurfaceLight */
+    --text: #1a0b2e;       /* StashTextPrimaryLight 17.0:1 */
+    --text-2: #5b4680;     /* StashTextSecondaryLight 7.3:1 */
+    --text-3: #8b7ab0;     /* StashTextTertiaryLight 3.5:1: decoration only */
+    --placeholder: #6f5f92;
+    --text-3-aa: #6f5f92;     /* 5.6:1 */
+    --glass: rgb(124 58 237 / .06);
+    --glass-hover: rgb(124 58 237 / .10);
+    --hairline: rgb(124 58 237 / .12);
+    --hairline-strong: rgb(124 58 237 / .20);
+    --link: var(--purple-dark);       /* 5.2:1 */
+    --eyebrow: #0e7490;               /* 4.9:1; StashCyan is only 2.2:1 here */
+    --focus: #0e7490;
+    --header-bg: rgb(246 243 255 / .78);
+    --brand-spill: rgb(139 92 246 / .16);
+    --stage-spill-a: 14%;
+    --stage-spill-b: 10%;
+    --grain-opacity: .05;
+    --wm-accent: #7c3aed;             /* wordmark_stash_light.xml */
+    --wm-base:   #1e0742;
+    --grain: url(/assets/grain-light.webp);
+    --mark-rim: transparent;
+    --phone-frame: #16161e;
+    --shadow-button: inset 0 1px 0 rgb(255 255 255 / .22), 0 1px 2px rgb(46 16 101 / .25), 0 8px 24px -12px rgb(124 58 237 / .55);
+    --shadow-object: 0 50px 100px -30px rgb(46 16 101 / .30), 0 24px 48px -24px rgb(46 16 101 / .22);
+    --shadow-card:   inset 0 1px 0 rgb(255 255 255 / .7), 0 1px 2px rgb(46 16 101 / .10), 0 16px 40px -16px rgb(46 16 101 / .20);
+    --shadow-input:  inset 0 1px 2px rgb(46 16 101 / .08);
+  }
+}
+
+/* =====================================================================
+   The web player's tokens (web-player brief 3.1), appended to the site tokens.
+   ===================================================================== */
+/* --acc-ink is registered too so the play icon's ink fades with the circle when a record switch crosses white <-> dark ink. */
+@property --acc-ink { syntax: '<color>'; inherits: true; initial-value: #ffffff; }
+
+/* Album palette: lives on .stage. */
+.stage {
+  --np-dom:#2e1b6e; --np-vib:#8b5cf6; --np-mut:#3b3358; --np-text:#ae8df9; --acc-ink:#ffffff;
+  transition: --np-dom 800ms var(--ease-standard), --np-vib 800ms var(--ease-standard),
+              --np-mut 800ms var(--ease-standard), --np-text 800ms var(--ease-standard), --acc-ink 800ms var(--ease-standard);
+}
+/* --acc-ink = monochrome's rule: YIQ brightness of the vibrant > 128 -> dark ink, else white. */
+@media (prefers-color-scheme: light) {
+  .stage { --np-text:#4f3390; }
+}
+@media (prefers-reduced-motion: reduce) { .stage { transition-duration: 200ms; } }
+
+.wp-frame {      /* the player's own surfaces (dark) */
+  --wp-chrome:#121218;              /* browser strip (= --phone-frame) */
+  --wp-ring:rgb(255 255 255/.10);
+  --wp-side:#06060c;                /* sidebar + panel: StashBackground */
+  --wp-main:#0d0d18;                /* main: StashSurface */
+  --wp-field:#1a1a2e;               /* search field, active segment: StashElevatedSurface */
+  --wp-line:rgb(255 255 255/.06); --wp-line-2:rgb(255 255 255/.14); --wp-hover:rgb(255 255 255/.06);
+  --wp-text:#e8e8f0; --wp-text-2:#a0a0b8; --wp-num:#8c8ca6;   /* --wp-num = AA lift for numbers (5.9:1) */
+  --wp-text-2w:#cdcddf;             /* secondary text where it sits on an album wash or the big-lyrics ambient: #a0a0b8 is 2.6 to 4.3:1 on the brighter washes (measured on the real pixels), this is >= 4.5:1 on all four */
+  --acc:var(--np-vib); --acc-text:var(--np-text);
+  --acc-wash:color-mix(in oklab, var(--np-vib) 16%, transparent);      /* row hover, active nav, playing-on pill */
+  --bar-bg:color-mix(in srgb, #0d0d18 70%, transparent); --bar-ring:rgb(255 255 255/.10);
+  --sheet-bg:color-mix(in srgb, #0d0d18 86%, transparent);   /* the sheet: the bar's recipe, more opaque, so its text holds 4.5:1 over any orb wash */
+  --fs-base:#06060c;                /* AmbientBackground BaseDark */
+  --lyric-lit:rgb(232 232 240/.85); --lyric-dim:rgb(232 232 240/.35);
+  --orb-a:.35; --orb-b:.25; --orb-c:.20;                                 /* AmbientBackground darkAlpha */
+  --wash-a:42%; --wash-b:55%; --wash-c:30%;
+  --tint-shadow:38%;
+}
+@media (prefers-color-scheme: light) {
+  .wp-frame {
+    --wp-chrome:#f4f1fa; --wp-ring:rgb(46 16 101/.14);   /* #f4f1fa, not #eee7fc: the cyan eyebrow #0e7490 needs it (4.8:1 vs 4.45:1) */
+    --wp-side:#f6f3ff; --wp-main:#ffffff; --wp-field:#eee7fc;
+    --wp-line:rgb(124 58 237/.12); --wp-line-2:rgb(124 58 237/.20); --wp-hover:rgb(124 58 237/.06);
+    --wp-text:#1a0b2e; --wp-text-2:#5b4680; --wp-num:#6f5f92; --wp-text-2w:#40305f;
+    --bar-bg:rgb(255 255 255/.72); --bar-ring:rgb(124 58 237/.14); --sheet-bg:rgb(255 255 255/.95);
+    --fs-base:#f4f1fa; --lyric-lit:rgb(26 11 46/.85); --lyric-dim:rgb(26 11 46/.35);
+    --orb-a:.22; --orb-b:.15; --orb-c:.11;                               /* light orbs also lerp 25% to white, as the replica */
+    --wash-a:22%; --wash-b:18%; --wash-c:14%;
+    --tint-shadow:24%;
+  }
+}
+
+/* Pure black (Settings > Appearance, the app's AMOLED option): html[data-black] while dark is showing (picked, or the system's). */
+@media (prefers-color-scheme: dark) {
+  :root[data-black]:not([data-theme="light"]) { --bg: #000; --surface: #000; }
+  :root[data-black]:not([data-theme="light"]) .wp-frame { --wp-chrome: #000; --wp-side: #000; --wp-main: #000; --fs-base: #000; --wp-field: #121218; --bar-bg: color-mix(in srgb, #000 78%, transparent); --sheet-bg: color-mix(in srgb, #000 90%, transparent); }
+}
+:root[data-black][data-theme="dark"] { --bg: #000; --surface: #000; }
+:root[data-black][data-theme="dark"] .wp-frame { --wp-chrome: #000; --wp-side: #000; --wp-main: #000; --fs-base: #000; --wp-field: #121218; --bar-bg: color-mix(in srgb, #000 78%, transparent); --sheet-bg: color-mix(in srgb, #000 90%, transparent); }

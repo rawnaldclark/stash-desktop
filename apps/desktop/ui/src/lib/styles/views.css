@@ -1,0 +1,163 @@
+/* ===== the views: Home, Search, Library, Playlist, empty state, from the Stash web player. `main` is an inline-size container,
+   so the album title and the narrow layouts follow the column, not the window. ===== */
+.view { min-width: 0; }
+.vh2 { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font: 500 20px/1.2 var(--font-display); letter-spacing: -.01em; color: var(--wp-text); margin: 0 0 16px; }
+.view .vh2:not(:first-child) { margin-top: 32px; }
+.vh2-more { font: 600 13px/1 var(--font-body); color: var(--wp-text-2); letter-spacing: 0; }
+.vh2-more:hover { color: var(--wp-text); }
+.s-hint { margin: 16px 0; font: 400 14px/1.5 var(--font-body); color: var(--wp-text-2); max-width: 56ch; }
+.lnk { color: var(--acc-text); text-decoration: underline; text-underline-offset: .2em; }
+
+/* cards */
+.cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 0 -12px; }
+@container main (max-width: 699.98px) { .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@container main (min-width: 1100px) { .cards { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
+.card { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; align-content: start; min-width: 0; padding: 12px; border-radius: 12px; text-align: left; transition: background-color 150ms var(--ease-standard), transform 300ms var(--ease-out-expo); }
+.card > .cv, .card > .tile { width: 100%; aspect-ratio: 1; height: auto; border-radius: 8px; margin-bottom: 8px; }
+.card b { overflow: clip; text-overflow: ellipsis; white-space: nowrap; font: 600 14px/1.3 var(--font-body); color: var(--wp-text); }
+.card i { overflow: clip; text-overflow: ellipsis; white-space: nowrap; font: 400 12px/1.3 var(--font-body); color: var(--wp-text-2); }
+@media (hover: hover) and (pointer: fine) { .card:hover { background: var(--wp-hover); transform: translateY(-4px); } }
+.new-tile { display: grid; place-items: center; border: 1px dashed var(--wp-line-2); background: transparent !important; color: var(--wp-text-2); }
+.new-tile .ic { width: 36px; height: 36px; }
+@media (prefers-reduced-motion: reduce) { .card { transition: none; } .card:hover { transform: none; } }
+/* a card with a menu: an invisible play button over all of it, and "more" on the picture's corner */
+.card-m { position: relative; }
+.card-hit { position: absolute; inset: 0; border-radius: inherit; z-index: 1; }
+.wp .card-hit:focus-visible { outline-offset: -2px; }
+.card-m .card-more { position: absolute; top: 18px; right: 18px; z-index: 2; width: 32px; height: 32px; color: #fff; background: rgb(0 0 0 / .5); opacity: 0; transition: opacity 150ms; }
+.card-m:hover .card-more, .card-m:focus-within .card-more { opacity: 1; }
+@media (hover: hover) and (pointer: fine) { .wp .card-more:hover { color: #fff; background: rgb(0 0 0 / .72); } }
+@media (hover: none) { .card-m .card-more { opacity: 1; } }
+
+/* a shelf: one horizontal row that scrolls and snaps, never wraps */
+.shelf { --card-w: 176px; display: flex; flex-wrap: nowrap; gap: 12px; margin: -6px -12px 0; padding: 6px 12px 10px; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x proximity; scroll-padding-inline: 12px; overscroll-behavior-x: contain; }
+.shelf > .card { flex: 0 0 var(--card-w); width: var(--card-w); scroll-snap-align: start; }
+@container main (max-width: 699.98px) { .shelf { --card-w: 150px; } }
+/* no raw scrollbar (a swipe on touch, the arrows below with a mouse, Shift+wheel and the trackpad still scroll) */
+.shelf { scrollbar-width: none; }
+.shelf::-webkit-scrollbar { display: none; }
+/* the arrows (ui/shelf-arrows.ts, mouse screens only): on hover or keyboard focus, gone at each end */
+.shelf-w { position: relative; }
+.sh-a { position: absolute; z-index: 2; top: var(--sh-y, 50%); display: grid; place-items: center; width: 40px; height: 40px; margin-top: -20px; border-radius: 50%; background: var(--wp-field); border: 1px solid var(--wp-line-2); color: var(--wp-text); box-shadow: var(--shadow-card); opacity: 0; pointer-events: none; transition: opacity 150ms var(--ease-standard), background-color 150ms; }
+.sh-a .ic { width: 26px; height: 26px; }
+.sh-l { left: -4px; }
+.sh-r { right: -4px; }
+.sh-a[hidden] { display: none; }
+.shelf-w:hover .sh-a, .sh-a:focus-visible { opacity: 1; pointer-events: auto; }
+@media (hover: hover) and (pointer: fine) { .sh-a:hover { color: var(--acc-text); } }
+@media (prefers-reduced-motion: reduce) { .sh-a { transition: none; } }
+
+/* buttons, chips */
+.btn { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 16px; border-radius: 12px; background: var(--acc); color: var(--acc-ink); font: 600 13px/1 var(--font-body); transition: transform var(--dur-short) var(--ease-out-expo); }
+.btn:active { transform: scale(var(--press-scale)); }
+.btn.ghost { background: transparent; border: 1px solid var(--wp-line-2); color: var(--wp-text); }
+.btn.danger { background: var(--red); color: #fff; }
+.more-btn { margin: 8px 0 0; height: 32px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--wp-line-2); color: var(--wp-text-2); font: 600 13px/1 var(--font-body); }
+@media (hover: hover) and (pointer: fine) { .more-btn:hover { background: var(--wp-hover); color: var(--wp-text); } }
+.chip, .rs { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--wp-line-2); color: var(--wp-text-2); font: 600 13px/1 var(--font-body); transition: background-color 150ms, color 150ms; }
+.rs { padding: 0 14px 0 10px; }
+.rs .ic { width: 16px; height: 16px; }
+@media (hover: hover) and (pointer: fine) { .chip:hover, .rs:hover { background: var(--wp-hover); color: var(--wp-text); } }
+.chip.on { background: var(--acc-wash); color: var(--wp-text); border-color: transparent; }
+.rs-chips, .lib-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.lib-chips { margin: 0 0 16px; }
+
+/* search */
+.view-search .caps { display: block; }
+.sr-top { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 24px; margin-bottom: 8px; }
+@container main (max-width: 699.98px) { .sr-top { grid-template-columns: minmax(0, 1fr); } }
+.top-card { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; min-height: 190px; border-radius: 16px; background: var(--wp-hover); transition: background-color 150ms; }
+@media (hover: hover) and (pointer: fine) { .top-card:hover { background: var(--acc-wash); } }
+.top-main { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; gap: 4px; align-content: start; width: 100%; min-height: 190px; padding: 20px; text-align: left; border-radius: 16px; }
+.top-cv { display: block; width: 96px; height: 96px; margin-bottom: 14px; overflow: clip; border-radius: 8px; }
+.top-cv .cv { width: 100%; height: 100%; }
+.top-main > * { min-width: 0; }
+.top-kind { font: 700 11px/1.3 var(--font-body); letter-spacing: .08em; text-transform: uppercase; color: var(--acc); }
+.top-main b { font: 700 28px/1.1 var(--font-display); letter-spacing: -.02em; color: var(--wp-text); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; white-space: normal; overflow-wrap: anywhere; padding: 0 56px .08em 0; }
+.top-main i { font: 400 13px/1.3 var(--font-body); color: var(--wp-text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 56px; }
+.top-card a.top-main { color: inherit; }
+.top-col, .songs-col { min-width: 0; }
+.top-col > .vh2, .songs-col > .vh2 { margin-bottom: 12px; }
+/* the Artists and Albums rows: the app's 96 px circles and 140 px squares (a .card has 12 px padding) */
+.shelf-artists { --card-w: 120px; }
+.shelf-artists > .card { text-align: center; }
+.shelf-artists > .card > .cv { border-radius: 50%; }
+/* an artist with no picture anywhere: their initials on the placeholder */
+.cv-ph[data-ini] { display: grid; place-items: center; container-type: inline-size; }
+.cv-ph[data-ini]::after { content: attr(data-ini); font: 600 32cqi/1 var(--font-display); letter-spacing: -.02em; color: rgb(255 255 255 / .82); }
+.shelf-albums { --card-w: 164px; }
+@container main (max-width: 699.98px) { .shelf-artists { --card-w: 120px; } .shelf-albums { --card-w: 164px; } }
+/* recent searches */
+.rs-head { display: flex; align-items: center; justify-content: space-between; margin: 4px 0 6px; }
+.rs-clear { height: 32px; padding: 0 12px; margin-right: -12px; border-radius: 999px; font: 600 13px/1 var(--font-body); color: var(--wp-text-2); }
+@media (hover: hover) and (pointer: fine) { .rs-clear:hover { color: var(--wp-text); background: var(--wp-hover); } }
+.rs-list { display: grid; max-width: 640px; }
+.rs-row { display: flex; align-items: center; gap: 4px; border-radius: 10px; }
+@media (hover: hover) and (pointer: fine) { .rs-row:hover { background: var(--wp-hover); } }
+.rs-main { display: flex; align-items: center; gap: 12px; flex: 1 1 auto; min-width: 0; padding: 6px 8px; border-radius: 10px; text-align: left; color: var(--wp-text); }
+.rs-pic { display: grid; place-items: center; flex: none; width: 44px; height: 44px; overflow: clip; border-radius: 8px; background: var(--wp-hover); color: var(--wp-text-2); }
+.rs-pic.round { border-radius: 50%; }
+.rs-pic .cv { width: 100%; height: 100%; }
+.rs-pic .ic { width: 22px; height: 22px; }
+.rs-txt { display: grid; min-width: 0; }
+.rs-txt b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 14px/1.3 var(--font-body); }
+.rs-txt i { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 400 12px/1.3 var(--font-body); color: var(--wp-text-2); }
+.rs-x { display: grid; place-items: center; flex: none; width: 40px; height: 40px; border-radius: 50%; color: var(--wp-text-2); }
+.rs-x .ic { width: 20px; height: 20px; }
+@media (hover: hover) and (pointer: fine) { .rs-x:hover { color: var(--wp-text); background: var(--wp-hover); } }
+.top-play { position: absolute; right: 20px; bottom: 20px; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; background: var(--acc); color: var(--acc-ink); pointer-events: none; }
+.top-play .ic { width: 26px; height: 26px; }
+.top-more { position: absolute; top: 12px; right: 12px; width: 36px; height: 36px; }
+.sr-songs { display: grid; align-content: start; }
+.sec-h { margin-top: 28px !important; font-size: 17px; }
+
+/* library, playlist headers */
+.lib-title { margin-bottom: 12px; }
+.lib-actions { display: flex; align-items: center; gap: 12px; margin: 4px 0 12px; }
+.lib-count { font: 400 13px/1 var(--font-body); color: var(--wp-text-2); }
+.hist-day { margin: 20px 0 6px; }
+.trk-list { margin-top: 4px; }
+.new-form, .rename { display: flex; gap: 8px; margin: 16px 0; }
+.new-form input, .rename input { flex: 1; min-width: 0; max-width: 360px; height: 40px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--wp-line-2); background: var(--wp-field); color: var(--wp-text); font: 400 14px/1 var(--font-body); }
+.rename { margin: 8px 0 12px; }
+.view-playlist, .view-album, .view-artist { --cov: 172px; --act: 52px; --act2: 40px; --ttl-max: 60px; }
+@container main (max-width: 519.98px) { .view-playlist, .view-album, .view-artist { --cov: 120px; --act: 44px; --act2: 36px; --ttl-max: 40px; } }
+.alb-top { display: flex; align-items: flex-end; gap: 24px; }
+.alb-cover { position: relative; width: var(--cov); height: var(--cov); flex: none; border-radius: 8px; overflow: clip; box-shadow: var(--shadow-object); }
+.alb-cover .tile, .alb-cover .cv { width: 100%; height: 100%; }
+.alb-cover.art-round { border-radius: 50%; }
+.alb-by { color: var(--wp-text); font-weight: 600; }
+@media (hover: hover) and (pointer: fine) { .alb-by:hover { text-decoration: underline; text-underline-offset: .2em; } }
+button.lnk { font: inherit; }
+.alb-txt { min-width: 0; padding-bottom: 2px; }
+.alb-title { margin: 8px 0 12px; font: 700 clamp(28px, 7cqi, var(--ttl-max))/1 var(--font-display); letter-spacing: -.035em; color: var(--wp-text); text-wrap: balance; overflow-wrap: anywhere; }
+.alb-meta { font: 400 13px/1.4 var(--font-body); color: var(--wp-text-2); }
+.alb-meta b { color: var(--wp-text); }
+.art-aud { margin: -4px 0 10px; font: 500 14px/1.4 var(--font-body); color: var(--wp-text-2); }
+.alb-act { display: flex; align-items: center; gap: 12px; margin: 20px 0 8px; flex-wrap: wrap; }
+.act-play { display: grid; place-items: center; width: var(--act, 52px); height: var(--act, 52px); border-radius: 50%; flex: none; color: var(--acc-ink); background: var(--acc); transition: transform var(--dur-short) var(--ease-out-expo); }
+.lib-actions .act-play { --act: 48px; }
+.act-play .ic { width: 28px; height: 28px; }
+@media (hover: hover) and (pointer: fine) { .act-play:hover:not(:disabled) { transform: scale(1.04); } }
+.act-play:active { transform: scale(var(--press-scale)); }
+.act-ib { display: grid; place-items: center; width: var(--act2, 40px); height: var(--act2, 40px); border-radius: 50%; flex: none; color: var(--wp-text-2); transition: color var(--dur-short), background-color var(--dur-short); }
+.lib-actions .act-ib { --act2: 40px; }
+.act-ib .ic { width: 22px; height: 22px; }
+@media (hover: hover) and (pointer: fine) { .act-ib:hover:not(:disabled) { color: var(--wp-text); background: var(--wp-hover); } }
+
+/* the empty state: one calm line and a search box */
+.empty { display: grid; justify-items: center; align-content: start; gap: 20px; padding: clamp(48px, 16cqb, 160px) 0 0; text-align: center; }
+.empty-line { max-width: 24ch; font: 500 clamp(22px, 4cqi, 30px)/1.25 var(--font-display); letter-spacing: -.015em; color: var(--wp-text); text-wrap: balance; }
+.empty-search { display: flex; align-items: center; gap: 10px; width: min(100%, 440px); height: 48px; padding: 0 14px; border-radius: 12px; background: var(--wp-field); border: 1px solid var(--wp-line-2); color: var(--wp-text-2); }
+.empty-search:focus-within { border-color: color-mix(in srgb, var(--wp-text) 55%, transparent); }
+.empty-search input { flex: 1; min-width: 0; height: 100%; border: 0; outline: 0; background: none; color: var(--wp-text); font: 400 15px/1 var(--font-body); }
+.empty-search input::placeholder { color: var(--wp-text-2); opacity: 1; }
+.empty-search input::-webkit-search-cancel-button { display: none; }
+
+/* placeholder cover and forced colours */
+@media (forced-colors: active) {
+	.wash, .fs-amb, .wsh { display: none; }
+	.bar { border-color: CanvasText; }
+	.play, .act-play { background: ButtonFace; color: ButtonText; border: 1px solid ButtonText; }
+	.nav-i.on, .seg-i[aria-selected='true'], .chip.on { border: 1px solid Highlight; }
+}
