@@ -77,6 +77,18 @@ pub struct TrackRow {
     /// The row's place in the title order: hand it back to [`Library::tracks_after`] for the next page.
     pub sort_key: String,
     pub liked: bool,
+    /// A cover on the web, when one is known.
+    pub art: Option<String>,
+    pub album_id: Option<i64>,
+    pub artist_id: i64,
+    pub added_at_ms: i64,
+    pub isrc: Option<String>,
+    /// When it was liked: set in the liked list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liked_at_ms: Option<i64>,
+    /// When this play started: set in the history.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub played_at_ms: Option<i64>,
 }
 
 /// An album as a grid tile shows it.
@@ -85,8 +97,25 @@ pub struct AlbumRow {
     pub id: i64,
     pub title: String,
     pub artist: String,
+    pub artist_id: i64,
     pub year: Option<i32>,
+    #[serde(rename = "tracks")]
     pub track_count: u32,
+    /// A cover on the web: the first one any of its tracks has.
+    pub art: Option<String>,
+}
+
+/// An artist's page: the artist, their songs here and their albums.
+pub type ArtistPage = (ArtistRow, Vec<TrackRow>, Vec<AlbumRow>);
+
+/// An artist as a list shows them.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ArtistRow {
+    pub id: i64,
+    pub name: String,
+    pub tracks: u32,
+    pub albums: u32,
+    pub art: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -106,6 +135,10 @@ pub struct PlaylistRow {
     pub tracks: u64,
     /// A shared mix someone else owns.
     pub followed: bool,
+    /// Its id for other Stashes.
+    pub external_id: Option<String>,
+    pub created_at_ms: Option<i64>,
+    pub updated_at_ms: Option<i64>,
 }
 
 /// What the library knows a song by, for asking an add-on for it.
@@ -136,7 +169,37 @@ pub struct StoredAddon {
 /// ([`Library::search`]). Ranking 2,000 rows takes a few milliseconds; ranking 50,000 took about 170 ms.
 pub const RANK_CAP: usize = 2_000;
 
-const TRACK_COLUMNS: &str = "t.id, t.title, a.name, al.title, t.duration_ms, t.codec, t.sample_rate, t.bit_depth, t.origin, t.sort_key, t.liked_at_ms IS NOT NULL";
+const TRACK_COLUMNS: &str = "t.id, t.title, a.name, al.title, t.duration_ms, t.codec, t.sample_rate, t.bit_depth, t.origin, t.sort_key, t.liked_at_ms IS NOT NULL, t.art_url, t.album_id, t.artist_id, t.added_at * 1000, t.isrc, t.liked_at_ms";
+const ALBUM_COLUMNS: &str = "al.id, al.title, a.name, al.artist_id, al.year,
+    (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id),
+    (SELECT t.art_url FROM tracks t WHERE t.album_id = al.id AND t.art_url IS NOT NULL LIMIT 1)";
+
+fn album_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AlbumRow> {
+    Ok(AlbumRow {
+        id: r.get(0)?,
+        title: r.get(1)?,
+        artist: r.get(2)?,
+        artist_id: r.get(3)?,
+        year: r.get(4)?,
+        track_count: r.get(5)?,
+        art: r.get(6)?,
+    })
+}
+
+const ARTIST_COLUMNS: &str = "a.id, a.name,
+    (SELECT COUNT(*) FROM tracks t WHERE t.artist_id = a.id),
+    (SELECT COUNT(*) FROM albums al WHERE al.artist_id = a.id),
+    (SELECT t.art_url FROM tracks t WHERE t.artist_id = a.id AND t.art_url IS NOT NULL LIMIT 1)";
+
+fn artist_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArtistRow> {
+    Ok(ArtistRow {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        tracks: r.get(2)?,
+        albums: r.get(3)?,
+        art: r.get(4)?,
+    })
+}
 const TRACK_JOINS: &str =
     "JOIN artists a ON a.id = t.artist_id LEFT JOIN albums al ON al.id = t.album_id";
 
@@ -153,6 +216,13 @@ fn track_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackRow> {
         origin: r.get(8)?,
         sort_key: r.get(9)?,
         liked: r.get(10)?,
+        art: r.get(11)?,
+        album_id: r.get(12)?,
+        artist_id: r.get(13)?,
+        added_at_ms: r.get(14)?,
+        isrc: r.get(15)?,
+        liked_at_ms: r.get(16)?,
+        played_at_ms: None,
     })
 }
 
@@ -377,7 +447,7 @@ impl Library {
     /// left out.
     pub fn queue_items(&self, ids: &[i64]) -> Result<Vec<crate::player::QueueItem>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT t.id, t.title, a.name, al.title, t.locator
+            "SELECT t.id, t.title, a.name, al.title, t.locator, t.art_url, t.duration_ms
              FROM tracks t JOIN artists a ON a.id = t.artist_id LEFT JOIN albums al ON al.id = t.album_id
              WHERE t.id = ?1 AND ((t.origin = 'file' AND t.missing_since IS NULL) OR t.origin = 'described')",
         )?;
@@ -391,6 +461,9 @@ impl Library {
                     album: r.get(3)?,
                     addon: None,
                     locator: r.get(4)?,
+                    art: r.get(5)?,
+                    duration_ms: Some(r.get::<_, i64>(6)? as u64).filter(|ms| *ms > 0),
+                    qid: 0,
                 })
             })?;
             if let Some(item) = rows.next().transpose()? {
@@ -403,7 +476,8 @@ impl Library {
     /// The listener's playlists, in their order.
     pub fn playlists(&self) -> Result<Vec<PlaylistRow>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT p.id, p.name, (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id), p.follow_id IS NOT NULL
+            "SELECT p.id, p.name, (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id), p.follow_id IS NOT NULL,
+                    p.external_id, p.created_at_ms, p.updated_at_ms
              FROM playlists p ORDER BY p.position, p.id",
         )?;
         let rows = stmt
@@ -413,6 +487,9 @@ impl Library {
                     name: r.get(1)?,
                     tracks: r.get::<_, i64>(2)? as u64,
                     followed: r.get(3)?,
+                    external_id: r.get(4)?,
+                    created_at_ms: r.get(5)?,
+                    updated_at_ms: r.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -619,22 +696,127 @@ impl Library {
 
     /// The page of albums at `offset` in title order, each with its track count: an album grid at any scroll position.
     pub fn albums_at(&self, offset: usize, limit: usize) -> Result<Vec<AlbumRow>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT al.id, al.title, a.name, al.year,
-                    (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id)
+        let sql = format!(
+            "SELECT {ALBUM_COLUMNS}
              FROM (SELECT id FROM albums ORDER BY sort_key, id LIMIT ?1 OFFSET ?2) p
              JOIN albums al ON al.id = p.id JOIN artists a ON a.id = al.artist_id
-             ORDER BY al.sort_key, al.id",
+             ORDER BY al.sort_key, al.id"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt
+            .query_map(params![limit as i64, offset as i64], album_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// One album and its tracks, in the album's order.
+    pub fn album(&self, id: i64) -> Result<Option<(AlbumRow, Vec<TrackRow>)>> {
+        use rusqlite::OptionalExtension;
+        let sql = format!(
+            "SELECT {ALBUM_COLUMNS} FROM albums al JOIN artists a ON a.id = al.artist_id WHERE al.id = ?1"
+        );
+        let Some(album) = self
+            .conn
+            .prepare_cached(&sql)?
+            .query_row([id], album_row)
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let sql = format!(
+            "SELECT {TRACK_COLUMNS} FROM tracks t {TRACK_JOINS}
+             WHERE t.album_id = ?1 ORDER BY t.disc_no, t.track_no, t.added_at, t.id"
+        );
+        let tracks = self
+            .conn
+            .prepare_cached(&sql)?
+            .query_map([id], track_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Some((album, tracks)))
+    }
+
+    /// The ids of an album's tracks from `offset` on, in the album's order: what plays when one is started.
+    pub fn album_track_ids(&self, id: i64, offset: usize, limit: usize) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id FROM tracks WHERE album_id = ?1 ORDER BY disc_no, track_no, added_at, id LIMIT ?2 OFFSET ?3",
         )?;
+        let ids = stmt
+            .query_map(params![id, limit as i64, offset as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?;
+        Ok(ids)
+    }
+
+    /// The page of artists at `offset`, by name: those with a song or an album here.
+    pub fn artists_at(&self, offset: usize, limit: usize) -> Result<Vec<ArtistRow>> {
+        let sql = format!(
+            "SELECT {ARTIST_COLUMNS}
+             FROM (SELECT id FROM artists ORDER BY sort_key, id LIMIT ?1 OFFSET ?2) p
+             JOIN artists a ON a.id = p.id ORDER BY a.sort_key, a.id"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt
+            .query_map(params![limit as i64, offset as i64], artist_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// One artist: their songs here (the most played first, then by title; at most `limit`) and their albums.
+    pub fn artist(&self, id: i64, limit: usize) -> Result<Option<ArtistPage>> {
+        use rusqlite::OptionalExtension;
+        let sql = format!("SELECT {ARTIST_COLUMNS} FROM artists a WHERE a.id = ?1");
+        let Some(artist) = self
+            .conn
+            .prepare_cached(&sql)?
+            .query_row([id], artist_row)
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let sql = format!(
+            "SELECT {TRACK_COLUMNS} FROM tracks t {TRACK_JOINS}
+             WHERE t.artist_id = ?1 ORDER BY t.play_count DESC, t.sort_key, t.id LIMIT ?2"
+        );
+        let tracks = self
+            .conn
+            .prepare_cached(&sql)?
+            .query_map(params![id, limit as i64], track_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let sql = format!(
+            "SELECT {ALBUM_COLUMNS} FROM albums al JOIN artists a ON a.id = al.artist_id
+             WHERE al.artist_id = ?1 ORDER BY al.year DESC, al.sort_key, al.id"
+        );
+        let albums = self
+            .conn
+            .prepare_cached(&sql)?
+            .query_map([id], album_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Some((artist, tracks, albums)))
+    }
+
+    /// The ids of an artist's songs from `offset` on, in the order their page shows them.
+    pub fn artist_track_ids(&self, id: i64, offset: usize, limit: usize) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id FROM tracks WHERE artist_id = ?1 ORDER BY play_count DESC, sort_key, id LIMIT ?2 OFFSET ?3",
+        )?;
+        let ids = stmt
+            .query_map(params![id, limit as i64, offset as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?;
+        Ok(ids)
+    }
+
+    /// The page of plays at `offset`, the newest first: each a track with when that play started.
+    pub fn history_at(&self, offset: usize, limit: usize) -> Result<Vec<TrackRow>> {
+        let sql = format!(
+            "SELECT {TRACK_COLUMNS}, p.played_at_ms
+             FROM (SELECT track_id, played_at_ms FROM plays ORDER BY played_at_ms DESC, track_id LIMIT ?1 OFFSET ?2) p
+             JOIN tracks t ON t.id = p.track_id {TRACK_JOINS} ORDER BY p.played_at_ms DESC, t.id"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt
             .query_map(params![limit as i64, offset as i64], |r| {
-                Ok(AlbumRow {
-                    id: r.get(0)?,
-                    title: r.get(1)?,
-                    artist: r.get(2)?,
-                    year: r.get(3)?,
-                    track_count: r.get(4)?,
-                })
+                let mut row = track_row(r)?;
+                row.played_at_ms = Some(r.get(17)?);
+                Ok(row)
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)

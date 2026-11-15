@@ -573,10 +573,18 @@ fn a_library_file_is_imported_and_its_songs_play_through_an_add_on() {
         (Some("described"), Some(true))
     );
     let (_, playlists) = client.get("/api/playlists");
+    let mix = &playlists["rows"][0];
     assert_eq!(
-        playlists,
-        json!({ "rows": [{ "id": 1, "name": "Mix", "tracks": 3, "followed": false }] })
+        (
+            mix["id"].as_i64(),
+            mix["name"].as_str(),
+            mix["tracks"].as_u64(),
+            mix["followed"].as_bool(),
+            mix["external_id"].as_str()
+        ),
+        (Some(1), Some("Mix"), Some(3), Some(false), Some("app-7"))
     );
+    assert_eq!(playlists["rows"].as_array().map(Vec::len), Some(1));
     assert_eq!(
         titles(&client.get("/api/playlists/1/tracks").1),
         ["charlie", "echo", "delta"]
@@ -765,9 +773,21 @@ fn what_is_done_here_goes_out_as_a_library_file() {
     );
     let made = client.post("/api/playlists", json!({ "name": "Made here" }));
     let mix = made["id"].as_i64().unwrap();
+    let row = &made["playlists"][0];
     assert_eq!(
-        made["playlists"],
-        json!([{ "id": mix, "name": "Made here", "tracks": 0, "followed": false }])
+        (
+            row["id"].as_i64(),
+            row["name"].as_str(),
+            row["tracks"].as_u64(),
+            row["followed"].as_bool()
+        ),
+        (Some(mix), Some("Made here"), Some(0), Some(false))
+    );
+    assert!(
+        row["external_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("desk-"))
+            && row["created_at_ms"].is_number()
     );
     let added = client.post(
         &format!("/api/playlists/{mix}/add"),
@@ -1275,5 +1295,230 @@ fn a_folder_is_scanned_from_the_window_and_the_players_settings_are_kept() {
             .map(Vec::len),
         Some(1)
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_lists_and_the_queue_the_window_is_built_on() {
+    let dir = std::env::temp_dir().join(format!("stash-api-port-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let music = dir.join("Music");
+    std::fs::create_dir_all(&music).unwrap();
+    for name in ["alpha", "bravo", "charlie", "delta"] {
+        silence(&music.join(format!("{name}.wav")));
+    }
+    let db = dir.join("library.db");
+    {
+        let mut library = Library::open(&db).unwrap();
+        scan_folder(&mut library, &music, |_| {}).unwrap();
+        // An album with a cover, from another Stash: two songs known by their description.
+        let file = json!({ "kind": "stash-web-library", "v": 1, "likes": [
+            { "item": { "title": "One", "artist": "Band", "album": "Record", "durationMs": 2000, "artwork": [{ "url": "https://covers.example/record.jpg" }] }, "likedAt": 9 },
+            { "item": { "title": "Two", "artist": "Band", "album": "Record", "durationMs": 2000 }, "likedAt": 8 }
+        ] }).to_string();
+        library
+            .import(&stash_core::import::read_bytes(file.as_bytes()).unwrap())
+            .unwrap();
+        let id = library.search("alpha", 1).unwrap()[0].id;
+        library.record_play(id, 5_000).unwrap();
+        library.record_play(id, 7_000).unwrap();
+    }
+    let engine = engine();
+    let core = Core::bind(Options {
+        db,
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: Some(Output::Silent),
+        mpv: engine.clone(),
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    let titles = |rows: &Value| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["title"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+
+    // A row says what a list needs to draw and link it.
+    let (_, liked) = client.get("/api/liked");
+    let one = &liked["rows"][0];
+    assert_eq!(
+        (
+            one["title"].as_str(),
+            one["art"].as_str(),
+            one["liked_at_ms"].as_i64(),
+            one["origin"].as_str()
+        ),
+        (
+            Some("One"),
+            Some("https://covers.example/record.jpg"),
+            Some(9),
+            Some("described")
+        )
+    );
+    assert!(
+        one["album_id"].is_number()
+            && one["artist_id"].is_number()
+            && one["added_at_ms"].is_number()
+    );
+    // History: every play, the newest first.
+    let (_, history) = client.get("/api/history");
+    assert_eq!(
+        history["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (
+                r["title"].as_str().unwrap(),
+                r["played_at_ms"].as_i64().unwrap()
+            ))
+            .collect::<Vec<_>>(),
+        [("alpha", 7_000), ("alpha", 5_000)]
+    );
+
+    // Albums and artists, and one of each.
+    let (_, albums) = client.get("/api/albums");
+    let record = &albums["rows"][0];
+    assert_eq!(
+        (
+            record["title"].as_str(),
+            record["artist"].as_str(),
+            record["tracks"].as_u64(),
+            record["art"].as_str()
+        ),
+        (
+            Some("Record"),
+            Some("Band"),
+            Some(2),
+            Some("https://covers.example/record.jpg")
+        )
+    );
+    let (_, album) = client.get(&format!("/api/albums/{}", record["id"]));
+    assert_eq!(
+        (album["album"]["title"].as_str(), titles(&album["rows"])),
+        (Some("Record"), vec!["One".to_string(), "Two".into()])
+    );
+    assert_eq!(client.get("/api/albums/99999").0, 404);
+    let (_, artists) = client.get("/api/artists");
+    let band = artists["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "Band")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (band["tracks"].as_u64(), band["albums"].as_u64()),
+        (Some(2), Some(1))
+    );
+    let (_, artist) = client.get(&format!("/api/artists/{}", band["id"]));
+    assert_eq!(
+        (
+            artist["artist"]["name"].as_str(),
+            artist["rows"].as_array().map(Vec::len),
+            artist["albums"][0]["title"].as_str()
+        ),
+        (Some("Band"), Some(2), Some("Record"))
+    );
+
+    if engine.is_none() {
+        eprintln!("SKIPPED the player: no libmpv found");
+        return;
+    }
+    // A list of chosen tracks, from a place in it, saying where from. An id the library does not have is left out,
+    // and the place still means the same track.
+    let (_, rows) = client.get("/api/tracks?offset=0&limit=10");
+    let id = |title: &str| {
+        rows["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["title"] == title)
+            .unwrap()["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let items = json!([{ "id": id("alpha") }, { "id": 999_999 }, { "id": id("bravo") }, { "id": id("charlie") }]);
+    let started = client.post(
+        "/api/player/play",
+        json!({ "items": items, "start": 2, "from": "A test" }),
+    );
+    assert_eq!(
+        (
+            started["queue_len"].as_u64(),
+            started["from"].as_str(),
+            started["shuffle"].as_bool(),
+            started["repeat"].as_str()
+        ),
+        (Some(3), Some("A test"), Some(false), Some("off"))
+    );
+    let bravo = client.player_until("bravo, the chosen one", |s| {
+        s["status"] == "playing" && s["track"]["title"] == "bravo"
+    });
+    assert_eq!(
+        (
+            bravo["index"].as_u64(),
+            bravo["track"]["duration_ms"].as_u64()
+        ),
+        (Some(1), Some(2000))
+    );
+    let version = bravo["queue_version"].as_u64().unwrap();
+
+    // The queue is edited: one added next, one taken out, one moved.
+    client.post(
+        "/api/player/enqueue",
+        json!({ "items": [{ "id": id("delta") }], "next": true }),
+    );
+    let queue = |client: &Client| titles(&client.get("/api/player/queue").1["rows"]);
+    assert_eq!(queue(&client), ["alpha", "bravo", "delta", "charlie"]);
+    client.post("/api/player/remove", json!({ "index": 0 }));
+    let moved = client.post("/api/player/move", json!({ "from": 2, "to": 1 }));
+    assert_eq!(queue(&client), ["bravo", "charlie", "delta"]);
+    assert!(moved["queue_version"].as_u64().unwrap() > version);
+    assert_eq!(
+        (moved["index"].as_u64(), moved["track"]["title"].as_str()),
+        (Some(0), Some("bravo"))
+    );
+    let next = client.player_until("charlie, as the edited queue says", |s| {
+        s["status"] == "playing" && s["index"] == 1
+    });
+    assert_eq!(next["track"]["title"], "charlie");
+
+    assert_eq!(
+        client.post("/api/player/shuffle", json!({ "on": true }))["shuffle"],
+        true
+    );
+    assert_eq!(
+        client.post("/api/player/repeat", json!({ "mode": "all" }))["repeat"],
+        "all"
+    );
+    client.post("/api/player/shuffle", json!({ "on": false }));
+    assert_eq!(queue(&client), ["bravo", "charlie", "delta"]);
+
+    // An album from one of its rows on.
+    let album_play = client.post(
+        "/api/player/play",
+        json!({ "album": record["id"], "offset": 1, "from": "Record" }),
+    );
+    assert_eq!(
+        (
+            album_play["queue_len"].as_u64(),
+            album_play["track"]["title"].as_str(),
+            album_play["from"].as_str()
+        ),
+        (Some(1), Some("Two"), Some("Record"))
+    );
+    client.post("/api/player/stop", json!({}));
     let _ = std::fs::remove_dir_all(&dir);
 }

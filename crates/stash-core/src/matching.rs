@@ -187,6 +187,7 @@ mod tests {
             isrc: None,
             explicit: None,
             max_tier: None,
+            artwork: Vec::new(),
         }
     }
 

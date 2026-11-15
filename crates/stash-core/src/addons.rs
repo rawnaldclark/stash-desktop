@@ -107,6 +107,25 @@ pub struct Track {
     pub explicit: Option<bool>,
     #[serde(default)]
     pub max_tier: Option<Tier>,
+    /// Its covers, as the add-on lists them.
+    #[serde(default)]
+    pub artwork: Vec<Artwork>,
+}
+
+/// A cover an add-on names.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Artwork {
+    pub url: String,
+}
+
+impl Track {
+    /// The first of its covers whose address keeps the URL rule (https, no oddities).
+    pub fn art(&self) -> Option<&str> {
+        self.artwork
+            .iter()
+            .map(|a| a.url.as_str())
+            .find(|url| url.len() <= 2_048 && checked_url(url, "the cover").is_ok())
+    }
 }
 
 /// A song the host knows, as it asks an add-on for it.

@@ -43,6 +43,13 @@ pub struct QueueItem {
     pub album: Option<String>,
     /// Set for a track an add-on serves; where it plays from is asked for when it is about to play.
     pub addon: Option<AddonTrack>,
+    /// A cover on the web, when one is known.
+    pub art: Option<String>,
+    /// Its length, when it is known before it plays.
+    pub duration_ms: Option<u64>,
+    /// This place in the queue, by a number of its own: the same song queued twice is two of these. The player
+    /// gives it; whatever is handed in is replaced.
+    pub qid: u64,
     /// For a file: its path. Not shown to the window. Empty for a song the library knows by its description, which
     /// is asked for like an add-on's track: of each of the listener's add-ons in turn.
     #[serde(skip)]
@@ -131,6 +138,35 @@ pub struct Signal {
     pub converted: bool,
 }
 
+/// What happens at the end of the queue, or of a track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Repeat {
+    #[default]
+    Off,
+    /// The queue starts over.
+    All,
+    /// The track starts over.
+    One,
+}
+
+impl Repeat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Repeat::Off => "off",
+            Repeat::All => "all",
+            Repeat::One => "one",
+        }
+    }
+
+    pub fn from_word(word: &str) -> Self {
+        match word {
+            "all" => Repeat::All,
+            "one" => Repeat::One,
+            _ => Repeat::Off,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PlayerState {
     /// "idle", "loading" (an add-on is being asked for the track), "playing" or "paused".
@@ -138,6 +174,13 @@ pub struct PlayerState {
     /// The track's place in the queue.
     pub index: Option<usize>,
     pub queue_len: usize,
+    /// Goes up whenever the queue's tracks or their order change: a reader of the queue reads it again then.
+    pub queue_version: u64,
+    pub shuffle: bool,
+    /// "off", "all" or "one".
+    pub repeat: &'static str,
+    /// What the queue was started from, in the listener's words ("Liked songs", a playlist's name).
+    pub from: Option<String>,
     pub track: Option<QueueItem>,
     pub position_ms: u64,
     pub duration_ms: u64,
@@ -204,6 +247,15 @@ struct Shared {
     retried: std::collections::HashSet<usize>,
     /// A queue place to ask for again: its stream did not start.
     retry: Option<usize>,
+    /// Goes up whenever the queue is edited while it plays; a track located for an earlier number is dropped.
+    edits: u64,
+    next_qid: u64,
+    version: u64,
+    shuffle: bool,
+    /// While shuffled: the queue's qids in the order they had before, which turning shuffle off restores.
+    original: Option<Vec<u64>>,
+    repeat: Repeat,
+    from: Option<String>,
 }
 
 impl Shared {
@@ -214,6 +266,33 @@ impl Shared {
     /// The queue place of the track the engine is on.
     fn index(&self) -> Option<usize> {
         self.slot().map(|s| s.queue)
+    }
+
+    /// Gives each of `items` a queue number of its own.
+    fn number(&mut self, items: &mut [QueueItem]) {
+        for item in items {
+            self.next_qid += 1;
+            item.qid = self.next_qid;
+        }
+    }
+
+    /// Puts `items[from..]` in a new order, by chance.
+    fn shuffle_from(items: &mut [QueueItem], from: usize) {
+        let mut seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9E37_79B9_7F4A_7C15)
+            | 1;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for i in (from + 1..items.len()).rev() {
+            let j = from + (next() % (i - from + 1) as u64) as usize;
+            items.swap(i, j);
+        }
     }
 }
 
@@ -409,10 +488,10 @@ impl Ctx {
     }
 
     /// Hands the engine the queue place `ahead` points at, to play after what it has.
-    fn extend(&self, generation: u64) {
+    fn extend(&self, token: (u64, u64)) {
         let (item, place) = {
             let mut shared = self.shared.lock().unwrap();
-            if shared.generation != generation {
+            if (shared.generation, shared.edits) != token {
                 return;
             }
             let place = shared.ahead;
@@ -426,7 +505,7 @@ impl Ctx {
         };
         let located = self.locate(&item);
         let mut shared = self.shared.lock().unwrap();
-        if shared.generation != generation {
+        if (shared.generation, shared.edits) != token {
             return;
         }
         shared.extending = false;
@@ -489,8 +568,15 @@ impl Ctx {
     /// Called every time the engine reports something, and a few times a second besides: if the engine has nothing
     /// after the current track and the queue has, the next one is located and handed over.
     fn keep_ahead(&self) {
-        let (generation, waits) = {
-            let shared = self.shared.lock().unwrap();
+        let (token, waits) = {
+            let mut shared = self.shared.lock().unwrap();
+            // With the queue set to start over, the track after the last one is the first.
+            if shared.repeat == Repeat::All
+                && !shared.queue.is_empty()
+                && shared.ahead >= shared.queue.len()
+            {
+                shared.ahead = 0;
+            }
             if shared.extending
                 || shared.gave_up
                 || shared.starting.is_some()
@@ -506,7 +592,10 @@ impl Ctx {
                 Some(pos) if pos + 1 < shared.slots.len() || pos >= shared.slots.len() => return,
                 Some(_) => {}
             }
-            (shared.generation, shared.queue[shared.ahead].asks())
+            (
+                (shared.generation, shared.edits),
+                shared.queue[shared.ahead].asks(),
+            )
         };
         if waits && self.shared.lock().unwrap().pos.is_some() {
             // An add-on's track is asked for late. With no end in sight (a stream of unknown length) it is asked
@@ -522,12 +611,12 @@ impl Ctx {
         }
         {
             let mut shared = self.shared.lock().unwrap();
-            if shared.generation != generation || shared.extending {
+            if (shared.generation, shared.edits) != token || shared.extending {
                 return;
             }
             shared.extending = true;
         }
-        self.run(waits, move |ctx| ctx.extend(generation));
+        self.run(waits, move |ctx| ctx.extend(token));
     }
 }
 
@@ -670,12 +759,238 @@ impl Player {
 
     /// Replaces the queue with `items` and plays from the first.
     pub fn play(&self, items: Vec<QueueItem>) -> Result<()> {
+        self.play_from(items, 0, None)
+    }
+
+    /// Replaces the queue with `items` and plays from place `start`; `from` says what the queue is, in the
+    /// listener's words. With shuffle on, the track at `start` plays first and the rest follow in a new order.
+    pub fn play_from(
+        &self,
+        mut items: Vec<QueueItem>,
+        start: usize,
+        from: Option<String>,
+    ) -> Result<()> {
         if items.is_empty() {
             return self.stop();
         }
-        self.ctx.shared.lock().unwrap().queue = items;
-        self.start_at(0);
+        let mut start = start.min(items.len() - 1);
+        {
+            let mut shared = self.ctx.shared.lock().unwrap();
+            shared.number(&mut items);
+            shared.original = None;
+            if shared.shuffle {
+                shared.original = Some(items.iter().map(|t| t.qid).collect());
+                items.swap(0, start);
+                start = 0;
+                Shared::shuffle_from(&mut items, 1);
+            }
+            shared.queue = items;
+            shared.from = from;
+            shared.version += 1;
+        }
+        self.start_at(start);
         Ok(())
+    }
+
+    /// After the queue was edited while it plays: what the engine holds beyond the current track is taken back
+    /// (the next track is handed over again from the new order), and the current track's place is set to `now`.
+    /// Answers a place to start playing from, when the track being started is no longer where it was.
+    fn after_edit(
+        &self,
+        shared: &mut Shared,
+        was: Option<usize>,
+        now: Option<usize>,
+    ) -> Option<usize> {
+        shared.version += 1;
+        shared.edits += 1;
+        shared.extending = false;
+        shared.tries = 0;
+        shared.not_before = None;
+        shared.gave_up = false;
+        shared.retried.clear();
+        let mpv = self.ctx.engine.mpv();
+        match (shared.pos.filter(|p| *p < shared.slots.len()), now) {
+            (Some(at), Some(now)) => {
+                for entry in (at + 1..shared.slots.len()).rev() {
+                    let _ = mpv.command(&["playlist-remove", &entry.to_string()]);
+                }
+                shared.slots.truncate(at + 1);
+                // The places of tracks already played are no longer known.
+                for slot in &mut shared.slots[..at] {
+                    slot.queue = usize::MAX;
+                }
+                shared.slots[at].queue = now;
+                shared.ahead = now + 1;
+                None
+            }
+            // A track is being started: if it is no longer where it was, it is started again from its new place.
+            _ if shared.starting.is_some() => (was != now).then_some(now).flatten(),
+            // Nothing plays: the engine holds nothing of the queue any more.
+            _ => {
+                let _ = mpv.command(&["playlist-clear"]);
+                shared.slots.clear();
+                shared.pos = None;
+                shared.ahead = shared.ahead.min(shared.queue.len());
+                None
+            }
+        }
+    }
+
+    /// Adds `items` to the queue: right after the playing track (`next`), or at the end. With nothing playing,
+    /// they start to play.
+    pub fn enqueue(&self, mut items: Vec<QueueItem>, next: bool) {
+        if items.is_empty() {
+            return;
+        }
+        let start = {
+            let mut shared = self.ctx.shared.lock().unwrap();
+            shared.number(&mut items);
+            let current = shared.index().or(shared.starting);
+            let at = match (current, next) {
+                (Some(current), true) => current + 1,
+                _ => shared.queue.len(),
+            };
+            if let Some(original) = shared.original.as_mut() {
+                original.extend(items.iter().map(|t| t.qid));
+            }
+            shared.queue.splice(at..at, items);
+            let restart = self.after_edit(&mut shared, current, current);
+            match current {
+                Some(_) => restart,
+                None => Some(at),
+            }
+        };
+        if let Some(place) = start {
+            self.start_at(place);
+        }
+    }
+
+    /// Takes the track at `place` out of the queue. The playing track taken out makes way for the one after it.
+    pub fn remove_at(&self, place: usize) -> bool {
+        enum Then {
+            Nothing,
+            Start(usize),
+            End,
+        }
+        let then = {
+            let mut shared = self.ctx.shared.lock().unwrap();
+            if place >= shared.queue.len() {
+                return false;
+            }
+            let current = shared.index().or(shared.starting);
+            let removed = shared.queue.remove(place);
+            if let Some(original) = shared.original.as_mut() {
+                original.retain(|qid| *qid != removed.qid);
+            }
+            if current == Some(place) {
+                shared.version += 1;
+                if place < shared.queue.len() {
+                    Then::Start(place)
+                } else {
+                    shared.generation += 1;
+                    shared.slots.clear();
+                    shared.pos = None;
+                    shared.starting = None;
+                    shared.ahead = shared.queue.len();
+                    Then::End
+                }
+            } else {
+                let now = current.map(|c| if place < c { c - 1 } else { c });
+                match self.after_edit(&mut shared, current, now) {
+                    Some(start) => Then::Start(start),
+                    None => Then::Nothing,
+                }
+            }
+        };
+        match then {
+            Then::Nothing => {}
+            Then::Start(place) => self.start_at(place),
+            Then::End => {
+                let _ = self.ctx.engine.stop();
+            }
+        }
+        true
+    }
+
+    /// Moves the track at place `from` to place `to`. The playing track goes on playing wherever it ends up.
+    pub fn move_item(&self, from: usize, to: usize) -> bool {
+        let start = {
+            let mut shared = self.ctx.shared.lock().unwrap();
+            if from >= shared.queue.len() || to >= shared.queue.len() || from == to {
+                return false;
+            }
+            let current = shared.index().or(shared.starting);
+            let item = shared.queue.remove(from);
+            shared.queue.insert(to, item);
+            let now = current.map(|c| {
+                if c == from {
+                    to
+                } else {
+                    let after_removal = if from < c { c - 1 } else { c };
+                    if to <= after_removal {
+                        after_removal + 1
+                    } else {
+                        after_removal
+                    }
+                }
+            });
+            self.after_edit(&mut shared, current, now)
+        };
+        if let Some(place) = start {
+            self.start_at(place);
+        }
+        true
+    }
+
+    /// Shuffle on: the tracks after the playing one follow in a new order. Off: the queue goes back to the order
+    /// it had (tracks added meanwhile stay at its end). The playing track goes on playing.
+    pub fn set_shuffle(&self, on: bool) {
+        let start = {
+            let mut shared = self.ctx.shared.lock().unwrap();
+            if shared.shuffle == on {
+                return;
+            }
+            shared.shuffle = on;
+            if shared.queue.is_empty() {
+                return;
+            }
+            let current = shared.index().or(shared.starting);
+            let playing = current.and_then(|c| shared.queue.get(c)).map(|t| t.qid);
+            if on {
+                shared.original = Some(shared.queue.iter().map(|t| t.qid).collect());
+                let from = current.map(|c| c + 1).unwrap_or(0);
+                Shared::shuffle_from(&mut shared.queue, from);
+            } else if let Some(original) = shared.original.take() {
+                let place = |qid: u64| {
+                    original
+                        .iter()
+                        .position(|q| *q == qid)
+                        .unwrap_or(usize::MAX)
+                };
+                shared.queue.sort_by_key(|t| place(t.qid));
+            }
+            let now = playing.and_then(|qid| shared.queue.iter().position(|t| t.qid == qid));
+            self.after_edit(&mut shared, current, now)
+        };
+        if let Some(place) = start {
+            self.start_at(place);
+        }
+    }
+
+    /// What happens at the end: nothing, the queue starts over, or the track starts over.
+    pub fn set_repeat(&self, repeat: Repeat) {
+        let _ = self.ctx.engine.mpv().set(
+            "loop-file",
+            if repeat == Repeat::One { "inf" } else { "no" },
+        );
+        let mut shared = self.ctx.shared.lock().unwrap();
+        if shared.repeat == repeat {
+            return;
+        }
+        shared.repeat = repeat;
+        // What was handed over for the old setting (the first track after the last, or nothing) is taken back.
+        let current = shared.index().or(shared.starting);
+        self.after_edit(&mut shared, current, current);
     }
 
     /// Plays the queue from `place` on, in place of whatever plays.
@@ -729,6 +1044,11 @@ impl Player {
                 self.start_at(place);
                 Ok(())
             }
+            // Past the end with the queue set to start over: the first track.
+            Some(_) if self.ctx.shared.lock().unwrap().repeat == Repeat::All => {
+                self.start_at(0);
+                Ok(())
+            }
             // Past the end: the queue stays, playback ends.
             Some(_) => {
                 {
@@ -760,9 +1080,11 @@ impl Player {
                         .filter(|p| *p > 0)
                         .and_then(|p| shared.slots.get(p - 1))
                         .map(|s| s.queue);
-                    match before {
+                    match before.filter(|place| *place < current) {
                         // The engine still has the file before this one.
-                        Some(place) if !shared.queue[place].asks() => Back::Engine,
+                        Some(place) if place + 1 == current && !shared.queue[place].asks() => {
+                            Back::Engine
+                        }
                         // An add-on's track is asked for again: the link it gave may no longer work.
                         Some(place) => Back::To(place),
                         None => Back::To(current - 1),
@@ -841,12 +1163,15 @@ impl Player {
             shared.starting = None;
             shared.ahead = 0;
             shared.extending = false;
+            shared.original = None;
+            shared.from = None;
+            shared.version += 1;
         }
         self.ctx.engine.stop()
     }
 
     pub fn state(&self) -> PlayerState {
-        let (queue_len, index, starting, asking, track, tier, served_by, accepted, error) = {
+        let (queue_len, index, starting, asking, track, tier, served_by, accepted, error, queue) = {
             let shared = self.ctx.shared.lock().unwrap();
             let index = shared.index();
             let track = index
@@ -864,8 +1189,15 @@ impl Player {
                 shared.slot().and_then(|s| s.addon.clone()),
                 shared.accepted.clone(),
                 shared.error.clone(),
+                (
+                    shared.version,
+                    shared.shuffle,
+                    shared.repeat,
+                    shared.from.clone(),
+                ),
             )
         };
+        let (queue_version, shuffle, repeat, from) = queue;
         let mpv = self.ctx.engine.mpv();
         let seconds = |name: &str| {
             mpv.get(name)
@@ -926,6 +1258,10 @@ impl Player {
             },
             index: index.or(starting),
             queue_len,
+            queue_version,
+            shuffle,
+            repeat: repeat.as_str(),
+            from,
             track,
             position_ms: if playing { seconds("time-pos") } else { 0 },
             duration_ms: if playing { seconds("duration") } else { 0 },

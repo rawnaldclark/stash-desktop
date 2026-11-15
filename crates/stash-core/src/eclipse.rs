@@ -12,8 +12,8 @@ use std::collections::HashSet;
 use serde_json::Value;
 
 use crate::addons::{
-    AddonError, Code, Delivery, Dialect, Manifest, StreamInfo, StreamRequest, Tier, Track, Wanted,
-    checked_url,
+    AddonError, Artwork, Code, Delivery, Dialect, Manifest, StreamInfo, StreamRequest, Tier, Track,
+    Wanted, checked_url,
 };
 use crate::identity::{clean_text, isrc};
 
@@ -162,6 +162,15 @@ pub fn track(value: &Value) -> Option<Track> {
             .and_then(|code| isrc(code.trim())),
         explicit: value.get("explicit").and_then(Value::as_bool),
         max_tier: None,
+        artwork: ["artworkURL", "artworkUrl", "albumArtworkURL"]
+            .iter()
+            .filter_map(|name| value.get(name)?.as_str())
+            .filter(|url| checked_url(url, "the cover").is_ok())
+            .take(1)
+            .map(|url| Artwork {
+                url: url.to_string(),
+            })
+            .collect(),
     })
 }
 
@@ -209,6 +218,7 @@ pub fn resolved_by_isrc(value: &Value, wanted: &Wanted) -> Option<Track> {
         isrc: wanted.isrc.clone(),
         explicit: None,
         max_tier: None,
+        artwork: Vec::new(),
     })
 }
 

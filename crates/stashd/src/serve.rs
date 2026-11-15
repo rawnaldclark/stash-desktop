@@ -26,7 +26,7 @@ use stash_core::audio::{Output, find_library};
 use stash_core::import::ImportError;
 use stash_core::import::Song;
 use stash_core::player::{
-    AddonTrack, Failure, Located, OnPlay, Player, QueueItem, Resolver, Settings,
+    AddonTrack, Failure, Located, OnPlay, Player, QueueItem, Repeat, Resolver, Settings,
 };
 use stash_core::scan::{ScanReport, scan_folder};
 use stash_core::{Library, StoredAddon, matching};
@@ -36,7 +36,9 @@ use url::Url;
 /// The largest page a list may ask for.
 const PAGE_CAP: usize = 500;
 /// The largest body the API reads.
-const BODY_CAP: u64 = 256 * 1024;
+const BODY_CAP: u64 = 4 * 1024 * 1024;
+/// The most tracks one queue holds.
+const QUEUE_CAP: usize = 5_000;
 /// The largest file an import takes. (The shared library file has its own, smaller limit; a phone's database or
 /// backup can be bigger.)
 const IMPORT_CAP: u64 = 512 * 1024 * 1024;
@@ -342,6 +344,7 @@ fn found_track(track: &Track) -> Option<Value> {
         "duration_ms": track.duration_ms,
         "max_tier": track.max_tier.map(|t| t.as_str()),
         "explicit": track.explicit,
+        "art": track.art(),
     }))
 }
 
@@ -611,33 +614,79 @@ fn player_reply(player: &std::result::Result<Player, String>) -> Reply {
 
 /// The queue for tracks an add-on found: the window hands back what the search gave it.
 fn addon_queue(addon: &str, tracks: Option<&Value>) -> Vec<QueueItem> {
-    let text = |track: &Value, name: &str| track.get(name).and_then(Value::as_str).map(capped);
     tracks
         .and_then(Value::as_array)
         .map(|tracks| {
             tracks
                 .iter()
                 .take(ADDON_TRACKS_CAP)
-                .filter_map(|track| {
-                    let id = track.get("id").and_then(Value::as_str)?;
-                    if id.is_empty() || id.len() > 512 {
-                        return None;
-                    }
-                    Some(QueueItem {
-                        id: None,
-                        title: text(track, "title").unwrap_or_default(),
-                        artist: text(track, "artist").unwrap_or_default(),
-                        album: text(track, "album"),
-                        addon: Some(AddonTrack {
-                            addon: addon.to_string(),
-                            track: id.to_string(),
-                        }),
-                        locator: String::new(),
-                    })
-                })
+                .filter_map(|track| addon_item(addon, track))
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// A cover's address handed in from outside, when it is one a window may load: https, of a sane length.
+fn cover(value: Option<&Value>) -> Option<String> {
+    let address = value?.as_str()?;
+    let plain = address.len() <= 2_048
+        && !address
+            .chars()
+            .any(|c| c.is_control() || c == ' ' || c == '\\');
+    (plain && Url::parse(address).is_ok_and(|u| u.scheme() == "https" && u.host_str().is_some()))
+        .then(|| address.to_string())
+}
+
+/// One track an add-on found, as a queue item. `None` without a usable id.
+fn addon_item(addon: &str, track: &Value) -> Option<QueueItem> {
+    let text = |name: &str| track.get(name).and_then(Value::as_str).map(capped);
+    let id = track.get("id").and_then(Value::as_str)?;
+    if addon.is_empty() || id.is_empty() || id.len() > 512 {
+        return None;
+    }
+    Some(QueueItem {
+        id: None,
+        title: text("title").unwrap_or_default(),
+        artist: text("artist").unwrap_or_default(),
+        album: text("album"),
+        addon: Some(AddonTrack {
+            addon: addon.to_string(),
+            track: id.to_string(),
+        }),
+        locator: String::new(),
+        art: cover(track.get("art")),
+        duration_ms: track
+            .get("duration_ms")
+            .and_then(Value::as_u64)
+            .filter(|ms| *ms > 0),
+        qid: 0,
+    })
+}
+
+/// A list of tracks handed in as `[{id} | {addon, track}]`, as queue items, with where place `start` of the list
+/// ended up (a track the library no longer has, or whose file is gone, is left out).
+fn listed_items(
+    library: &Library,
+    list: &[Value],
+    start: usize,
+) -> Result<(Vec<QueueItem>, usize)> {
+    let mut items = Vec::with_capacity(list.len().min(QUEUE_CAP));
+    let mut begins = 0;
+    for (place, entry) in list.iter().take(QUEUE_CAP).enumerate() {
+        if place == start {
+            begins = items.len();
+        }
+        let item = match entry.get("id").and_then(Value::as_i64) {
+            Some(id) => library.queue_items(&[id])?.pop(),
+            None => entry
+                .get("addon")
+                .and_then(Value::as_str)
+                .zip(entry.get("track"))
+                .and_then(|(addon, track)| addon_item(addon, track)),
+        };
+        items.extend(item);
+    }
+    Ok((items, begins))
 }
 
 /// One of the player's routes. `None`: the path is not one of them.
@@ -686,30 +735,82 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
         // What to play: `{"ids": [...]}` (library tracks, in that order), `{"offset": n}` (the library's rows from
         // there on; with `"playlist": id` that playlist's, with `"liked": true` the liked songs'), or
         // `{"addon": id, "tracks": [...]}` (tracks an add-on found, in that order).
+        // What to play, one of: `{"items": [{id} | {addon, track}], "start": n}` (these tracks, from place n);
+        // `{"offset": n}` (the library from that row on), with `"liked": true`, `"playlist": id`, `"album": id` or
+        // `"artist": id` that list from row n on; `{"ids": [...]}`; `{"addon": id, "tracks": [...]}`.
+        // `"from"` says what it is in the listener's words, for "Playing from ...".
         "/api/player/play" => {
-            let items = if let Some(addon) = body.get("addon").and_then(Value::as_str) {
-                addon_queue(addon, body.get("tracks"))
+            let from = body
+                .get("from")
+                .and_then(Value::as_str)
+                .map(capped)
+                .filter(|f| !f.is_empty());
+            let (items, start) = if let Some(list) = body.get("items").and_then(Value::as_array) {
+                let start = body.get("start").and_then(Value::as_u64).unwrap_or(0) as usize;
+                listed_items(&state.library.lock().unwrap(), list, start)?
+            } else if let Some(addon) = body.get("addon").and_then(Value::as_str) {
+                (addon_queue(addon, body.get("tracks")), 0)
             } else {
                 let library = state.library.lock().unwrap();
                 let offset = body.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
-                let count = body.get("count").and_then(Value::as_u64).unwrap_or(200) as usize;
-                let count = count.clamp(1, PAGE_CAP);
+                let count = body.get("count").and_then(Value::as_u64).unwrap_or(1_000) as usize;
+                let count = count.clamp(1, QUEUE_CAP);
+                let list = |name: &str| body.get(name).and_then(Value::as_i64);
                 let ids: Vec<i64> = if let Some(ids) = body.get("ids").and_then(Value::as_array) {
                     ids.iter()
                         .filter_map(Value::as_i64)
-                        .take(PAGE_CAP)
+                        .take(QUEUE_CAP)
                         .collect()
-                } else if let Some(playlist) = body.get("playlist").and_then(Value::as_i64) {
+                } else if let Some(playlist) = list("playlist") {
                     library.playlist_track_ids(playlist, offset, count)?
+                } else if let Some(album) = list("album") {
+                    library.album_track_ids(album, offset, count)?
+                } else if let Some(artist) = list("artist") {
+                    library.artist_track_ids(artist, offset, count)?
                 } else if body.get("liked").and_then(Value::as_bool) == Some(true) {
                     library.liked_ids_at(offset, count)?
                 } else {
                     library.track_ids_at(offset, count)?
                 };
-                library.queue_items(&ids)?
+                (library.queue_items(&ids)?, 0)
             };
-            playing.play(items)?;
+            playing.play_from(items, start, from)?;
         }
+        // Adds tracks (as in `items` above) right after the playing one (`"next": true`) or at the end.
+        "/api/player/enqueue" => {
+            let list = body
+                .get("items")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let (items, _) = listed_items(&state.library.lock().unwrap(), &list, 0)?;
+            playing.enqueue(
+                items,
+                body.get("next").and_then(Value::as_bool).unwrap_or(false),
+            );
+        }
+        "/api/player/remove" => {
+            let place = body
+                .get("index")
+                .and_then(Value::as_u64)
+                .unwrap_or(u64::MAX);
+            playing.remove_at(usize::try_from(place).unwrap_or(usize::MAX));
+        }
+        "/api/player/move" => {
+            let place = |name: &str| {
+                body.get(name)
+                    .and_then(Value::as_u64)
+                    .and_then(|n| usize::try_from(n).ok())
+                    .unwrap_or(usize::MAX)
+            };
+            playing.move_item(place("from"), place("to"));
+        }
+        "/api/player/shuffle" => {
+            playing.set_shuffle(body.get("on").and_then(Value::as_bool).unwrap_or(false))
+        }
+        "/api/player/repeat" => playing.set_repeat(Repeat::from_word(
+            body.get("mode").and_then(Value::as_str).unwrap_or("off"),
+        )),
         "/api/player/pause" => {
             playing.set_paused(body.get("paused").and_then(Value::as_bool).unwrap_or(true))?
         }
@@ -1016,6 +1117,7 @@ fn lists_route(state: &State, request: &mut Request, path: &str) -> Result<Optio
                 album: item.album,
                 duration_ms,
                 refs: vec![(theirs.addon, theirs.track)],
+                art_url: item.art,
                 added_at_ms: Some(now),
                 ..Song::default()
             })?;
@@ -1131,6 +1233,34 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
     if let Some(response) = scan_route(state, request, &path)? {
         return Ok((response, false));
     }
+    // One album or one artist: /api/albums/{id}, /api/artists/{id}
+    if *request.method() == Method::Get {
+        let one = |prefix: &str| {
+            path.strip_prefix(prefix)
+                .and_then(|id| id.parse::<i64>().ok())
+        };
+        if let Some(id) = one("/api/albums/") {
+            return Ok((
+                match library().album(id)? {
+                    Some((album, rows)) => reply_json(200, json!({ "album": album, "rows": rows })),
+                    None => refuse(404, "no such album"),
+                },
+                false,
+            ));
+        }
+        if let Some(id) = one("/api/artists/") {
+            return Ok((
+                match library().artist(id, 50)? {
+                    Some((artist, rows, albums)) => reply_json(
+                        200,
+                        json!({ "artist": artist, "rows": rows, "albums": albums }),
+                    ),
+                    None => refuse(404, "no such artist"),
+                },
+                false,
+            ));
+        }
+    }
     // A playlist's tracks: /api/playlists/{id}/tracks
     if *request.method() == Method::Get
         && let Some(id) = path
@@ -1154,6 +1284,14 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         (Method::Get, "/api/playlists") => {
             reply_json(200, json!({ "rows": library().playlists()? }))
         }
+        (Method::Get, "/api/history") => reply_json(
+            200,
+            json!({ "rows": library().history_at(number("offset", 0), limit(200))? }),
+        ),
+        (Method::Get, "/api/artists") => reply_json(
+            200,
+            json!({ "rows": library().artists_at(number("offset", 0), limit(200))? }),
+        ),
         (Method::Get, "/api/albums") => reply_json(
             200,
             json!({ "rows": library().albums_at(number("offset", 0), limit(120))? }),

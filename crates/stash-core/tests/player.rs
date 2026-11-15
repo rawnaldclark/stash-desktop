@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use common::{RATE, library, scratch, signal, write_wav};
 use stash_core::audio::Output;
 use stash_core::player::{
-    AddonTrack, Failure, Located, Player, PlayerState, QueueItem, Resolver, Settings,
+    AddonTrack, Failure, Located, Player, PlayerState, QueueItem, Repeat, Resolver, Settings,
 };
 
 fn item(id: i64, title: &str, path: &Path) -> QueueItem {
@@ -22,6 +22,9 @@ fn item(id: i64, title: &str, path: &Path) -> QueueItem {
         artist: "Sine".into(),
         album: Some("Waves".into()),
         locator: path.to_string_lossy().into_owned(),
+        art: None,
+        duration_ms: None,
+        qid: 0,
     }
 }
 
@@ -239,6 +242,9 @@ fn from_addon(track: &str, title: &str) -> QueueItem {
             track: track.into(),
         }),
         locator: String::new(),
+        art: None,
+        duration_ms: None,
+        qid: 0,
     }
 }
 
@@ -642,6 +648,145 @@ fn the_volume_the_queue_and_a_jump_into_it() {
     assert!(player.jump(0));
     until(&player, "the first again", |s| {
         s.status == "playing" && s.index == Some(0)
+    });
+    drop(player);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_queue_is_edited_while_it_plays() {
+    let Some(library) = library() else { return };
+    let dir = scratch("player-edit");
+    let paths: Vec<_> = (0..6).map(|n| dir.join(format!("{n}.wav"))).collect();
+    for path in &paths {
+        write_wav(path, RATE, &signal(RATE as usize * 3 / 2));
+    }
+    let track = |n: usize| item(n as i64, &format!("T{n}"), &paths[n]);
+    let player = Player::start(&library, &Output::Silent).unwrap();
+    let titles = || {
+        player
+            .queue_at(0, 50)
+            .iter()
+            .map(|t| t.title.clone())
+            .collect::<Vec<_>>()
+    };
+    let now = |s: &PlayerState| s.track.as_ref().map(|t| t.title.clone());
+
+    player
+        .play_from(
+            vec![track(0), track(1), track(2)],
+            1,
+            Some("A playlist".into()),
+        )
+        .unwrap();
+    let playing = until(&player, "the second track, where it was started", |s| {
+        s.status == "playing" && s.index == Some(1)
+    });
+    assert_eq!(
+        (
+            now(&playing),
+            playing.from.as_deref(),
+            playing.shuffle,
+            playing.repeat
+        ),
+        (Some("T1".into()), Some("A playlist"), false, "off")
+    );
+    let version = playing.queue_version;
+    // Every place in the queue has a number of its own.
+    let qids: Vec<u64> = player.queue_at(0, 50).iter().map(|t| t.qid).collect();
+    assert!(qids.iter().all(|q| *q > 0) && qids[0] != qids[1] && qids[1] != qids[2]);
+
+    // Play next goes right after the playing track; add to the end goes last.
+    player.enqueue(vec![track(3)], true);
+    player.enqueue(vec![track(4)], false);
+    assert_eq!(titles(), ["T0", "T1", "T3", "T2", "T4"]);
+    let edited = player.state();
+    assert!(edited.queue_version > version);
+    assert_eq!((edited.index, now(&edited)), (Some(1), Some("T1".into())));
+    // A track before the playing one is taken out: the playing one is one place up, and still playing.
+    assert!(player.remove_at(0));
+    assert_eq!(
+        (player.state().index, now(&player.state())),
+        (Some(0), Some("T1".into()))
+    );
+    // The last is moved to right after it.
+    assert!(player.move_item(3, 1));
+    assert_eq!(titles(), ["T1", "T4", "T3", "T2"]);
+    assert!(!player.move_item(1, 1) && !player.move_item(9, 0) && !player.remove_at(9));
+    // What plays next is what the queue now says, not what the engine was handed before the edits.
+    let next = until(&player, "the moved track, by itself", |s| {
+        s.status == "playing" && s.index == Some(1)
+    });
+    assert_eq!(now(&next), Some("T4".into()));
+    // The playing track is taken out: the one after it plays.
+    assert!(player.remove_at(1));
+    let after = until(&player, "the track after the removed one", |s| {
+        s.status == "playing" && now(s) == Some("T3".into())
+    });
+    assert_eq!(
+        (after.index, titles()),
+        (Some(1), vec!["T1".to_string(), "T3".into(), "T2".into()])
+    );
+
+    // The queue set to start over: after the last track comes the first.
+    player.set_repeat(Repeat::All);
+    assert_eq!(player.state().repeat, "all");
+    assert!(player.jump(2));
+    until(&player, "the last track", |s| {
+        s.status == "playing" && s.index == Some(2)
+    });
+    until(&player, "the first track again, by itself", |s| {
+        s.status == "playing" && s.index == Some(0)
+    });
+    player.set_repeat(Repeat::Off);
+
+    // Shuffle keeps the playing track and its place, reorders what follows, and gives the order back.
+    player
+        .play_from((0..6).map(track).collect(), 0, None)
+        .unwrap();
+    until(&player, "the first of six", |s| {
+        s.status == "playing" && s.index == Some(0)
+    });
+    let ordered = titles();
+    player.set_shuffle(true);
+    let shuffled = titles();
+    assert_eq!(
+        (
+            shuffled[0].as_str(),
+            player.state().shuffle,
+            player.state().index
+        ),
+        ("T0", true, Some(0))
+    );
+    let mut sorted = shuffled.clone();
+    sorted.sort();
+    assert_eq!(sorted, ordered);
+    player.set_shuffle(false);
+    assert_eq!(titles(), ordered);
+    // With shuffle on, a new queue starts with the chosen track and holds every track once.
+    player.set_shuffle(true);
+    player
+        .play_from((0..6).map(track).collect(), 4, None)
+        .unwrap();
+    let chosen = until(&player, "the chosen track first", |s| {
+        s.status == "playing" && s.index == Some(0)
+    });
+    assert_eq!(now(&chosen), Some("T4".into()));
+    let mut all = titles();
+    all.sort();
+    assert_eq!(all, ordered);
+    player.set_shuffle(false);
+    assert_eq!(titles(), ordered);
+    assert_eq!(now(&player.state()), Some("T4".into()));
+
+    // Added to a player with nothing playing, a track plays.
+    player.stop().unwrap();
+    until(&player, "stopped", |s| {
+        s.status == "idle" && s.queue_len == 0
+    });
+    player.enqueue(vec![track(5)], false);
+    until(&player, "the added track playing", |s| {
+        s.status == "playing" && now(s) == Some("T5".into())
     });
     drop(player);
     let _ = std::fs::remove_dir_all(&dir);
