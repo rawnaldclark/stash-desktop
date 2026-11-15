@@ -131,9 +131,25 @@
 		}
 	}
 
+	// ---- Lyrics: LRCLIB when no add-on has a song's lyrics (on unless switched off).
+
+	let lrclib = $state<boolean | null>(null);
+	async function setLrclib(on: boolean) {
+		lrclib = on;
+		try {
+			lrclib = (await core.setLyricsSettings(on)).lrclib;
+		} catch {
+			lrclib = !on;
+		}
+	}
+
 	onMount(() => {
 		void folders.init();
 		void sources.reload().catch(() => {});
+		void core.lyricsSettings().then(
+			(s) => (lrclib = s.lrclib),
+			() => {}
+		);
 		void readOuts();
 		const back = () => void readOuts();
 		window.addEventListener('focus', back);
@@ -231,6 +247,19 @@
 					<button type="submit" class="btn" disabled={adding || link.trim() === ''}>{adding ? 'Reading…' : 'Add'}</button>
 				</form>
 				{#if addonTrouble}<p class="set-sub set-trouble" role="alert">{addonTrouble}</p>{/if}
+			</div>
+		</div>
+	</section>
+
+	<section class="set-sec" id="lyrics" aria-labelledby="h-lyrics">
+		<h2 class="set-h" id="h-lyrics">Lyrics</h2>
+		<div class="set-card">
+			<div class="set-row">
+				<div class="set-lab">
+					<span class="set-name" id="lrc-l">Look up lyrics on LRCLIB</span>
+					<span class="set-sub">A song’s own lyrics come first: a .lrc file beside it, or the lyrics in its tags. Then your add-ons. When none of them has the words, LRCLIB, an open database of timed lyrics, is asked; it is sent the song’s title, artist, album and length. What it finds is kept, so each song is asked for once.</span>
+				</div>
+				<button type="button" class="sw" role="switch" aria-checked={lrclib === true} aria-labelledby="lrc-l" disabled={lrclib === null} onclick={() => lrclib !== null && setLrclib(!lrclib)}><i></i></button>
 			</div>
 		</div>
 	</section>

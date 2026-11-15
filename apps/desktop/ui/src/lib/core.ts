@@ -312,6 +312,31 @@ export const seekTo = (seconds: number) => told('/api/player/seek', { seconds })
 /** Plays the queue from `index` on. */
 export const jumpTo = (index: number) => told('/api/player/jump', { index });
 export const setVolume = (percent: number) => told('/api/player/volume', { percent });
+// ---- Lyrics
+
+/** A song's lyrics and where they came from (".lrc file", "the file's tags", an add-on's name, "LRCLIB"); `lyrics` null for none. */
+export type FoundLyrics = { lyrics: import('./sources/contract').Lyrics | null; via: string | null };
+/** The lyrics of a library row (`id`), or of any song by what it is (with the add-on and its id for it, when one serves it). */
+export function lyrics(song: { id: number } | { title: string; artist: string; album?: string; durationMs?: number; isrc?: string; addon?: string; track?: string }, signal?: AbortSignal) {
+	const q = new URLSearchParams();
+	if ('id' in song) q.set('id', String(song.id));
+	else {
+		q.set('title', song.title);
+		q.set('artist', song.artist);
+		if (song.album) q.set('album', song.album);
+		if (song.durationMs) q.set('duration_ms', String(Math.round(song.durationMs)));
+		if (song.isrc) q.set('isrc', song.isrc);
+		if (song.addon && song.track) {
+			q.set('addon', song.addon);
+			q.set('track', song.track);
+		}
+	}
+	return get<FoundLyrics>(`/api/lyrics?${q}`, signal);
+}
+/** Whether lyrics are looked up on LRCLIB when no add-on has them. */
+export const lyricsSettings = () => get<{ lrclib: boolean }>('/api/settings/lyrics');
+export const setLyricsSettings = (lrclib: boolean) => post<{ lrclib: boolean }>('/api/settings/lyrics', { lrclib });
+
 /** A sound output of the system: `name` is the engine's ("auto" for the system's own choice), `description` the system's. */
 export type Device = { name: string; description: string };
 /** The outputs, the one in use, and the one chosen last when it is not connected now. */

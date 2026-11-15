@@ -1996,3 +1996,135 @@ fn the_sound_output_is_chosen_and_kept() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn lyrics_come_from_the_file_then_the_add_on_and_are_kept() {
+    let dir = std::env::temp_dir().join(format!("stash-api-lyrics-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (music, served) = (dir.join("Music"), dir.join("Served"));
+    std::fs::create_dir_all(&music).unwrap();
+    std::fs::create_dir_all(&served).unwrap();
+    silence(&music.join("alpha.wav"));
+    std::fs::write(
+        music.join("alpha.lrc"),
+        "[00:00.50]Alpha, from the file\n[00:01.50]and its second line\n",
+    )
+    .unwrap();
+    silence(&music.join("bravo.wav"));
+    silence(&served.join("charlie.wav"));
+    std::fs::write(
+        served.join("charlie.lrc"),
+        "[00:00.20]Charlie, from the add-on\n",
+    )
+    .unwrap();
+    silence(&served.join("delta.wav"));
+    let db = dir.join("library.db");
+    {
+        let mut library = Library::open(&db).unwrap();
+        scan_folder(&mut library, &music, |_| {}).unwrap();
+        // Nothing reaches LRCLIB from a test.
+        library.set_setting("lyrics.lrclib", "0").unwrap();
+    }
+    let addon = DemoAddon::bind(&served, 0, Duration::ZERO).unwrap();
+    let link = addon.link();
+    std::thread::spawn(move || addon.run());
+    let core = Core::bind(Options {
+        db: db.clone(),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: None,
+        mpv: None,
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    let id_of = |title: &str| {
+        client.get(&format!("/api/search?q={title}&limit=1")).1["rows"][0]["id"]
+            .as_i64()
+            .unwrap()
+    };
+
+    // A file with a .lrc beside it: timed lines, each ending where the next starts.
+    let (_, alpha) = client.get(&format!("/api/lyrics?id={}", id_of("alpha")));
+    assert_eq!(alpha["via"].as_str(), Some("the .lrc file"));
+    assert_eq!(
+        alpha["lyrics"]["synced"][0],
+        json!({ "startMs": 500, "endMs": 1500, "text": "Alpha, from the file" })
+    );
+    assert_eq!(
+        alpha["lyrics"]["plain"].as_str(),
+        Some("Alpha, from the file\nand its second line")
+    );
+    // A file without, and no add-on: none.
+    let bravo_id = id_of("bravo");
+    assert_eq!(
+        client.get(&format!("/api/lyrics?id={bravo_id}")).1,
+        json!({ "lyrics": null, "via": null })
+    );
+
+    // An add-on's track: its add-on is asked by its own id.
+    client.post("/api/addons", json!({ "link": link }));
+    let (_, found) = client.get("/api/addons/search?q=charlie&limit=1");
+    let track = found["groups"][0]["tracks"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (_, charlie) = client.get(&format!(
+        "/api/lyrics?addon=demo.folder&track={track}&title=charlie&artist=Unknown%20artist"
+    ));
+    assert_eq!(charlie["via"].as_str(), Some("Demo folder"));
+    assert_eq!(
+        charlie["lyrics"]["synced"][0]["text"].as_str(),
+        Some("Charlie, from the add-on")
+    );
+    // Any song by what it is: the add-on is asked by title and artist; one it has none for is none.
+    let (_, by_words) = client.get("/api/lyrics?title=charlie&artist=Unknown%20artist");
+    assert_eq!(
+        by_words["lyrics"]["synced"][0]["text"].as_str(),
+        Some("Charlie, from the add-on")
+    );
+    assert_eq!(
+        client
+            .get("/api/lyrics?title=delta&artist=Unknown%20artist")
+            .1["lyrics"],
+        Value::Null
+    );
+
+    // What the network gave is kept: asked again with the add-on gone, the same lyrics.
+    client.post("/api/addons/remove", json!({ "id": "demo.folder" }));
+    let (_, kept) = client.get("/api/lyrics?title=charlie&artist=Unknown%20artist");
+    assert_eq!(
+        (
+            kept["via"].as_str(),
+            kept["lyrics"]["synced"][0]["text"].as_str()
+        ),
+        (Some("Demo folder"), Some("Charlie, from the add-on"))
+    );
+
+    // The LRCLIB switch.
+    assert_eq!(
+        client.get("/api/settings/lyrics").1,
+        json!({ "lrclib": false })
+    );
+    assert_eq!(
+        client.post("/api/settings/lyrics", json!({ "lrclib": true })),
+        json!({ "lrclib": true })
+    );
+    assert_eq!(
+        Library::open(&db)
+            .unwrap()
+            .setting("lyrics.lrclib")
+            .unwrap()
+            .as_deref(),
+        Some("1")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

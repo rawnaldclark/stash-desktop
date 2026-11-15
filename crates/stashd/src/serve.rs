@@ -919,6 +919,125 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
     Ok(Some(player_reply(player)))
 }
 
+/// Where lyrics are looked up when no add-on has them.
+const LRCLIB: &str = "https://lrclib.net";
+const LRCLIB_SETTING: &str = "lyrics.lrclib";
+/// How long lyrics found on the network are kept, and how long "none there" is believed.
+const LYRICS_KEPT_SECONDS: i64 = 30 * 24 * 3600;
+const NO_LYRICS_KEPT_SECONDS: i64 = 24 * 3600;
+
+/// A song's lyrics: `{"lyrics": …|null, "via": "…"}`. The song is a library row (`id`), or an add-on's track
+/// (`addon`, `track`) or any song (`title`, `artist`, `album`, `duration_ms`) by what it is.
+fn lyrics_for(state: &State, param: &dyn Fn(&str) -> Option<String>) -> Result<Value> {
+    let library = || state.library.lock().unwrap();
+    let row = param("id").and_then(|id| id.parse::<i64>().ok());
+    let (wanted, mut refs, file) = match row {
+        Some(id) => {
+            let Some(described) = library().describe(id)? else {
+                return Ok(json!({ "lyrics": null, "via": null }));
+            };
+            (described.wanted, described.refs, library().file_of(id)?)
+        }
+        None => {
+            let text = |name: &str| param(name).map(|v| capped(&v)).filter(|v| !v.is_empty());
+            let wanted = stash_core::addons::Wanted {
+                title: text("title").unwrap_or_default(),
+                artist: text("artist").unwrap_or_default(),
+                album: text("album"),
+                duration_ms: param("duration_ms").and_then(|v| v.parse::<u64>().ok()),
+                isrc: param("isrc").and_then(|v| stash_core::identity::isrc(&v)),
+                explicit: None,
+            };
+            (wanted, Vec::new(), None)
+        }
+    };
+    if let (Some(addon), Some(track)) = (param("addon"), param("track")) {
+        refs.insert(0, (addon, track));
+    }
+
+    // A file's own lyrics: read each time (the listener may have just put a .lrc beside it).
+    if let Some(file) = &file
+        && let Some((found, via)) = stash_core::lyrics::of_file(Path::new(file))
+    {
+        return Ok(json!({ "lyrics": found, "via": via }));
+    }
+    if wanted.title.is_empty() || wanted.artist.is_empty() {
+        return Ok(json!({ "lyrics": null, "via": null }));
+    }
+    let key = match &wanted.isrc {
+        Some(isrc) => format!("isrc:{isrc}"),
+        None => stash_core::identity::words_key(&wanted.title, &wanted.artist),
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    if let Some(stash_core::lists::KeptLyrics {
+        lyrics: found,
+        via,
+        at,
+    }) = library().cached_lyrics(&key)?
+    {
+        let keep = if found.is_some() {
+            LYRICS_KEPT_SECONDS
+        } else {
+            NO_LYRICS_KEPT_SECONDS
+        };
+        if now - at < keep {
+            return Ok(json!({ "lyrics": found, "via": via }));
+        }
+    }
+
+    // The listener's add-ons that offer lyrics, in the listener's order; the one that serves the song is asked by
+    // its own id for it.
+    let mut unreachable = 0;
+    let addons: Vec<Arc<Loaded>> = state.addons.read().unwrap().clone();
+    let mut ordered: Vec<&Arc<Loaded>> = addons.iter().collect();
+    ordered.sort_by_key(|loaded| !refs.iter().any(|(id, _)| *id == loaded.stored.id));
+    for loaded in ordered {
+        let Some(addon) = loaded.usable().filter(|a| a.offers_resource("lyrics")) else {
+            continue;
+        };
+        let own = refs
+            .iter()
+            .find(|(id, _)| *id == loaded.stored.id)
+            .map(|(_, track)| track.as_str());
+        match addon.lyrics(own, &wanted) {
+            Ok(Some(found)) => {
+                let name = loaded.listed()["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                library().keep_lyrics(&key, Some(&found), Some(&name), now)?;
+                return Ok(json!({ "lyrics": found, "via": name }));
+            }
+            Ok(None) => {}
+            Err(_) => unreachable += 1,
+        }
+    }
+    if library().setting(LRCLIB_SETTING)?.as_deref() != Some("0") {
+        match stash_core::lyrics::from_lrclib(
+            LRCLIB,
+            &wanted.title,
+            &wanted.artist,
+            wanted.album.as_deref(),
+            wanted.duration_ms,
+        ) {
+            Ok(Some(found)) => {
+                library().keep_lyrics(&key, Some(&found), Some("LRCLIB"), now)?;
+                return Ok(json!({ "lyrics": found, "via": "LRCLIB" }));
+            }
+            Ok(None) => {}
+            Err(_) => unreachable += 1,
+        }
+    }
+    // "None there" is kept only when every source answered: one that could not be asked is asked again next time.
+    if unreachable == 0 {
+        library().keep_lyrics(&key, None, None, now)?;
+    }
+    Ok(json!({ "lyrics": null, "via": null }))
+}
+
 /// The output kept in the settings: its name and what it was called.
 fn chosen_device(text: &str) -> Option<(String, String)> {
     let value: Value = serde_json::from_str(text).ok()?;
@@ -1425,6 +1544,20 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
             200,
             json!({ "rows": library().albums_at(number("offset", 0), limit(120))? }),
         ),
+        (Method::Get, "/api/lyrics") => reply_json(200, lyrics_for(state, &param)?),
+        // Whether lyrics are looked up on LRCLIB (on unless switched off).
+        (Method::Get, "/api/settings/lyrics") => reply_json(
+            200,
+            json!({ "lrclib": library().setting(LRCLIB_SETTING)?.as_deref() != Some("0") }),
+        ),
+        (Method::Post, "/api/settings/lyrics") => {
+            let on = body_json(request)?
+                .get("lrclib")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            library().set_setting(LRCLIB_SETTING, if on { "1" } else { "0" })?;
+            reply_json(200, json!({ "lrclib": on }))
+        }
         (Method::Get, "/api/search") => {
             let (query, library) = (param("q").unwrap_or_default(), library());
             reply_json(

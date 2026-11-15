@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
@@ -209,6 +209,17 @@ const V7: &str = "
     ALTER TABLE tracks ADD COLUMN cover INTEGER;
 ";
 
+/// Lyrics found on the network, by song (its ISRC, else its words): the lyrics as JSON, or NULL for "none there",
+/// where they came from, and when (Unix seconds), so a song is asked for once and a miss is asked again later.
+const V8: &str = "
+    CREATE TABLE lyrics_cache(
+        key    TEXT PRIMARY KEY,
+        body   TEXT,
+        via    TEXT,
+        at     INTEGER NOT NULL
+    ) WITHOUT ROWID;
+";
+
 /// Opens (or creates) the library at `path` and migrates it to [`SCHEMA_VERSION`].
 pub fn open(path: &std::path::Path) -> Result<Connection> {
     prepare(Connection::open(path)?)
@@ -289,6 +300,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V7)?;
         tx.pragma_update(None, "user_version", 7)?;
+        tx.commit()?;
+    }
+    if found < 8 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V8)?;
+        tx.pragma_update(None, "user_version", 8)?;
         tx.commit()?;
     }
     Ok(())

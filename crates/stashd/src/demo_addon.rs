@@ -209,7 +209,7 @@ impl DemoAddon {
                     "version": env!("CARGO_PKG_VERSION"),
                     "kind": "server",
                     "description": "A folder of your own files, served as an add-on on this computer.",
-                    "resources": ["search", "resolve", "stream"],
+                    "resources": ["search", "resolve", "stream", "lyrics"],
                     "stream": { "cors": false, "manifests": ["none"], "tiers": ["high", "lossless", "hires"] },
                 }),
             ));
@@ -302,6 +302,30 @@ impl DemoAddon {
                     "cors": false,
                 }),
             ));
+        } else if path == "/lyrics" && !self.eclipse {
+            // A song's lyrics are the .lrc file beside it, as a player reads them (contract section 4.6): asked by
+            // the add-on's own id, or by title and artist.
+            let row = match param("id") {
+                Some(id) => id.parse::<i64>().ok().and_then(|id| self.rows.get(&id)),
+                None => {
+                    let words = words_key(
+                        &param("title").unwrap_or_default(),
+                        &param("artist").unwrap_or_default(),
+                    );
+                    self.rows
+                        .values()
+                        .find(|row| words_key(&row.title, &row.artist) == words)
+                }
+            };
+            let lyrics = row
+                .and_then(|row| self.paths.get(&row.id))
+                .and_then(|file| stash_core::lyrics::of_file(Path::new(file)))
+                .filter(|(_, from)| *from == "the .lrc file")
+                .map(|(lyrics, _)| lyrics);
+            let _ = request.respond(match lyrics {
+                Some(lyrics) => answer(200, json!(lyrics)),
+                None => refusal(404, "not_found", "no lyrics for that song"),
+            });
         } else if let Some(id) = path.strip_prefix("/media/") {
             let range = request
                 .headers()

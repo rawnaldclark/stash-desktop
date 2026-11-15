@@ -12,6 +12,7 @@ pub mod identity;
 pub mod import;
 pub mod library;
 pub mod lists;
+pub mod lyrics;
 pub mod matching;
 pub mod player;
 pub mod scan;

@@ -55,6 +55,41 @@ fn iso_millis(ms: i64) -> String {
 
 impl Library {
     /// What the listener set for `key`, if anything.
+    /// Lyrics kept for the song `key`: what was found (`None`: the song had none), where, and when.
+    pub fn cached_lyrics(&self, key: &str) -> Result<Option<KeptLyrics>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .prepare_cached("SELECT body, via, at FROM lyrics_cache WHERE key = ?1")?
+            .query_row([key], |r| {
+                let body: Option<String> = r.get(0)?;
+                Ok((body, r.get(1)?, r.get(2)?))
+            })
+            .optional()?
+            .map(|(body, via, at)| KeptLyrics {
+                lyrics: body.and_then(|b: String| serde_json::from_str(&b).ok()),
+                via,
+                at,
+            }))
+    }
+
+    /// Keeps what was found for the song `key` (or that nothing was), with where and when (Unix seconds).
+    pub fn keep_lyrics(
+        &mut self,
+        key: &str,
+        lyrics: Option<&crate::lyrics::Lyrics>,
+        via: Option<&str>,
+        at: i64,
+    ) -> Result<()> {
+        let body = lyrics.and_then(|l| serde_json::to_string(l).ok());
+        self.conn.execute(
+            "INSERT INTO lyrics_cache(key, body, via, at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(key) DO UPDATE SET body = excluded.body, via = excluded.via, at = excluded.at",
+            params![key, body, via, at],
+        )?;
+        Ok(())
+    }
+
     pub fn setting(&self, key: &str) -> Result<Option<String>> {
         Ok(self
             .conn
@@ -422,4 +457,12 @@ mod tests {
         assert_eq!(iso_millis(951_782_400_000), "2000-02-29T00:00:00.000Z");
         assert_eq!(iso_millis(4_102_444_800_000), "2100-01-01T00:00:00.000Z");
     }
+}
+
+/// Lyrics kept from the network for a song: what was found (`None`: it had none), from where, and when (Unix seconds).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeptLyrics {
+    pub lyrics: Option<crate::lyrics::Lyrics>,
+    pub via: Option<String>,
+    pub at: i64,
 }

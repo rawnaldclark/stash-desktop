@@ -427,6 +427,48 @@ impl Addon {
         Ok(response.tracks)
     }
 
+    /// The add-on's lyrics (contract section 4.6) for one of its own tracks (`id`), else for the song `wanted`.
+    /// `None` when it has none. An add-on made for Eclipse is not asked: its lyrics are not part of what is read.
+    pub fn lyrics(
+        &self,
+        id: Option<&str>,
+        wanted: &Wanted,
+    ) -> Result<Option<crate::lyrics::Lyrics>> {
+        self.offers("lyrics")?;
+        if self.manifest.dialect == Dialect::Eclipse {
+            return Ok(None);
+        }
+        let mut url = Url::parse(&format!("{}/lyrics", self.base))
+            .map_err(|e| AddonError::invalid(e.to_string()))?;
+        {
+            let mut query = url.query_pairs_mut();
+            match id {
+                Some(id) => {
+                    query.append_pair("id", id);
+                }
+                None => {
+                    query
+                        .append_pair("title", &wanted.title)
+                        .append_pair("artist", &wanted.artist);
+                    if let Some(album) = &wanted.album {
+                        query.append_pair("album", album);
+                    }
+                    if let Some(ms) = wanted.duration_ms {
+                        query.append_pair("durationMs", &ms.to_string());
+                    }
+                    if let Some(isrc) = &wanted.isrc {
+                        query.append_pair("isrc", isrc);
+                    }
+                }
+            }
+        }
+        match get_json::<crate::lyrics::Lyrics>(&self.agent, url.as_str()) {
+            Ok(found) => Ok(found.checked()),
+            Err(e) if e.code == Code::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// The add-on's own track for a song the host knows, or `None` when it does not have that song. Which of its
     /// tracks is the same song is the add-on's to decide (the contract's rules); the host checks the two things it
     /// can: a track whose length is off by more than 8 s or 3 % is refused, and so is one the add-on says it cannot

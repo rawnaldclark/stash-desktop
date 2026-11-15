@@ -645,8 +645,19 @@ const browse: BrowseAPI = {
 
 // ------------------------------------------------------------------------------------------------ lyrics
 
-/** The desktop has no lyrics yet: every song answers "none", and the panel says so. */
-const lyrics: LyricsAPI = { forTrack: async () => null };
+/**
+ * The core finds them: a file's own (.lrc beside it, or its tags), then the add-ons that have lyrics (the one serving the song first),
+ * then LRCLIB unless switched off in Settings. What came from the network the core keeps, so a song is asked for once.
+ */
+const lyrics: LyricsAPI = {
+	async forTrack(item) {
+		const id = libIdOf(item);
+		if (id !== null) return (await core.lyrics({ id })).lyrics;
+		const ref = addonRefOf(item);
+		const found = await core.lyrics({ title: item.title, artist: item.artist, album: item.album, durationMs: item.durationMs, isrc: item.isrc, addon: ref?.addon, track: ref?.track.id });
+		return found.lyrics;
+	}
+};
 
 // ------------------------------------------------------------------------------------------------ start
 
