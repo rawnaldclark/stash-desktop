@@ -85,6 +85,9 @@ fn reply_picture(content_type: &str, body: Vec<u8>) -> Reply {
         .with_status_code(200)
         .with_header(header("Content-Type", content_type))
         .with_header(header("Cache-Control", "private, max-age=3600"))
+        // The window asks for a picture twice: plainly, to draw it, and as another origin, to read its colours.
+        // The kept answer to the first must not be handed to the second: it does not say the window may read it.
+        .with_header(header("Vary", "Origin"))
         .with_header(header("X-Content-Type-Options", "nosniff"))
 }
 
@@ -1253,8 +1256,13 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
             let Some(file) = library().file_of(id)? else {
                 return Ok((refuse(404, "no such file in the library"), false));
             };
-            let cover = stash_core::covers::of_file(Path::new(&file));
-            library().set_cover(id, cover.is_some())?;
+            let file = Path::new(&file);
+            let cover = stash_core::covers::of_file(file);
+            // "No picture" is kept only for a file that is there to be read: a drive that is unplugged for now
+            // says nothing about its files.
+            if cover.is_some() || file.is_file() {
+                library().set_cover(id, cover.is_some())?;
+            }
             return Ok((
                 match cover {
                     // The picture of a file changes only when the file does; the window may keep it for the hour.

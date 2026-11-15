@@ -1604,6 +1604,7 @@ fn a_files_picture_is_served_and_a_file_without_one_stops_offering_it() {
     }
     stash_core::synth::write_files(&with, 3, 4, 0.1, true).unwrap();
     silence(&without.join("bare.wav"));
+    silence(&without.join("unplugged.wav"));
     silence(&beside.join("kept.wav"));
     std::fs::write(beside.join("Folder.png"), b"\x89PNG\r\n\x1a\nthe rest").unwrap();
     let db = dir.join("library.db");
@@ -1638,7 +1639,10 @@ fn a_files_picture_is_served_and_a_file_without_one_stops_offering_it() {
                 .unwrap_or_default()
                 .to_string()
         };
-        let (kind, kept) = (header("content-type"), header("cache-control"));
+        let (kind, kept) = (
+            header("content-type"),
+            format!("{} vary={}", header("cache-control"), header("vary")),
+        );
         let status = response.status().as_u16();
         (
             status,
@@ -1665,6 +1669,12 @@ fn a_files_picture_is_served_and_a_file_without_one_stops_offering_it() {
     // Asked once and found without: the row no longer offers one.
     assert!(row("bare")["art"].is_null());
 
+    // A file that cannot be reached right now (its drive is unplugged) is not judged: it is offered again.
+    std::fs::remove_file(without.join("unplugged.wav")).unwrap();
+    let away = row("unplugged");
+    assert_eq!(picture(away["art"].as_str().unwrap()).0, 404);
+    assert!(row("unplugged")["art"].is_string());
+
     // The picture inside a file, as the image its bytes are, and the window may keep it.
     let (_, all) = client.get("/api/tracks?offset=0&limit=10");
     let inside = all["rows"]
@@ -1676,7 +1686,11 @@ fn a_files_picture_is_served_and_a_file_without_one_stops_offering_it() {
         .clone();
     let (status, kind, kept, bytes) = picture(inside["art"].as_str().unwrap());
     assert_eq!((status, kind.as_str()), (200, "image/bmp"));
-    assert!(kept.contains("max-age"), "{kept}");
+    // Kept, but not across origins: the colour-reading request must get its own answer.
+    assert!(
+        kept.contains("max-age") && kept.contains("vary=Origin"),
+        "{kept}"
+    );
     assert_eq!(&bytes[..2], b"BM");
     // Its album and its artist show the same picture.
     let (_, album) = client.get(&format!("/api/albums/{}", inside["album_id"]));
