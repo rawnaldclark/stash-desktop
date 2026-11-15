@@ -9,7 +9,7 @@ repository.workspace = true
 anyhow = "1.0.104"
 stash-core = { version = "0.0.1", path = "../../../crates/stash-core" }
 stashd = { path = "../../../crates/stashd" }
-tauri = "2.12.5"
+tauri = { version = "2.12.5", features = ["tray-icon"] }
 tauri-plugin-window-state = "2"
 tauri-plugin-single-instance = "2.5.5"
 souvlaki = "0.9.3"

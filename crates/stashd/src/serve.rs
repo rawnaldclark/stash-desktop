@@ -1605,6 +1605,19 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         ),
         (Method::Get, "/api/lyrics") => reply_json(200, lyrics_for(state, &param)?),
         // Whether lyrics are looked up on LRCLIB (on unless switched off).
+        // Whether closing the window keeps Stash playing in the tray (off unless switched on).
+        (Method::Get, "/api/settings/window") => reply_json(
+            200,
+            json!({ "tray": library().setting("window.tray")?.as_deref() == Some("1") }),
+        ),
+        (Method::Post, "/api/settings/window") => {
+            let on = body_json(request)?
+                .get("tray")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            library().set_setting("window.tray", if on { "1" } else { "0" })?;
+            reply_json(200, json!({ "tray": on }))
+        }
         (Method::Get, "/api/settings/lyrics") => reply_json(
             200,
             json!({ "lrclib": library().setting(LRCLIB_SETTING)?.as_deref() != Some("0") }),

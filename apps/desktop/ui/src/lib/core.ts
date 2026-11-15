@@ -355,6 +355,9 @@ export function lyrics(song: { id: number } | { title: string; artist: string; a
 	}
 	return get<FoundLyrics>(`/api/lyrics?${q}`, signal);
 }
+/** Whether closing the window keeps Stash playing in the tray. */
+export const windowSettings = () => get<{ tray: boolean }>('/api/settings/window');
+export const setWindowSettings = (tray: boolean) => post<{ tray: boolean }>('/api/settings/window', { tray });
 /** Whether lyrics are looked up on LRCLIB when no add-on has them. */
 export const lyricsSettings = () => get<{ lrclib: boolean }>('/api/settings/lyrics');
 export const setLyricsSettings = (lrclib: boolean) => post<{ lrclib: boolean }>('/api/settings/lyrics', { lrclib });

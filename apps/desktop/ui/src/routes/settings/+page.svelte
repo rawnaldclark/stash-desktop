@@ -138,6 +138,16 @@
 
 	// ---- Lyrics: LRCLIB when no add-on has a song's lyrics (on unless switched off).
 
+	let tray = $state<boolean | null>(null);
+	async function setTray(on: boolean) {
+		tray = on;
+		try {
+			tray = (await core.setWindowSettings(on)).tray;
+		} catch {
+			tray = !on;
+		}
+	}
+
 	let lrclib = $state<boolean | null>(null);
 	async function setLrclib(on: boolean) {
 		lrclib = on;
@@ -153,6 +163,10 @@
 		void sources.reload().catch(() => {});
 		void core.lyricsSettings().then(
 			(s) => (lrclib = s.lrclib),
+			() => {}
+		);
+		void core.windowSettings().then(
+			(s) => (tray = s.tray),
 			() => {}
 		);
 		void readOuts();
@@ -331,6 +345,12 @@
 				<div class="set-lab"><span class="set-name" id="bk-l">Pure black</span><span class="set-sub">A black background whenever the dark theme shows. Easy on OLED screens at night.</span></div>
 				<button type="button" class="sw" role="switch" aria-checked={look.black} aria-labelledby="bk-l" onclick={() => setLook({ ...look, black: !look.black })}><i></i></button>
 			</div>
+			{#if !core.measuring}
+				<div class="set-row">
+					<div class="set-lab"><span class="set-name" id="tray-l">Keep playing when the window is closed</span><span class="set-sub">Stash stays in the tray by the clock. Click it to bring the window back; its menu plays, pauses and skips, and quits Stash.</span></div>
+					<button type="button" class="sw" role="switch" aria-checked={tray === true} aria-labelledby="tray-l" disabled={tray === null} onclick={() => tray !== null && setTray(!tray)}><i></i></button>
+				</div>
+			{/if}
 		</div>
 	</section>
 

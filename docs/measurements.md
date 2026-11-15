@@ -350,6 +350,8 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 - Word-by-word lyrics are shown when an add-on gives them; LRCLIB and `.lrc` files give lines only.
 - The full-size covers and memory notes of section 11 still stand.
 
+- **The tray icon** (by the clock): its tip says what plays, a click brings the window back, and its menu plays or pauses, skips either way, shows the window and quits. With Settings › Appearance › Keep playing when the window is closed, closing the window hides it and the music goes on; off (the default), closing ends Stash. Checked in the real app on scratch user folders, the window closed with the message its close button sends: on, it kept playing with the window hidden, and starting Stash again brought it back; off, it ended. The tray menu itself was not clicked in a check.
+
 ## 14. Songs saved to this computer
 
 - **A song of the library can be saved as a file**, from its menu, or all the liked songs or a playlist's at once. One song at a time, the core finds it through the add-ons the way it does for playing (the add-on that has it already first, then each add-on in order), and asks for a file to keep: the contract's `download` route, or the stream of an add-on made for Eclipse, unless its manifest says `allowDownloads` is off. Only one progressive file is asked for.

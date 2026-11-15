@@ -6,12 +6,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod media_controls;
+mod tray;
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use stashd::serve::{Core, Options};
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+
+/// The port of the core's local API, for the window's own events.
+struct CorePort(u16);
 
 /// The library to open: the one `STASH_DB` names, else `library.db` in this user's Stash data folder.
 fn library_path() -> Result<PathBuf> {
@@ -88,10 +92,26 @@ fn main() -> Result<()> {
                 .min_inner_size(640.0, 400.0)
                 .initialization_script(&script)
                 .build()?;
+            app.manage(CorePort(port));
             if !measuring {
                 media_controls::start(app.handle().clone(), &window, port);
+                tray::start(app.handle(), port);
             }
             Ok(())
+        })
+        // Closing the window ends Stash, unless the listener chose to keep it playing in the tray (and there is one).
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event
+                && window.label() == "main"
+            {
+                let app = window.app_handle();
+                let in_tray = app.tray_by_id(tray::ID).is_some();
+                let port = app.try_state::<CorePort>().map(|p| p.0);
+                if in_tray && port.is_some_and(tray::keeps_playing) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .run(tauri::generate_context!())
         .context("running the window")?;
