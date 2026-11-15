@@ -3,5 +3,7 @@ import { redirect } from '@sveltejs/kit';
 import type { PageLoad } from './$types';
 
 export const load: PageLoad = ({ url }) => {
+	// The mini player's own window opens at `index.html?view=mini`.
+	if (url.searchParams.get('view') === 'mini') redirect(307, '/mini');
 	redirect(307, `/${url.search}`);
 };

@@ -39,6 +39,8 @@
 	});
 
 	const np = $derived(page.url.pathname === '/now');
+	/** The mini player's window: the page alone, none of the full window around it. */
+	const mini = $derived(page.url.pathname === '/mini');
 	const size = $derived(ui.size);
 	const hasBar = $derived(!!S.v.current);
 	const panelCollapsed = $derived(!ui.panelOpen && !ui.sheetMode);
@@ -172,6 +174,9 @@
 
 <svelte:window onkeydown={onkey} />
 
+{#if mini}
+	<div class="wp stage wp-frame" style={paletteStyle(palette, ui.light)}>{@render children()}</div>
+{:else}
 <div class="wp stage wp-frame" style="{paletteStyle(palette, ui.light)};--wm-ink:{wmInk}" data-size={size}>
 	<a class="skip" href="#main">Skip to content</a>
 	<div class="wp-g" class:np class:pn-none={panelCollapsed && !np} class:has-bar={hasBar}>
@@ -190,3 +195,4 @@
 	{#if ContextMenu}<ContextMenu />{/if}
 	<Toast />
 </div>
+{/if}

@@ -2374,3 +2374,81 @@ fn autoplay_goes_on_with_songs_like_the_last_when_the_queue_ends() {
     assert_eq!(client.get("/api/player").1["queue_len"].as_u64(), Some(1));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_page_asks_the_program_around_the_core_for_the_mini_player() {
+    use stashd::serve::View;
+    use std::sync::{Arc, Mutex};
+
+    let dir = std::env::temp_dir().join(format!("stash-api-window-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let options = |name: &str| Options {
+        db: dir.join(name),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: None,
+        mpv: None,
+        play_counts_between_seconds: None,
+    };
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let ask = |base: &str, body: Value| -> (u16, Value) {
+        let mut response = agent
+            .post(&format!("{base}/api/window"))
+            .send_json(body)
+            .unwrap();
+        (
+            response.status().as_u16(),
+            response.body_mut().read_json().unwrap_or(Value::Null),
+        )
+    };
+
+    // A core on its own (served to a browser) has no window to change.
+    let alone = Core::bind(options("alone.db")).unwrap();
+    let base = format!("http://127.0.0.1:{}", alone.port());
+    std::thread::spawn(move || alone.run());
+    let client = Client {
+        agent: agent.clone(),
+        base: base.clone(),
+    };
+    assert_eq!(client.get("/api/window"), (200, json!({ "mini": false })));
+    assert_eq!(ask(&base, json!({ "view": "mini" })).0, 404);
+
+    // Inside a program that owns its windows, the ask reaches it, and its answer is the reply.
+    let asked: Arc<Mutex<Vec<View>>> = Arc::default();
+    let works = Arc::new(Mutex::new(true));
+    let shell = {
+        let (asked, works) = (Arc::clone(&asked), Arc::clone(&works));
+        Arc::new(move |view: View| {
+            asked.lock().unwrap().push(view);
+            *works.lock().unwrap()
+        })
+    };
+    let windowed = Core::bind(options("windowed.db"))
+        .unwrap()
+        .with_window(shell);
+    let base = format!("http://127.0.0.1:{}", windowed.port());
+    std::thread::spawn(move || windowed.run());
+    let client = Client {
+        agent: agent.clone(),
+        base: base.clone(),
+    };
+    assert_eq!(client.get("/api/window"), (200, json!({ "mini": true })));
+    assert_eq!(
+        client.post("/api/window", json!({ "view": "mini" })),
+        json!({ "view": "mini" })
+    );
+    assert_eq!(
+        client.post("/api/window", json!({ "view": "full" })),
+        json!({ "view": "full" })
+    );
+    assert_eq!(ask(&base, json!({ "view": "small" })).0, 400);
+    *works.lock().unwrap() = false;
+    assert_eq!(ask(&base, json!({ "view": "mini" })).0, 503);
+    assert_eq!(*asked.lock().unwrap(), [View::Mini, View::Full, View::Mini]);
+}

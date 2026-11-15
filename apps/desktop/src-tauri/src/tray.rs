@@ -1,5 +1,6 @@
 //! The tray icon (by the clock on Windows, in the menu bar on macOS, in the desktop's tray on Linux): its tip says
-//! what plays, a click brings the window back, and its menu has play/pause, next, previous, the window and quit.
+//! what plays, a click brings the window back, and its menu has play/pause, next, previous, the window, the mini player
+//! and quit.
 //!
 //! When the listener chose it (Settings › Appearance), closing the window leaves Stash playing here instead of
 //! ending it. Like the media controls, the tray drives the player over the core's local API.
@@ -9,7 +10,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
+
+use crate::windows;
 
 /// The tray icon's id.
 pub const ID: &str = "stash";
@@ -36,15 +39,6 @@ fn post(agent: &ureq::Agent, base: &str, path: &str, body: Value) {
     let _ = agent.post(format!("{base}{path}")).send_json(body);
 }
 
-/// Brings the window back, wherever it went (hidden in the tray, minimized, behind others).
-pub fn show(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-    }
-}
-
 /// Whether the listener chose to keep Stash in the tray when the window is closed.
 pub fn keeps_playing(port: u16) -> bool {
     read(
@@ -69,9 +63,13 @@ fn build(app: &AppHandle, port: u16) -> tauri::Result<()> {
     let next = MenuItem::with_id(app, "next", "Next", true, None::<&str>)?;
     let previous = MenuItem::with_id(app, "previous", "Previous", true, None::<&str>)?;
     let show_item = MenuItem::with_id(app, "show", "Show Stash", true, None::<&str>)?;
+    let mini = MenuItem::with_id(app, "mini", "Mini player", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Stash", true, None::<&str>)?;
     let line = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&toggle, &next, &previous, &line, &show_item, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[&toggle, &next, &previous, &line, &show_item, &mini, &quit],
+    )?;
     let base = format!("http://127.0.0.1:{port}");
     let mut builder = TrayIconBuilder::with_id(ID)
         .tooltip("Stash")
@@ -94,7 +92,10 @@ fn build(app: &AppHandle, port: u16) -> tauri::Result<()> {
                     }
                     "next" => post(&agent, &base, "/api/player/next", json!({})),
                     "previous" => post(&agent, &base, "/api/player/previous", json!({})),
-                    "show" => show(app),
+                    "show" => windows::full(app),
+                    "mini" => {
+                        windows::show(app, stashd::serve::View::Mini);
+                    }
                     "quit" => app.exit(0),
                     _ => {}
                 }
@@ -107,7 +108,7 @@ fn build(app: &AppHandle, port: u16) -> tauri::Result<()> {
                 ..
             } = event
             {
-                show(tray.app_handle());
+                windows::full(tray.app_handle());
             }
         });
     if let Some(icon) = app.default_window_icon() {

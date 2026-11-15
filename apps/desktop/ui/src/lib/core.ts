@@ -360,6 +360,9 @@ export const autoplaySettings = () => get<{ on: boolean }>('/api/settings/autopl
 export const setAutoplay = (on: boolean) => post<{ on: boolean }>('/api/settings/autoplay', { on });
 /** Whether closing the window keeps Stash playing in the tray. */
 export const windowSettings = () => get<{ tray: boolean }>('/api/settings/window');
+/** Whether there is a mini player to switch to (only inside the desktop window), and the switch between it and the full window. */
+export const windowInfo = () => get<{ mini: boolean }>('/api/window');
+export const showView = (view: 'mini' | 'full') => post<{ view: string }>('/api/window', { view });
 export const setWindowSettings = (tray: boolean) => post<{ tray: boolean }>('/api/settings/window', { tray });
 /** Whether lyrics are looked up on LRCLIB when no add-on has them. */
 export const lyricsSettings = () => get<{ lrclib: boolean }>('/api/settings/lyrics');

@@ -66,6 +66,17 @@ pub struct Options {
     pub play_counts_between_seconds: Option<(f64, f64)>,
 }
 
+/// What the program around the core can be asked to show: the full window, or the mini player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Full,
+    Mini,
+}
+
+/// The program around the core that owns its windows (the desktop shell), when there is one. The page asks it for a
+/// view through the core (`POST /api/window`), so the page talks to nothing but the core; it says whether it did.
+pub type WindowShell = Arc<dyn Fn(View) -> bool + Send + Sync>;
+
 pub(crate) type Reply = Response<std::io::Cursor<Vec<u8>>>;
 
 fn header(name: &str, value: &str) -> Header {
@@ -427,6 +438,8 @@ pub(crate) struct State {
     pub(crate) lacks: Arc<Lacks>,
     /// Songs being saved as files.
     pub(crate) saving: crate::saving::Saving,
+    /// The windows' owner, when the core runs inside one.
+    window: Option<WindowShell>,
 }
 
 impl State {
@@ -565,12 +578,19 @@ impl Core {
                 scanning: Arc::new(Mutex::new(Scanning::default())),
                 lacks,
                 saving: crate::saving::Saving::default(),
+                window: None,
             },
         })
     }
 
     pub fn port(&self) -> u16 {
         self.state.port
+    }
+
+    /// Lets the page ask `shell` for the full window or the mini player.
+    pub fn with_window(mut self, shell: WindowShell) -> Self {
+        self.state.window = Some(shell);
+        self
     }
 
     /// Answers requests until a measurement arrives (when one is being collected), else for good.
@@ -1636,6 +1656,23 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
                 .unwrap_or(false);
             library().set_setting("window.tray", if on { "1" } else { "0" })?;
             reply_json(200, json!({ "tray": on }))
+        }
+        // Whether there is a mini player to switch to (only in a program that owns windows), and the switch.
+        (Method::Get, "/api/window") => reply_json(200, json!({ "mini": state.window.is_some() })),
+        (Method::Post, "/api/window") => {
+            let view = match body_json(request)?.get("view").and_then(Value::as_str) {
+                Some("mini") => View::Mini,
+                Some("full") => View::Full,
+                _ => return Ok((refuse(400, "the view is \"mini\" or \"full\""), false)),
+            };
+            match &state.window {
+                None => refuse(404, "there is no window here to change"),
+                Some(shell) if shell(view) => reply_json(
+                    200,
+                    json!({ "view": if view == View::Mini { "mini" } else { "full" } }),
+                ),
+                Some(_) => refuse(503, "the window could not change"),
+            }
         }
         (Method::Get, "/api/settings/lyrics") => reply_json(
             200,
