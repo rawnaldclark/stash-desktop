@@ -91,6 +91,35 @@ export async function importLibrary(file: Blob): Promise<Imported> {
   return answer<Imported>("/api/import", await fetch(`${core}/api/import`, sent));
 }
 
+/** The core's answer to a change the listener made: the playlists and the counts as they now are. */
+export type Changed = { playlists: PlaylistRow[]; counts: Counts; id?: number; liked?: boolean; added?: number; done?: boolean };
+
+/** Likes a song of the library, or takes the like back. */
+export const likeTrack = (id: number, liked: boolean) => post<Changed>("/api/tracks/like", { id, liked });
+/** Makes a track an add-on found a song of the library; the answer's `id` is its row. */
+export const keepFound = (addon: string, track: FoundTrack) => post<Changed>("/api/tracks/keep", { addon, track });
+export const createPlaylist = (name: string) => post<Changed>("/api/playlists", { name });
+export const renamePlaylist = (id: number, name: string) => post<Changed>(`/api/playlists/${id}/rename`, { name });
+export const deletePlaylist = (id: number) => post<Changed>(`/api/playlists/${id}/delete`, {});
+export const addToPlaylist = (id: number, ids: number[]) => post<Changed>(`/api/playlists/${id}/add`, { ids });
+/** Takes the song at place `index` (0 is the top) out of a playlist. */
+export const removeFromPlaylist = (id: number, index: number) => post<Changed>(`/api/playlists/${id}/remove`, { index });
+export const moveInPlaylist = (id: number, from: number, to: number) => post<Changed>(`/api/playlists/${id}/move`, { from, to });
+
+/** The library as the file the Android app and the web player import, and how much is in it. */
+export async function exportLibrary(): Promise<{ blob: Blob; likes: number; lists: number; plays: number }> {
+  const response = await fetch(`${core}/api/export`);
+  if (!response.ok) throw new Refused(`/api/export: ${response.status}`);
+  const text = await response.text();
+  const file = JSON.parse(text) as { likes?: unknown[]; playlists?: unknown[]; history?: unknown[] };
+  return {
+    blob: new Blob([text], { type: "application/json" }),
+    likes: file.likes?.length ?? 0,
+    lists: file.playlists?.length ?? 0,
+    plays: file.history?.length ?? 0,
+  };
+}
+
 // ---- Add-ons
 
 export type Tier = "low" | "high" | "lossless" | "hires";

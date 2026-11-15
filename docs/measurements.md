@@ -214,5 +214,26 @@ The file: 7.1 MB, 14,000 likes, 150 playlists of 120 songs, 5,000 plays; 18,128 
 
 - **The Android app's Backup zip is not read.** Only the "Export for Stash on the web" file is. That file leaves out, by the app's own rule, Daily Mixes, Stash Mixes and the Downloads list as such, and carries the newest 5,000 plays. The optional whole-history section of the file (`listens`) is ignored.
 - **No real add-on has answered `resolve` here**, only the demo add-on, which matches by the same words and a close length. How well a real add-on picks the same song is that add-on's doing; the desktop does not second-guess it beyond the length check.
-- A song no add-on has is asked for again every time it comes up; misses are not remembered. Settings in a web backup are not imported. Covers are kept as addresses and not shown yet. Likes, playlists and plays can come in, but cannot yet be made, edited or sent back out from the desktop.
+- A song no add-on has is asked for again every time it comes up; misses are not remembered. Settings in a web backup are not imported. Covers are kept as addresses and not shown yet.
 
+## 9. Likes, playlists and plays made here, and the way back out
+
+Section 8 brought a library in. This is the other half: what the listener does on the desktop, and the same file written back out for the phone and the web player.
+
+- **Liking:** a heart beside every song (shown when the row is pointed at, always when liked). On an add-on's search result, liking first makes the track a song of the library (the row the library has for that song, or a new one known by its description, with the add-on's id for it).
+- **Playlists:** made from the sidebar or from the + beside a song; renamed and deleted from the playlist's own header; a song is added from its +, and in a playlist moved up or down or taken out. A shared mix someone else owns can be deleted here but not filled.
+- **Plays:** the core counts a play by the other Stashes' rule: once half the song was really played (not paused, not waiting for data), never before 30 s and always by 4 minutes, stamped with when it started. Only songs of the library are kept; a track played straight from an add-on's results is not.
+- **Save a library file** (or `stashd export --db my.db <file>`): the library as `stash-web-library` version 1. A file is described, never located; a file without tags is left out.
+
+### Checked
+
+- **By the web player's own reader:** a file written by the desktop (the golden library imported, plus a like, a playlist and a play made here) was read by the web player's `readBackup` in its own test runner. It read 4 likes under the same identities the desktop uses (`halo|beyonce`, `isrc:USUM71607009`), the 3 playlists (the one made here, the imported one, the shared mix still a follow with its version and sharer) and the 4 plays.
+- **In a browser, on a silent output:** with the mouse: a heart clicked (Liked went to 1), the + opened the menu with the name field ready, a new playlist was made with the song in it. Then every control once: adding to a playlist that is there (and being told when it has the song already), moving up, taking out, renaming, a name of spaces refused in words, liking and adding an add-on's search result (the library grew by that one song), taking a like back in the Liked list (the row left), making a playlist from the sidebar, deleting one after being asked, and saving the file (the download itself was held back; its name and contents were checked).
+- **In the desktop app, on the real sound card:** a 70 s song played from a playlist made there: after 20 s no play was kept, after 38 s one was, under the real rule; the file then held the like, the playlist in its order and that play.
+- **By the tests:** `tests/lists.rs` (likes, playlists, adoption, plays, the golden file out and back in, nothing that only works here leaving), `tests/player.rs` (a play counts once half was really played; paused time and a skipped song do not), `crates/stashd/tests/api.rs` (all of it over HTTP, and the core importing its own file changes nothing).
+
+### Not covered yet
+
+- **The Android app's reader has not read a desktop file.** It is the same format and the web player's reader accepts it, but the phone's import was not run. The phone merges a playlist with an `app-…` id back into its own playlist of that number only when the names agree.
+- **Saving the file from inside the desktop app's own window** was not clicked (the save goes through the web view's download); `stashd export` and the core's answer were checked instead.
+- A like taken back here does not travel: importing only ever adds, on every Stash. Reordering is one step at a time (no dragging). No undo. Export speed on a large library was not measured.

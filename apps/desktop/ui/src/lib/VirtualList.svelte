@@ -27,7 +27,12 @@
   /** Bumped whenever a page arrives, so the rows are drawn again. The pages themselves are plain data. */
   let arrivals = $state(0);
 
+  /** Bumped to read the rows again. */
+  let epoch = $state(0);
+
   const pages = new Map<number, Row[]>();
+  /** Pages whose rows stay on screen while they are read again. */
+  const stale = new Set<number>();
   const asked = new Map<number, AbortController>();
 
   const first = $derived(Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN));
@@ -41,6 +46,7 @@
   });
 
   $effect(() => {
+    void epoch;
     if (count === 0 || last <= first) return;
     const from = Math.floor(first / pageSize);
     const to = Math.floor((last - 1) / pageSize);
@@ -52,12 +58,13 @@
       }
     }
     for (let page = from; page <= to; page++) {
-      if (pages.has(page) || asked.has(page)) continue;
+      if ((pages.has(page) && !stale.has(page)) || asked.has(page)) continue;
       const controller = new AbortController();
       asked.set(page, controller);
       fetchPage(page * pageSize, pageSize, controller.signal)
         .then((rows) => {
           pages.set(page, rows);
+          stale.delete(page);
           // Far-away pages are dropped, the farthest first, so memory does not grow with scrolling.
           if (pages.size > KEEP_PAGES) {
             const farthest = [...pages.keys()].sort((a, b) => Math.abs(b - page) - Math.abs(a - page))[0];
@@ -85,6 +92,17 @@
   /** Scrolls so that row `index` is at the top. */
   export function scrollToIndex(index: number) {
     if (viewport) viewport.scrollTop = index * rowHeight;
+  }
+
+  /** Reads the rows again where the list is (something in them changed); what is on screen stays until it arrives. */
+  export function refresh() {
+    for (const page of pages.keys()) stale.add(page);
+    epoch++;
+  }
+
+  /** Draws the rows again from the data the list has (a row was changed in place). */
+  export function redraw() {
+    arrivals++;
   }
 
   export function scrollBy(pixels: number) {

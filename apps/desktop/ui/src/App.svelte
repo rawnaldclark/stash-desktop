@@ -2,14 +2,22 @@
   import { onMount } from "svelte";
   import Addons from "./lib/Addons.svelte";
   import NowPlaying from "./lib/NowPlaying.svelte";
+  import RowMenu from "./lib/RowMenu.svelte";
   import VirtualList from "./lib/VirtualList.svelte";
   import {
     addons as fetchAddons,
+    addToPlaylist,
     counts as fetchCounts,
+    createPlaylist,
+    deletePlaylist,
+    exportLibrary,
     IDLE,
     importLibrary,
+    keepFound,
     likedAt,
+    likeTrack,
     measuring,
+    moveInPlaylist,
     nextTrack,
     player as fetchPlayer,
     playFound,
@@ -22,6 +30,8 @@
     postMeasurement,
     previousTrack,
     Refused,
+    removeFromPlaylist,
+    renamePlaylist,
     search,
     searchAddon,
     seekTo,
@@ -29,6 +39,7 @@
     tracksAt,
     type AddonGroup,
     type AddonInfo,
+    type Changed,
     type Counts,
     type FoundTrack,
     type Imported,
@@ -65,7 +76,7 @@
   type View = { kind: "all" } | { kind: "liked" } | { kind: "playlist"; id: number };
   let view = $state({ kind: "all" } as View);
   let playlists: PlaylistRow[] = $state([]);
-  /** Goes up when the library changed under the list (an import), so the list reads it again. */
+  /** Goes up when the library changed under the list (an import), so the list reads it again from the top. */
   let libraryVersion = $state(0);
 
   const shownPlaylist = $derived.by(() => {
@@ -85,25 +96,34 @@
         count: shownPlaylist?.tracks ?? 0,
         fetchPage: (offset: number, limit: number, signal?: AbortSignal) => playlistTracksAt(id, offset, limit, signal),
         play: (index: number) => playPlaylist(id, index),
-        empty: "This playlist is empty.",
+        empty: "This playlist is empty. Add songs to it from the + beside any song.",
       };
     }
-    return { key: `all:${libraryVersion}`, count: counts.tracks, fetchPage: tracksAt, play: (index: number) => playFrom(index), empty: "Your library is empty. Scan a music folder, or import a library from Stash on your phone or the web." };
+    return {
+      key: `all:${libraryVersion}`,
+      count: counts.tracks,
+      fetchPage: tracksAt,
+      play: (index: number) => playFrom(index),
+      empty: "Your library is empty. Scan a music folder, or import a library from Stash on your phone or the web.",
+    };
   });
 
   function show(next: View) {
     view = next;
     query = "";
+    editing = null;
   }
 
-  // ---- Bringing a library in from another Stash
+  // ---- Bringing a library in from another Stash, and writing this one out for them
 
   let picker: HTMLInputElement | undefined = $state();
   let importing = $state(false);
-  let imported: { text: string; trouble: boolean } | null = $state(null);
+  /** What the last import, save or edit said. */
+  let notice: { text: string; trouble: boolean } | null = $state(null);
 
   const whole = new Intl.NumberFormat();
   const many = (n: number, one: string, more: string) => `${whole.format(n)} ${n === 1 ? one : more}`;
+  const trouble = (e: unknown) => ({ text: e instanceof Refused ? `${e.message}.` : "The Stash core is not answering.", trouble: true });
 
   /** What an import did, in a sentence or two. */
   function said(result: Imported): string {
@@ -125,19 +145,146 @@
     const file = picker?.files?.[0];
     if (!file || importing) return;
     importing = true;
-    imported = null;
+    notice = null;
     try {
       const result = await importLibrary(file);
       counts = result.counts;
       playlists = await fetchPlaylists().catch(() => playlists);
       libraryVersion += 1;
-      imported = { text: said(result), trouble: false };
+      notice = { text: said(result), trouble: false };
     } catch (e) {
-      imported = { text: e instanceof Refused ? `${e.message}.` : "The Stash core is not answering.", trouble: true };
+      notice = trouble(e);
     } finally {
       importing = false;
       if (picker) picker.value = "";
     }
+  }
+
+  /** Saves the library as the file the Android app and the web player import. */
+  async function saveFile() {
+    try {
+      const { blob, likes, lists, plays } = await exportLibrary();
+      const name = `stash-library-${new Date().toISOString().slice(0, 10)}.json`;
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = name;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 10_000);
+      notice = {
+        text: `Saved ${name}: ${many(likes, "like", "likes")}, ${many(lists, "playlist", "playlists")}, ${many(plays, "play", "plays")}. Import it in Stash on your phone or the web.`,
+        trouble: false,
+      };
+    } catch (e) {
+      notice = trouble(e);
+    }
+  }
+
+  // ---- Liking, and playlists
+
+  /** The core's answer to a change: the playlists and the counts as they now are. */
+  function took(changed: Changed) {
+    playlists = changed.playlists;
+    counts = changed.counts;
+  }
+
+  /** Something the listener changed: the answer is taken in; a refusal is said. */
+  async function change(call: Promise<Changed>): Promise<Changed | null> {
+    try {
+      const changed = await call;
+      took(changed);
+      return changed;
+    } catch (e) {
+      notice = trouble(e);
+      return null;
+    }
+  }
+
+  /** The add-on tracks the listener liked from search results in this sitting, as `addon:track`. */
+  let likedFound: Record<string, boolean> = $state({});
+
+  async function toggleLike(track: TrackRow) {
+    const liked = !track.liked;
+    if (!(await change(likeTrack(track.id, liked)))) return;
+    track.liked = liked;
+    // The rows of a long list are plain data: it is told to draw them again, or (the liked songs) to read them again.
+    if (view.kind === "liked") list?.refresh();
+    else list?.redraw();
+  }
+
+  async function toggleFound(addon: string, track: FoundTrack) {
+    const key = `${addon}:${track.id}`;
+    const liked = !likedFound[key];
+    const kept = await change(keepFound(addon, track));
+    if (kept?.id === undefined || !(await change(likeTrack(kept.id, liked)))) return;
+    likedFound[key] = liked;
+  }
+
+  /** The menu beside a song: where it is, and which song (a library row, or an add-on's track that is kept first). */
+  let menu: { x: number; y: number; id?: number; found?: { addon: string; track: FoundTrack }; index?: number } | null = $state(null);
+
+  function openMenu(event: MouseEvent, what: { id?: number; found?: { addon: string; track: FoundTrack }; index?: number }) {
+    const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    menu = { x: box.right, y: box.bottom + 4, ...what };
+  }
+
+  /** The library's id of the song the menu is for. */
+  async function menuSong(): Promise<number | undefined> {
+    if (menu?.id !== undefined) return menu.id;
+    if (!menu?.found) return undefined;
+    return (await change(keepFound(menu.found.addon, menu.found.track)))?.id;
+  }
+
+  async function addTo(playlist: number) {
+    const id = await menuSong();
+    menu = null;
+    if (id === undefined) return;
+    const changed = await change(addToPlaylist(playlist, [id]));
+    const name = playlists.find((p) => p.id === playlist)?.name ?? "the playlist";
+    if (changed) notice = { text: changed.added ? `Added to ${name}.` : `${name} has that song already.`, trouble: false };
+    if (view.kind === "playlist" && view.id === playlist) list?.refresh();
+  }
+
+  async function addToNew(name: string) {
+    const made = await change(createPlaylist(name));
+    if (made?.id !== undefined) await addTo(made.id);
+    else menu = null;
+  }
+
+  /** The place in the shown playlist of the song the menu is for, when that playlist can be edited. */
+  const menuPlace = $derived.by(() => {
+    if (!menu || menu.index === undefined || view.kind !== "playlist" || resultsFor !== null || !shownPlaylist || shownPlaylist.followed) return null;
+    return { first: menu.index === 0, last: menu.index === shownPlaylist.tracks - 1 };
+  });
+
+  async function moveBy(by: number) {
+    if (!menu || menu.index === undefined || view.kind !== "playlist") return;
+    const [id, from] = [view.id, menu.index];
+    menu = null;
+    if (await change(moveInPlaylist(id, from, from + by))) list?.refresh();
+  }
+
+  async function takeOut() {
+    if (!menu || menu.index === undefined || view.kind !== "playlist") return;
+    const [id, index] = [view.id, menu.index];
+    menu = null;
+    if (await change(removeFromPlaylist(id, index))) list?.refresh();
+  }
+
+  /** What is being done to the shown playlist or the list of playlists: naming a new one, renaming, or deleting. */
+  let editing: { kind: "new" | "rename" | "delete"; name: string } | null = $state(null);
+
+  async function finishEditing(event?: SubmitEvent) {
+    event?.preventDefault();
+    const doing = editing;
+    if (!doing) return;
+    if (doing.kind === "new") {
+      const made = await change(createPlaylist(doing.name));
+      if (made?.id !== undefined) show({ kind: "playlist", id: made.id });
+    } else if (view.kind === "playlist") {
+      if (doing.kind === "rename") await change(renamePlaylist(view.id, doing.name));
+      else if (await change(deletePlaylist(view.id))) show({ kind: "all" });
+    }
+    editing = null;
   }
 
   // ---- The player
@@ -173,7 +320,7 @@
 
   function toggle(event: KeyboardEvent) {
     const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement;
-    if (event.code !== "Space" || typing || !playing.track || playing.status === "loading") return;
+    if (event.code !== "Space" || typing || event.target instanceof HTMLButtonElement || !playing.track || playing.status === "loading") return;
     event.preventDefault();
     act(setPaused(playing.status === "playing"));
   }
@@ -320,16 +467,32 @@
   });
 </script>
 
+{#snippet heart()}
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21 4.3 13.4a5 5 0 0 1 7.1-7.1l.6.6.6-.6a5 5 0 0 1 7.1 7.1z" /></svg>
+{/snippet}
+
+{#snippet plus()}
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z" /></svg>
+{/snippet}
+
 {#snippet trackRow(track: TrackRow | undefined, index: number)}
   {#if track}
     <span class="n">{index + 1}</span>
-    <span class="title" class:now={track.id === playing.track?.id}>
-      {track.title}{#if track.liked}<svg class="liked" viewBox="0 0 24 24" role="img" aria-label="Liked"><path d="M12 21 4.3 13.4a5 5 0 0 1 7.1-7.1l.6.6.6-.6a5 5 0 0 1 7.1 7.1z" /></svg>{/if}
-    </span>
+    <span class="title" class:now={track.id === playing.track?.id}>{track.title}</span>
     <span class="artist">{track.artist}</span>
     <span class="album">{track.album ?? ""}</span>
     <span class="format" class:quiet={track.origin === "described"}>{format(track)}</span>
     <span class="time">{length(track.duration_ms)}</span>
+    {#if !measuring}
+      <span class="acts" role="presentation" ondblclick={(e) => e.stopPropagation()}>
+        <button type="button" class="act" class:on={track.liked} aria-pressed={track.liked} aria-label={track.liked ? `Take the like back from ${track.title}` : `Like ${track.title}`} onclick={() => toggleLike(track)}>
+          {@render heart()}
+        </button>
+        <button type="button" class="act" aria-label={`Add ${track.title} to a playlist`} onclick={(e) => openMenu(e, { id: track.id, index })}>
+          {@render plus()}
+        </button>
+      </span>
+    {/if}
   {:else}
     <span class="n">{index + 1}</span>
     <span class="placeholder"></span>
@@ -337,12 +500,21 @@
 {/snippet}
 
 {#snippet foundRow(addon: string, track: FoundTrack, index: number)}
+  {@const liked = likedFound[`${addon}:${track.id}`] === true}
   <span class="n">{index + 1}</span>
   <span class="title" class:now={playing.track?.addon?.addon === addon && playing.track.addon.track === track.id}>{track.title}</span>
   <span class="artist">{track.artist}</span>
   <span class="album">{track.album ?? ""}</span>
   <span class="format">{track.max_tier ? TIERS[track.max_tier] : ""}</span>
   <span class="time">{length(track.duration_ms)}</span>
+  <span class="acts" role="presentation" ondblclick={(e) => e.stopPropagation()}>
+    <button type="button" class="act" class:on={liked} aria-pressed={liked} aria-label={liked ? `Take the like back from ${track.title}` : `Like ${track.title}`} onclick={() => toggleFound(addon, track)}>
+      {@render heart()}
+    </button>
+    <button type="button" class="act" aria-label={`Add ${track.title} to a playlist`} onclick={(e) => openMenu(e, { found: { addon, track } })}>
+      {@render plus()}
+    </button>
+  </span>
 {/snippet}
 
 <header>
@@ -357,55 +529,85 @@
     <p class="counts">{whole.format(counts.tracks)} tracks · {whole.format(counts.albums)} albums · {whole.format(counts.artists)} artists</p>
   {/if}
   {#if counts && !measuring}
-    <button type="button" class="addons" onclick={() => (addonsOpen = true)}>Add-ons{addons.length ? ` (${addons.length})` : ""}</button>
+    <button type="button" class="plain-button" onclick={() => (addonsOpen = true)}>Add-ons{addons.length ? ` (${addons.length})` : ""}</button>
   {/if}
 </header>
 
 <div class="body">
   {#if counts && !measuring}
     <nav aria-label="Your library">
-      <button type="button" class:here={view.kind === "all" && resultsFor === null} onclick={() => show({ kind: "all" })}>
+      <button type="button" class="place" class:here={view.kind === "all" && resultsFor === null} onclick={() => show({ kind: "all" })}>
         <span>All tracks</span><span class="count">{whole.format(counts.tracks)}</span>
       </button>
-      <button type="button" class:here={view.kind === "liked" && resultsFor === null} onclick={() => show({ kind: "liked" })}>
+      <button type="button" class="place" class:here={view.kind === "liked" && resultsFor === null} onclick={() => show({ kind: "liked" })}>
         <span>Liked</span><span class="count">{whole.format(counts.liked)}</span>
       </button>
-      {#if playlists.length}
+      <div class="heading">
         <h2>Playlists</h2>
-        <div class="lists">
-          {#each playlists as playlist (playlist.id)}
-            <button
-              type="button"
-              class:here={view.kind === "playlist" && view.id === playlist.id && resultsFor === null}
-              onclick={() => show({ kind: "playlist", id: playlist.id })}
-              title={playlist.followed ? `${playlist.name} (a shared mix)` : playlist.name}
-            >
-              <span>{playlist.name}</span><span class="count">{whole.format(playlist.tracks)}</span>
-            </button>
-          {/each}
-        </div>
+        <button type="button" class="act" aria-label="Make a playlist" onclick={() => (editing = { kind: "new", name: "" })}>{@render plus()}</button>
+      </div>
+      {#if editing?.kind === "new"}
+        <form class="naming" onsubmit={finishEditing}>
+          <!-- svelte-ignore a11y_autofocus -->
+          <input type="text" placeholder="Its name" bind:value={editing.name} maxlength="100" aria-label="The new playlist's name" autofocus onkeydown={(e) => e.key === "Escape" && (editing = null)} />
+        </form>
       {/if}
+      <div class="lists">
+        {#each playlists as playlist (playlist.id)}
+          <button
+            type="button"
+            class="place"
+            class:here={view.kind === "playlist" && view.id === playlist.id && resultsFor === null}
+            onclick={() => show({ kind: "playlist", id: playlist.id })}
+            title={playlist.followed ? `${playlist.name} (a shared mix)` : playlist.name}
+          >
+            <span>{playlist.name}</span><span class="count">{whole.format(playlist.tracks)}</span>
+          </button>
+        {/each}
+      </div>
       <div class="bring">
         <input bind:this={picker} type="file" accept=".json,application/json" onchange={importFile} hidden />
-        <button type="button" class="import" disabled={importing} onclick={() => picker?.click()}>
+        <button type="button" class="plain-button" disabled={importing} onclick={() => picker?.click()}>
           {importing ? "Importing…" : "Import a library…"}
         </button>
-        <p>From Stash on your phone (Export for Stash on the web) or the web player (Save a backup).</p>
+        <button type="button" class="plain-button" onclick={saveFile}>Save a library file</button>
+        <p>One file carries likes, playlists and plays between this computer, Stash on your phone and the web player.</p>
       </div>
     </nav>
   {/if}
 
   <div class="content">
-    {#if imported}
-      <p class="imported" class:trouble={imported.trouble} role="status">
-        <span>{imported.text}</span>
-        <button type="button" onclick={() => (imported = null)} aria-label="Close this message">
+    {#if notice}
+      <p class="notice" class:trouble={notice.trouble} role="status">
+        <span>{notice.text}</span>
+        <button type="button" class="act" onclick={() => (notice = null)} aria-label="Close this message">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6 10.6 12 5 6.4z" /></svg>
         </button>
       </p>
     {/if}
+    {#if shownPlaylist && resultsFor === null}
+      <div class="about">
+        {#if editing?.kind === "rename"}
+          <form onsubmit={finishEditing}>
+            <!-- svelte-ignore a11y_autofocus -->
+            <input type="text" bind:value={editing.name} maxlength="100" aria-label="The playlist's name" autofocus onkeydown={(e) => e.key === "Escape" && (editing = null)} />
+            <button type="submit" class="plain-button">Save</button>
+            <button type="button" class="plain-button" onclick={() => (editing = null)}>Cancel</button>
+          </form>
+        {:else if editing?.kind === "delete"}
+          <span class="ask">Delete {shownPlaylist.name}? Its songs stay in your library.</span>
+          <button type="button" class="plain-button" onclick={() => finishEditing()}>Delete</button>
+          <button type="button" class="plain-button" onclick={() => (editing = null)}>Keep</button>
+        {:else}
+          <h2>{shownPlaylist.name}</h2>
+          <span class="count">{many(shownPlaylist.tracks, "song", "songs")}{shownPlaylist.followed ? " · a shared mix" : ""}</span>
+          <button type="button" class="plain-button" onclick={() => (editing = { kind: "rename", name: shownPlaylist.name })}>Rename</button>
+          <button type="button" class="plain-button" onclick={() => (editing = { kind: "delete", name: "" })}>Delete</button>
+        {/if}
+      </div>
+    {/if}
     <div class="columns" aria-hidden="true">
-      <span class="n">#</span><span>Title</span><span>Artist</span><span>Album</span><span>Format</span><span class="time">Time</span>
+      <span class="n">#</span><span>Title</span><span>Artist</span><span>Album</span><span>Format</span><span class="time">Time</span><span></span>
     </div>
 
     <main>
@@ -493,6 +695,20 @@
   <Addons {addons} onChange={(changed) => (addons = changed)} onClose={() => (addonsOpen = false)} />
 {/if}
 
+{#if menu}
+  <RowMenu
+    x={menu.x}
+    y={menu.y}
+    {playlists}
+    place={menuPlace}
+    onAdd={addTo}
+    onCreate={addToNew}
+    onMove={moveBy}
+    onRemove={takeOut}
+    onClose={() => (menu = null)}
+  />
+{/if}
+
 <svelte:window onkeydown={toggle} />
 
 <style>
@@ -507,14 +723,17 @@
     font-size: 18px;
     font-weight: 650;
   }
-  input[type="search"] {
-    flex: 0 1 360px;
+  input[type="search"],
+  input[type="text"] {
     padding: 7px 12px;
     border-radius: 8px;
     border: 1px solid var(--line);
     background: var(--field);
     color: inherit;
     font: inherit;
+  }
+  input[type="search"] {
+    flex: 0 1 360px;
   }
   input:focus-visible,
   button:focus-visible {
@@ -531,16 +750,39 @@
     color: var(--text);
     cursor: pointer;
   }
-  .addons,
-  .import {
+  .plain-button {
     padding: 6px 12px;
     border: 1px solid var(--line);
     border-radius: 8px;
     background: var(--field);
   }
-  .addons:hover,
-  .import:hover:not(:disabled) {
+  .plain-button:hover:not(:disabled) {
     background: var(--hover);
+  }
+  .plain-button:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+  :global(.act) {
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--quiet);
+    cursor: pointer;
+  }
+  :global(.act:hover) {
+    background: var(--line);
+    color: var(--text);
+  }
+  :global(.act svg) {
+    width: 15px;
+    height: 15px;
+    fill: currentColor;
   }
   .body {
     flex: 1;
@@ -555,8 +797,7 @@
     padding: 0 8px 8px;
     border-right: 1px solid var(--line);
   }
-  nav > button,
-  .lists button {
+  .place {
     display: flex;
     justify-content: space-between;
     gap: 8px;
@@ -567,17 +808,15 @@
     background: transparent;
     text-align: left;
   }
-  nav > button span:first-child,
-  .lists button span:first-child {
+  .place span:first-child {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  nav > button:hover,
-  .lists button:hover {
+  .place:hover {
     background: var(--hover);
   }
-  nav button.here {
+  .place.here {
     background: var(--field);
     font-weight: 600;
   }
@@ -586,24 +825,33 @@
     font-variant-numeric: tabular-nums;
     font-weight: 400;
   }
+  .heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 2px 2px 0;
+  }
+  .naming {
+    padding: 2px 0 6px;
+  }
+  .naming input {
+    width: 100%;
+    box-sizing: border-box;
+  }
   .lists {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
   }
   .bring {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
     margin-top: auto;
     padding-top: 8px;
   }
-  .import {
-    width: 100%;
-  }
-  .import:disabled {
-    opacity: 0.6;
-    cursor: default;
-  }
   .bring p {
-    margin: 6px 2px 0;
+    margin: 0 2px;
     color: var(--quiet);
     font-size: 11px;
   }
@@ -613,41 +861,54 @@
     display: flex;
     flex-direction: column;
   }
-  .imported {
+  .notice {
     display: flex;
     align-items: center;
     gap: 8px;
     margin: 0;
-    padding: 8px 8px 8px 16px;
+    padding: 6px 8px 6px 16px;
     border-bottom: 1px solid var(--line);
     background: var(--field);
   }
-  .imported span {
+  .notice span {
     flex: 1;
   }
-  .imported.trouble {
+  .notice.trouble {
     color: var(--warn);
   }
-  .imported button {
-    display: grid;
-    place-items: center;
-    width: 22px;
-    height: 22px;
-    padding: 0;
-    border: none;
-    border-radius: 50%;
-    background: transparent;
-    color: var(--quiet);
+  .about,
+  .about form {
+    display: flex;
+    align-items: center;
+    gap: 10px;
   }
-  .imported svg {
-    width: 14px;
-    height: 14px;
-    fill: currentColor;
+  .about {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  .about h2 {
+    padding: 0;
+    font-size: 16px;
+    font-weight: 650;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .about .count,
+  .about .ask {
+    margin-right: auto;
+  }
+  .about form {
+    flex: 1;
+  }
+  .about form input {
+    flex: 0 1 320px;
   }
   .columns,
   :global(.row) {
     display: grid;
-    grid-template-columns: 64px minmax(0, 3fr) minmax(0, 2fr) minmax(0, 2fr) 110px 56px;
+    grid-template-columns: 64px minmax(0, 3fr) minmax(0, 2fr) minmax(0, 2fr) 110px 56px 60px;
     gap: 12px;
     align-items: center;
     padding: 0 16px;
@@ -674,7 +935,7 @@
     color: var(--soft);
   }
   nav h2 {
-    padding: 16px 8px 6px;
+    padding: 6px 8px;
   }
   :global(.row span) {
     white-space: nowrap;
@@ -701,12 +962,23 @@
     color: var(--accent);
     font-weight: 600;
   }
-  :global(.row .liked) {
-    width: 12px;
-    height: 12px;
-    margin-left: 6px;
-    vertical-align: -1px;
-    fill: var(--accent);
+  :global(.row .acts) {
+    display: flex;
+    justify-content: flex-end;
+    gap: 2px;
+    overflow: visible;
+  }
+  /* The buttons beside a song show when the row is pointed at or one of them has the keyboard; a like always shows. */
+  :global(.row .act) {
+    opacity: 0;
+  }
+  :global(.row:hover .act),
+  :global(.row .act:focus-visible),
+  :global(.row .act.on) {
+    opacity: 1;
+  }
+  :global(.row .act.on) {
+    color: var(--accent);
   }
   :global(.row:hover) {
     background: var(--hover);
