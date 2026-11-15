@@ -1,6 +1,8 @@
 //! `stashd`: the Stash desktop core without a window. For now it makes a test library and measures it; it will
 //! grow the audio engine, the add-on client and the local API that every shell talks to.
 
+mod output_check;
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -41,6 +43,18 @@ enum Command {
         #[arg(long)]
         bench_out: Option<PathBuf>,
     },
+    /// Play a moment of silence at several formats and report what the sound card opened at for each.
+    OutputCheck {
+        /// The libmpv file to use (else STASH_MPV_LIBRARY, else one beside this program).
+        #[arg(long)]
+        mpv: Option<PathBuf>,
+        /// Take the device for Stash alone. Other programs are silent while each file plays.
+        #[arg(long)]
+        exclusive: bool,
+        /// Also print the audio output's own log lines.
+        #[arg(long)]
+        verbose: bool,
+    },
     /// Measure opening, searching and paging a library, as a list or grid would use it.
     Bench {
         #[arg(long)]
@@ -55,6 +69,11 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Synth { db, tracks, seed } => synth_library(&db, tracks, seed),
         Command::Bench { db, json } => bench(&db, json),
+        Command::OutputCheck {
+            mpv,
+            exclusive,
+            verbose,
+        } => output_check::run(mpv, exclusive, verbose),
         Command::Serve {
             db,
             ui,

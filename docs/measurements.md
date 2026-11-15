@@ -3,7 +3,7 @@
 Milestone 1 asks four questions, each answered with numbers on real hardware:
 
 1. Does a 100,000-track library open, search and page fast enough that a list never waits? **Measured below.**
-2. Does the audio engine play gapless, and in an exclusive bit-perfect mode? **Gapless and bit-exact output: measured below. Exclusive mode on a real device: not yet.**
+2. Does the audio engine play gapless, and in an exclusive bit-perfect mode? **Measured below, exclusive mode on one real device included.**
 3. Does a list of 100,000 rows and an album grid scroll smoothly in the window? **The track list: measured below, in a browser window and in the desktop shell. The album grid: not yet.**
 4. What do start-up time and memory look like for the whole app? **Measured below.**
 
@@ -59,9 +59,22 @@ The engine is libmpv (client API 2.6, the build `scripts/fetch-mpv.ps1` pins), l
 | What does a file that cannot be opened do? | A missing file followed by a real one. | The missing one ends with an error and the next one plays. |
 | Is a join between two add-on streams gapless? | A small add-on server on the same computer is added by its link, searched, and asked for two streams (the same two halves of the signal, served over HTTP). The two stream URLs are played one after the other. `tests/addon_stream.rs` | The same result as for files: the uncut signal sample for sample, the output opened once. |
 
+### On a real sound card
+
+`stashd output-check` plays half a second of digital silence at four formats and reports what the audio output opened at. On the test machine's sound card, a basic USB audio device, through WASAPI:
+
+| File | Shared mode | Exclusive mode |
+|---|---|---|
+| 16-bit 44.1 kHz | 48 kHz float (resampled by the system mixer's format) | **16-bit 44.1 kHz**, the file's own format |
+| 16-bit 48 kHz | 48 kHz float | **16-bit 48 kHz**, the file's own format |
+| 24-bit 96 kHz | 48 kHz float (resampled) | 16-bit 48 kHz: the device refuses every 24-bit and every 96 kHz format |
+| 24-bit 192 kHz | 48 kHz float (resampled) | 16-bit 48 kHz, for the same reason |
+
+So exclusive mode does what it is for: with nothing else in the path, a CD-quality file reaches the device in its own format, where shared mode converts everything to the mixer's 48 kHz. And when the hardware cannot take a format, the engine says which one it fell back to. That is what a signal-path display has to show: not "lossless" as labelled, but what was opened.
+
 ### Not covered yet
 
-- **Exclusive mode on a real device.** These measurements stop at the engine's output stream. Whether WASAPI exclusive mode opens at each track's own rate, and what it does to other programs' sound, has to be checked on a sound card.
+- **Exclusive mode on more devices.** It is checked on one basic USB device (below). A device that accepts hi-res formats, and what a format change mid-playlist sounds like on real hardware, are not.
 - **Compressed formats.** WAV has no encoder delay. Gapless FLAC should behave the same; AAC, MP3 and Opus carry padding the decoder must trim, and need their own test files.
 - **Streams over a real network.** The add-on test runs on one computer, where the next stream is ready at once. Over the internet the join depends on the next stream being open in time (`prefetch-playlist`); that needs a slow server to measure against. DASH and HLS streams are not measured either.
 - **Crossfade.** mpv has none; it needs a mixer of our own.
