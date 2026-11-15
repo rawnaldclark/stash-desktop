@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
@@ -220,6 +220,23 @@ const V8: &str = "
     ) WITHOUT ROWID;
 ";
 
+/// Songs to save as files, and saved: queued, saving, saved (`path`, from `addon` at `tier`, `bytes` long) or
+/// failed (`error` in words). Times in Unix milliseconds.
+const V9: &str = "
+    CREATE TABLE downloads(
+        track_id   INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+        state      TEXT NOT NULL CHECK (state IN ('queued', 'saving', 'saved', 'failed')),
+        path       TEXT,
+        addon      TEXT,
+        tier       TEXT,
+        bytes      INTEGER,
+        error      TEXT,
+        asked_at   INTEGER NOT NULL,
+        saved_at   INTEGER
+    );
+    CREATE INDEX downloads_state ON downloads(state, asked_at);
+";
+
 /// Opens (or creates) the library at `path` and migrates it to [`SCHEMA_VERSION`].
 pub fn open(path: &std::path::Path) -> Result<Connection> {
     prepare(Connection::open(path)?)
@@ -306,6 +323,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V8)?;
         tx.pragma_update(None, "user_version", 8)?;
+        tx.commit()?;
+    }
+    if found < 9 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V9)?;
+        tx.pragma_update(None, "user_version", 9)?;
         tx.commit()?;
     }
     Ok(())

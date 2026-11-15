@@ -66,7 +66,7 @@ pub struct Options {
     pub play_counts_between_seconds: Option<(f64, f64)>,
 }
 
-type Reply = Response<std::io::Cursor<Vec<u8>>>;
+pub(crate) type Reply = Response<std::io::Cursor<Vec<u8>>>;
 
 fn header(name: &str, value: &str) -> Header {
     Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("a valid header")
@@ -91,11 +91,11 @@ fn reply_picture(content_type: &str, body: Vec<u8>) -> Reply {
         .with_header(header("X-Content-Type-Options", "nosniff"))
 }
 
-fn reply_json(status: u16, value: Value) -> Reply {
+pub(crate) fn reply_json(status: u16, value: Value) -> Reply {
     reply(status, "application/json", value.to_string().into_bytes())
 }
 
-fn refuse(status: u16, why: &str) -> Reply {
+pub(crate) fn refuse(status: u16, why: &str) -> Reply {
     reply_json(status, json!({ "error": { "message": why } }))
 }
 
@@ -121,7 +121,7 @@ fn capped(text: &str) -> String {
 }
 
 /// An add-on the listener added, as the core holds it while it runs.
-struct Loaded {
+pub(crate) struct Loaded {
     stored: StoredAddon,
     /// Ready to be asked, or why it cannot be (what was kept no longer passes the checks).
     addon: std::result::Result<Addon, String>,
@@ -153,7 +153,7 @@ impl Loaded {
 }
 
 /// The listener's add-ons, in the listener's order.
-type Registry = Arc<RwLock<Vec<Arc<Loaded>>>>;
+pub(crate) type Registry = Arc<RwLock<Vec<Arc<Loaded>>>>;
 
 fn load_addons(library: &Library) -> Result<Vec<Arc<Loaded>>> {
     Ok(library
@@ -184,10 +184,130 @@ fn stream_from(addon: &Addon, id: &str, track: &str) -> std::result::Result<Loca
 /// listener's add-ons in their order: the name an add-on gave the song before is tried first, else the add-on is
 /// asked whether it has the song (the contract's `resolve`: which of its tracks is the same song is the add-on's to
 /// say), and an add-on that can only search is searched for it ([`matching`]). The first add-on that gives a stream wins, and the name it gave is kept for next time.
-fn resolver(registry: Registry, library: Arc<Mutex<Library>>) -> Resolver {
-    // What an add-on was found not to have, and when: (the song, the add-on). It is not asked again for a while, so
-    // a queue of songs it lacks does not spend the listener's allowance there on the same answers.
-    let lacks: Mutex<HashMap<(i64, String), Instant>> = Mutex::new(HashMap::new());
+/// What each add-on was found not to have, and when: (the song, the add-on). It is not asked again for a while, so a
+/// queue of songs it lacks does not spend the listener's allowance there on the same answers.
+#[derive(Default)]
+pub(crate) struct Lacks(Mutex<HashMap<(i64, String), Instant>>);
+
+/// Asks the listener's add-ons that can (`can`) for the library's song `id`, in the listener's order, and does `act`
+/// with the first that has it: the add-on's own name for the song is tried first, then the add-on is asked whether
+/// it has the song (or searched, when it can only be searched; a result is taken only when it is the same song by
+/// the contract's rule). Answers what `act` gave and which add-on gave it. `none` says why when no add-on can.
+pub(crate) fn through_addons<T>(
+    registry: &Registry,
+    library: &Mutex<Library>,
+    lacks: &Lacks,
+    id: i64,
+    none: &str,
+    can: impl Fn(&Addon) -> bool,
+    act: impl Fn(&Addon, &str, &str) -> std::result::Result<T, AddonError>,
+) -> std::result::Result<(T, String), Failure> {
+    let gone = |why: &str| Failure {
+        message: why.to_string(),
+        miss: true,
+    };
+    let described = library
+        .lock()
+        .unwrap()
+        .describe(id)
+        .map_err(|e| Failure {
+            message: e.to_string(),
+            miss: false,
+        })?
+        .ok_or_else(|| gone("it is no longer in the library"))?;
+    let addons: Vec<Arc<Loaded>> = registry
+        .read()
+        .unwrap()
+        .iter()
+        .filter(|a| a.usable().is_some_and(&can))
+        .cloned()
+        .collect();
+    if addons.is_empty() {
+        return Err(gone(none));
+    }
+    // Trouble with an add-on is not "it does not have the song": it is said, and asking again may help.
+    let mut trouble: Option<AddonError> = None;
+    for loaded in &addons {
+        let Some(addon) = loaded.usable() else {
+            continue;
+        };
+        let addon_id = loaded.stored.id.as_str();
+        let known = described
+            .refs
+            .iter()
+            .find(|(source, _)| source == addon_id)
+            .map(|(_, theirs)| theirs.clone());
+        if let Some(track) = &known {
+            match act(addon, addon_id, track) {
+                Ok(done) => return Ok((done, addon_id.to_string())),
+                // The add-on no longer knows that name: it is forgotten, and the add-on is asked for the song.
+                Err(e) if e.code == Code::NotFound => {
+                    let _ = library.lock().unwrap().drop_ref(id, addon_id);
+                }
+                Err(e) if e.is_miss() => continue,
+                Err(e) => {
+                    trouble = Some(e);
+                    continue;
+                }
+            }
+        }
+        let lacked = (id, addon_id.to_string());
+        if lacks
+            .0
+            .lock()
+            .unwrap()
+            .get(&lacked)
+            .is_some_and(|at| at.elapsed() < MISS_MEMORY)
+        {
+            continue;
+        }
+        let asked = if addon.offers_resource("resolve") {
+            addon.resolve(&described.wanted, None)
+        } else if addon.offers_resource("search") {
+            addon
+                .search(&matching::query(&described.wanted), 20)
+                .map(|found| matching::pick(&described.wanted, &found).cloned())
+        } else {
+            continue;
+        };
+        let track = match asked {
+            Ok(Some(track)) => track,
+            // It does not have the song, or what it answered cannot be this song.
+            Ok(None) => {
+                lacks.0.lock().unwrap().insert(lacked, Instant::now());
+                continue;
+            }
+            Err(e) if e.is_miss() || e.code == Code::InvalidResponse => {
+                lacks.0.lock().unwrap().insert(lacked, Instant::now());
+                continue;
+            }
+            Err(e) => {
+                trouble = Some(e);
+                continue;
+            }
+        };
+        match act(addon, addon_id, &track.id) {
+            Ok(done) => {
+                let _ = library.lock().unwrap().set_ref(id, addon_id, &track.id);
+                return Ok((done, addon_id.to_string()));
+            }
+            Err(e) if e.is_miss() => continue,
+            Err(e) => {
+                trouble = Some(e);
+                continue;
+            }
+        }
+    }
+    Err(match trouble {
+        Some(e) => Failure {
+            message: e.in_words(),
+            miss: false,
+        },
+        None => gone("none of your add-ons has it"),
+    })
+}
+
+fn resolver(registry: Registry, library: Arc<Mutex<Library>>, lacks: Arc<Lacks>) -> Resolver {
     Arc::new(move |item: &QueueItem| {
         let gone = |why: &str| Failure {
             message: why.to_string(),
@@ -210,115 +330,19 @@ fn resolver(registry: Registry, library: Arc<Mutex<Library>>) -> Resolver {
                 miss: e.is_miss(),
             });
         }
-
         let Some(id) = item.id else {
             return Err(gone("it has nowhere to play from"));
         };
-        let described = library
-            .lock()
-            .unwrap()
-            .describe(id)
-            .map_err(|e| Failure {
-                message: e.to_string(),
-                miss: false,
-            })?
-            .ok_or_else(|| gone("it is no longer in the library"))?;
-        let addons: Vec<Arc<Loaded>> = registry
-            .read()
-            .unwrap()
-            .iter()
-            .filter(|a| {
-                a.usable()
-                    .is_some_and(|addon| addon.offers_resource("stream"))
-            })
-            .cloned()
-            .collect();
-        if addons.is_empty() {
-            return Err(gone(
-                "it is not a file here, and there is no add-on to play it from",
-            ));
-        }
-        // Trouble with an add-on is not "it does not have the song": it is said, and asking again may help.
-        let mut trouble: Option<AddonError> = None;
-        for loaded in &addons {
-            let Some(addon) = loaded.usable() else {
-                continue;
-            };
-            let addon_id = loaded.stored.id.as_str();
-            let known = described
-                .refs
-                .iter()
-                .find(|(source, _)| source == addon_id)
-                .map(|(_, theirs)| theirs.clone());
-            if let Some(track) = &known {
-                match stream_from(addon, addon_id, track) {
-                    Ok(located) => return Ok(located),
-                    // The add-on no longer knows that name: it is forgotten, and the add-on is asked for the song.
-                    Err(e) if e.code == Code::NotFound => {
-                        let _ = library.lock().unwrap().drop_ref(id, addon_id);
-                    }
-                    Err(e) if e.is_miss() => continue,
-                    Err(e) => {
-                        trouble = Some(e);
-                        continue;
-                    }
-                }
-            }
-            let lacked = (id, addon_id.to_string());
-            if lacks
-                .lock()
-                .unwrap()
-                .get(&lacked)
-                .is_some_and(|at| at.elapsed() < MISS_MEMORY)
-            {
-                continue;
-            }
-            // The add-on is asked whether it has the song. One that cannot be asked that, but can search, is
-            // searched, and a result is taken only when it is the same song by the contract's rule.
-            let asked = if addon.offers_resource("resolve") {
-                addon.resolve(&described.wanted, None)
-            } else if addon.offers_resource("search") {
-                addon
-                    .search(&matching::query(&described.wanted), 20)
-                    .map(|found| matching::pick(&described.wanted, &found).cloned())
-            } else {
-                continue;
-            };
-            let track = match asked {
-                Ok(Some(track)) => track,
-                // It does not have the song, or what it answered cannot be this song.
-                Ok(None) => {
-                    lacks.lock().unwrap().insert(lacked, Instant::now());
-                    continue;
-                }
-                Err(e) if e.is_miss() || e.code == Code::InvalidResponse => {
-                    lacks.lock().unwrap().insert(lacked, Instant::now());
-                    continue;
-                }
-                Err(e) => {
-                    trouble = Some(e);
-                    continue;
-                }
-            };
-            match stream_from(addon, addon_id, &track.id) {
-                Ok(located) => {
-                    let _ = library.lock().unwrap().set_ref(id, addon_id, &track.id);
-                    return Ok(located);
-                }
-                Err(e) if e.is_miss() => continue,
-                Err(e) => {
-                    trouble = Some(e);
-                    continue;
-                }
-            }
-        }
-        Err(match trouble {
-            Some(e) => Failure {
-                message: e.in_words(),
-                miss: false,
-            },
-            None => gone("none of your add-ons has it"),
-        })
+        through_addons(
+            &registry,
+            &library,
+            &lacks,
+            id,
+            "it is not a file here, and there is no add-on to play it from",
+            |addon| addon.offers_resource("stream"),
+            stream_from,
+        )
+        .map(|(located, _)| located)
     })
 }
 
@@ -331,7 +355,7 @@ fn keep_plays(library: Arc<Mutex<Library>>) -> OnPlay {
     })
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -391,14 +415,18 @@ fn in_all(done: &ScanReport, now: &ScanReport) -> ScanReport {
 }
 
 /// What everything that answers requests shares.
-struct State {
-    library: Arc<Mutex<Library>>,
+pub(crate) struct State {
+    pub(crate) library: Arc<Mutex<Library>>,
     options: Options,
     port: u16,
     /// The player, or the reason there is none (no audio engine found, or it would not start).
     player: std::result::Result<Player, String>,
-    addons: Registry,
+    pub(crate) addons: Registry,
     scanning: Arc<Mutex<Scanning>>,
+    /// What each add-on was found not to have (shared by playing and saving).
+    pub(crate) lacks: Arc<Lacks>,
+    /// Songs being saved as files.
+    pub(crate) saving: crate::saving::Saving,
 }
 
 impl State {
@@ -482,13 +510,18 @@ impl Core {
             .unwrap_or(options.port);
         let addons: Registry = Arc::new(RwLock::new(load_addons(&library)?));
         let library = Arc::new(Mutex::new(library));
+        let lacks = Arc::new(Lacks::default());
         let player = match &options.audio {
             None => Err("this core runs without a player".to_string()),
             Some(output) => match options.mpv.clone().or_else(find_library) {
                 None => Err("the audio engine (libmpv) was not found".to_string()),
                 Some(engine) => {
                     let settings = Settings {
-                        resolver: Some(resolver(Arc::clone(&addons), Arc::clone(&library))),
+                        resolver: Some(resolver(
+                            Arc::clone(&addons),
+                            Arc::clone(&library),
+                            Arc::clone(&lacks),
+                        )),
                         on_play: Some(keep_plays(Arc::clone(&library))),
                         counts_between_seconds: options
                             .play_counts_between_seconds
@@ -530,6 +563,8 @@ impl Core {
                 player,
                 addons,
                 scanning: Arc::new(Mutex::new(Scanning::default())),
+                lacks,
+                saving: crate::saving::Saving::default(),
             },
         })
     }
@@ -560,6 +595,11 @@ impl Core {
                         std::thread::sleep(Duration::from_millis(1000));
                     }
                 });
+            }
+            // Songs to save as files, one at a time.
+            {
+                let (state, stop) = (&state, &stop);
+                scope.spawn(move || crate::saving::run(state, stop));
             }
             for _ in 0..WORKERS {
                 scope.spawn(|| {
@@ -627,7 +667,7 @@ fn answer(state: &State, mut request: Request) -> bool {
 }
 
 /// The body of a request as JSON (an empty body is `{}`).
-fn body_json(request: &mut Request) -> Result<Value> {
+pub(crate) fn body_json(request: &mut Request) -> Result<Value> {
     let mut body = String::new();
     request
         .as_reader()
@@ -1474,6 +1514,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = scan_route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::saving::route(state, request, &path, &param)? {
         return Ok((response, false));
     }
     // One album or one artist: /api/albums/{id}, /api/artists/{id}; the picture of a file: /api/art/track/{id}

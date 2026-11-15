@@ -126,7 +126,12 @@ pub fn manifest(value: &Value) -> Result<Manifest, AddonError> {
         })
         .filter(|word| (1..=100).contains(&word.chars().count()))
         .map(str::to_string);
+    // `allowDownloads` given and set to nothing: never a download source. Absent or null allows downloads.
+    let no_downloads = value
+        .get("allowDownloads")
+        .is_some_and(|v| !v.is_null() && !set(Some(v)));
     Ok(Manifest {
+        no_downloads,
         stash: 1,
         name: text(value.get("name"), 60).unwrap_or_else(|| id.clone()),
         version: text(value.get("version"), 40).unwrap_or_else(|| "0.0.0".to_string()),
@@ -483,6 +488,26 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn songs_are_saved_from_an_eclipse_add_on_unless_it_says_no() {
+        let no = |allow: Option<serde_json::Value>| {
+            let mut m = json!({ "id": "a.b", "resources": ["search", "stream"] });
+            if let Some(allow) = allow {
+                m["allowDownloads"] = allow;
+            }
+            manifest(&m).unwrap().no_downloads
+        };
+        assert!(!no(None));
+        assert!(!no(Some(json!(null))));
+        assert!(!no(Some(json!(true))));
+        assert!(!no(Some(json!("yes"))));
+        assert!(no(Some(json!(false))));
+        assert!(no(Some(json!(0))));
+        assert!(no(Some(json!("false"))));
+        assert!(no(Some(json!("null"))));
+        assert!(no(Some(json!(""))));
+    }
 
     #[test]
     fn an_eclipse_manifest_is_read_as_the_contracts() {

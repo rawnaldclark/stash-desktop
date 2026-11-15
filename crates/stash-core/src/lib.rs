@@ -7,6 +7,7 @@ pub mod addons;
 pub mod audio;
 pub mod covers;
 pub mod db;
+pub mod downloads;
 pub mod eclipse;
 pub mod identity;
 pub mod import;

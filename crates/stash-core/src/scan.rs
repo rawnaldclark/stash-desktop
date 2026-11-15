@@ -151,7 +151,7 @@ fn text(value: Option<Cow<'_, str>>) -> Option<String> {
 }
 
 /// The track a file holds: its tags where it has them, its name where it does not, and what the audio is.
-fn read_track(
+pub(crate) fn read_track(
     path: &Path,
     locator: &str,
     size: u64,

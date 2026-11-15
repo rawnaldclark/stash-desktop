@@ -90,6 +90,251 @@ impl Library {
         Ok(())
     }
 
+    // ---- Downloads
+
+    /// Puts songs on the list to be saved as files: songs of the library that are not files already. A song that
+    /// failed before is tried again; one queued, saving or saved stays as it is. Answers how many were put on it.
+    pub fn ask_downloads(&mut self, ids: &[i64], now_ms: i64) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let mut queued = 0;
+        {
+            let mut ask = tx.prepare(
+                "INSERT INTO downloads(track_id, state, asked_at)
+                 SELECT id, 'queued', ?2 FROM tracks WHERE id = ?1 AND origin <> 'file'
+                 ON CONFLICT(track_id) DO UPDATE SET state = 'queued', error = NULL, asked_at = excluded.asked_at
+                 WHERE downloads.state = 'failed'",
+            )?;
+            for id in ids {
+                queued += ask.execute(params![id, now_ms])?;
+            }
+        }
+        tx.commit()?;
+        Ok(queued)
+    }
+
+    /// The next song to save, now marked as saving; the first asked for first.
+    pub fn next_download(&mut self) -> Result<Option<i64>> {
+        let next: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT track_id FROM downloads WHERE state = 'queued' ORDER BY asked_at, track_id LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(id) = next {
+            self.conn.execute(
+                "UPDATE downloads SET state = 'saving' WHERE track_id = ?1",
+                [id],
+            )?;
+        }
+        Ok(next)
+    }
+
+    /// Songs that were coming in when the program last ended are queued again (what came in is thrown away).
+    pub fn requeue_downloads(&mut self) -> Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE downloads SET state = 'queued' WHERE state = 'saving'",
+            [],
+        )?)
+    }
+
+    pub fn download_failed(&mut self, id: i64, why: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE downloads SET state = 'failed', error = ?2 WHERE track_id = ?1 AND state = 'saving'",
+            params![id, clean_text(why, 300)],
+        )?;
+        Ok(())
+    }
+
+    /// The song `id` is a file now: its row becomes the file's (its likes, playlists, plays and ISRC stay), its
+    /// download is saved. With `cover_inside` the file's own picture is shown before the add-on's cover address, so
+    /// it shows with no network (the address is kept for when the file is given back). False (and nothing changed) when the song was taken off the list meanwhile.
+    pub fn download_saved(
+        &mut self,
+        id: i64,
+        file: &crate::library::NewTrack,
+        saved: &SavedDownload,
+    ) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let still: bool = tx
+            .query_row(
+                "SELECT COUNT(*) FROM downloads WHERE track_id = ?1 AND state = 'saving'",
+                [id],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)?;
+        if !still {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE tracks SET origin = 'file', addon_id = NULL, locator = ?2, codec = ?3, sample_rate = ?4,
+                               bit_depth = ?5, file_size = ?6, file_mtime = ?7, missing_since = NULL,
+                               cover = CASE WHEN ?9 THEN 1 END,
+                               duration_ms = CASE WHEN duration_ms > 0 THEN duration_ms ELSE ?8 END
+             WHERE id = ?1",
+            params![
+                id,
+                file.locator,
+                file.codec,
+                file.sample_rate,
+                file.bit_depth,
+                file.file_size.map(|s| s as i64),
+                file.file_mtime,
+                file.duration_ms as i64,
+                saved.cover_inside,
+            ],
+        )?;
+        tx.execute(
+            "UPDATE downloads SET state = 'saved', path = ?2, addon = ?3, tier = ?4, bytes = ?5, error = NULL,
+                                  saved_at = ?6
+             WHERE track_id = ?1",
+            params![
+                id,
+                file.locator,
+                saved.addon,
+                saved.tier,
+                file.file_size.map(|s| s as i64),
+                saved.at_ms
+            ],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Takes songs off the list. A saved one goes back to being a song the add-ons play, and its file is answered
+    /// so it can be deleted; one queued, saving or failed is just taken off.
+    pub fn forget_downloads(&mut self, ids: &[i64]) -> Result<Vec<String>> {
+        let tx = self.conn.transaction()?;
+        let mut files = Vec::new();
+        {
+            let mut read = tx.prepare("SELECT state, path FROM downloads WHERE track_id = ?1")?;
+            let mut back = tx.prepare(
+                "UPDATE tracks SET origin = 'described', locator = '', codec = NULL, sample_rate = NULL,
+                                   bit_depth = NULL, file_size = NULL, file_mtime = NULL, missing_since = NULL,
+                                   cover = NULL
+                 WHERE id = ?1 AND origin = 'file' AND locator = ?2",
+            )?;
+            let mut drop = tx.prepare("DELETE FROM downloads WHERE track_id = ?1")?;
+            for id in ids {
+                let found: Option<(String, Option<String>)> = read
+                    .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .optional()?;
+                let Some((state, path)) = found else { continue };
+                if state == "saved"
+                    && let Some(path) = path
+                {
+                    back.execute(params![id, path])?;
+                    files.push(path);
+                }
+                drop.execute([id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(files)
+    }
+
+    /// The cover address another Stash or an add-on gave for the song `id`.
+    pub fn art_url_of(&self, id: i64) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT art_url FROM tracks WHERE id = ?1")?
+            .query_row([id], |r| r.get(0))
+            .optional()?
+            .flatten())
+    }
+
+    /// The song's place on its album, when the library knows it.
+    pub fn track_number(&self, id: i64) -> Result<Option<u32>> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT track_no FROM tracks WHERE id = ?1 AND track_no > 0")?
+            .query_row([id], |r| r.get(0))
+            .optional()?)
+    }
+
+    /// Whether the song `id` is still to be saved (the one coming in checks this, to stop when taken off).
+    pub fn download_wanted(&self, id: i64) -> Result<bool> {
+        Ok(self
+            .conn
+            .prepare_cached(
+                "SELECT COUNT(*) FROM downloads WHERE track_id = ?1 AND state = 'saving'",
+            )?
+            .query_row([id], |r| r.get::<_, i64>(0))?
+            > 0)
+    }
+
+    /// Failed songs back on the list (all of them when `ids` is empty).
+    pub fn retry_downloads(&mut self, ids: &[i64], now_ms: i64) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(self.conn.execute(
+                "UPDATE downloads SET state = 'queued', error = NULL, asked_at = ?1 WHERE state = 'failed'",
+                [now_ms],
+            )?);
+        }
+        let mut n = 0;
+        for id in ids {
+            n += self.conn.execute(
+                "UPDATE downloads SET state = 'queued', error = NULL, asked_at = ?2 WHERE track_id = ?1 AND state = 'failed'",
+                params![id, now_ms],
+            )?;
+        }
+        Ok(n)
+    }
+
+    /// How many songs are queued, saving, saved and failed.
+    pub fn download_counts(&self) -> Result<DownloadCounts> {
+        let mut counts = DownloadCounts::default();
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT state, COUNT(*) FROM downloads GROUP BY state")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
+        })?;
+        for row in rows {
+            let (state, n) = row?;
+            match state.as_str() {
+                "queued" => counts.queued = n,
+                "saving" => counts.saving = n,
+                "saved" => counts.saved = n,
+                _ => counts.failed = n,
+            }
+        }
+        Ok(counts)
+    }
+
+    /// A page of the list: the song coming in first, then those waiting (first asked first), those that failed,
+    /// and the saved ones (the newest first).
+    pub fn downloads_at(&self, offset: usize, limit: usize) -> Result<Vec<DownloadRow>> {
+        let sql = format!(
+            "SELECT {}, d.state, d.error, d.bytes, d.tier, d.addon, d.saved_at
+             FROM (SELECT * FROM downloads
+                   ORDER BY CASE state WHEN 'saving' THEN 0 WHEN 'queued' THEN 1 WHEN 'failed' THEN 2 ELSE 3 END,
+                            CASE WHEN state = 'saved' THEN -saved_at ELSE asked_at END, track_id
+                   LIMIT ?1 OFFSET ?2) d
+             JOIN tracks t ON t.id = d.track_id {}
+             ORDER BY CASE d.state WHEN 'saving' THEN 0 WHEN 'queued' THEN 1 WHEN 'failed' THEN 2 ELSE 3 END,
+                      CASE WHEN d.state = 'saved' THEN -d.saved_at ELSE d.asked_at END, d.track_id",
+            crate::library::TRACK_COLUMNS_FOR_LISTS,
+            crate::library::TRACK_JOINS_FOR_LISTS,
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt
+            .query_map(params![limit as i64, offset as i64], |r| {
+                Ok(DownloadRow {
+                    track: crate::library::track_row_for_lists(r)?,
+                    state: r.get(17)?,
+                    error: r.get(18)?,
+                    bytes: r.get::<_, Option<i64>>(19)?.map(|b| b as u64),
+                    tier: r.get(20)?,
+                    addon: r.get(21)?,
+                    saved_at_ms: r.get(22)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     pub fn setting(&self, key: &str) -> Result<Option<String>> {
         Ok(self
             .conn
@@ -465,4 +710,36 @@ pub struct KeptLyrics {
     pub lyrics: Option<crate::lyrics::Lyrics>,
     pub via: Option<String>,
     pub at: i64,
+}
+
+/// What a finished download came from.
+#[derive(Debug, Clone)]
+pub struct SavedDownload {
+    pub addon: String,
+    pub tier: Option<String>,
+    pub at_ms: i64,
+    /// The file carries its cover now.
+    pub cover_inside: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct DownloadCounts {
+    pub queued: u64,
+    pub saving: u64,
+    pub saved: u64,
+    pub failed: u64,
+}
+
+/// A song on the downloads list.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct DownloadRow {
+    #[serde(flatten)]
+    pub track: crate::library::TrackRow,
+    /// "queued", "saving", "saved" or "failed".
+    pub state: String,
+    pub error: Option<String>,
+    pub bytes: Option<u64>,
+    pub tier: Option<String>,
+    pub addon: Option<String>,
+    pub saved_at_ms: Option<i64>,
 }

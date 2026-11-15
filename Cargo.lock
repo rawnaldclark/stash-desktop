@@ -3815,6 +3815,8 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",
+ "dirs",
+ "lofty",
  "rfd",
  "serde",
  "serde_json",

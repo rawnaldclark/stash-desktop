@@ -209,7 +209,7 @@ impl DemoAddon {
                     "version": env!("CARGO_PKG_VERSION"),
                     "kind": "server",
                     "description": "A folder of your own files, served as an add-on on this computer.",
-                    "resources": ["search", "resolve", "stream", "lyrics"],
+                    "resources": ["search", "resolve", "stream", "download", "lyrics"],
                     "stream": { "cors": false, "manifests": ["none"], "tiers": ["high", "lossless", "hires"] },
                 }),
             ));
@@ -255,7 +255,10 @@ impl DemoAddon {
             same.sort_by_key(|row| row.id);
             let item = same.first().map(|row| row_json(row, self.eclipse));
             let _ = request.respond(answer(200, json!({ "item": item })));
-        } else if let Some(id) = path.strip_prefix("/stream/") {
+        } else if let Some(id) = path
+            .strip_prefix("/stream/")
+            .or_else(|| path.strip_prefix("/download/").filter(|_| !self.eclipse))
+        {
             std::thread::sleep(self.delay);
             let Some(row) = id.parse::<i64>().ok().and_then(|id| self.rows.get(&id)) else {
                 let _ = request.respond(refusal(404, "not_found", "no such track"));

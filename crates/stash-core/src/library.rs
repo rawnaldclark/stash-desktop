@@ -169,11 +169,13 @@ pub struct StoredAddon {
 /// ([`Library::search`]). Ranking 2,000 rows takes a few milliseconds; ranking 50,000 took about 170 ms.
 pub const RANK_CAP: usize = 2_000;
 
-/// A track's picture as an address: the one another Stash gave for it, else, for a file that is here and is not
-/// known to have no picture, the core's own address for the file's picture ([`crate::covers::ADDRESS`]).
+/// A track's picture as an address: a file's own when it is known to have one (a saved song), else the one another
+/// Stash or an add-on gave for it, else, for a file that is here and is not known to have no picture, the core's own
+/// address for the file's picture ([`crate::covers::ADDRESS`]).
 macro_rules! art {
     () => {
-        "COALESCE(t.art_url, CASE WHEN t.origin = 'file' AND t.missing_since IS NULL AND IFNULL(t.cover, 1) <> 0 THEN '/api/art/track/' || t.id END)"
+        "CASE WHEN t.origin = 'file' AND t.missing_since IS NULL AND t.cover = 1 THEN '/api/art/track/' || t.id
+              ELSE COALESCE(t.art_url, CASE WHEN t.origin = 'file' AND t.missing_since IS NULL AND IFNULL(t.cover, 1) <> 0 THEN '/api/art/track/' || t.id END) END"
     };
 }
 
@@ -230,6 +232,12 @@ fn artist_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArtistRow> {
 }
 const TRACK_JOINS: &str =
     "JOIN artists a ON a.id = t.artist_id LEFT JOIN albums al ON al.id = t.album_id";
+/// The same, for the lists kept in `lists.rs` (17 columns, read by [`track_row_for_lists`]).
+pub(crate) const TRACK_COLUMNS_FOR_LISTS: &str = TRACK_COLUMNS;
+pub(crate) const TRACK_JOINS_FOR_LISTS: &str = TRACK_JOINS;
+pub(crate) fn track_row_for_lists(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackRow> {
+    track_row(r)
+}
 
 fn track_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackRow> {
     Ok(TrackRow {

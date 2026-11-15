@@ -2143,3 +2143,145 @@ fn lyrics_come_from_the_file_then_the_add_on_and_are_kept() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn songs_from_add_ons_are_saved_as_files_and_given_back() {
+    let dir = std::env::temp_dir().join(format!("stash-api-downloads-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (served, saved) = (dir.join("Served"), dir.join("Saved"));
+    std::fs::create_dir_all(&served).unwrap();
+    silence(&served.join("echo.wav"));
+    silence(&served.join("foxtrot.wav"));
+    let addon = DemoAddon::bind(&served, 0, Duration::ZERO).unwrap();
+    let eclipse = DemoAddon::bind_as(&served, 0, Duration::ZERO, true).unwrap();
+    let (link, eclipse_link) = (addon.link(), eclipse.link());
+    std::thread::spawn(move || addon.run());
+    std::thread::spawn(move || eclipse.run());
+    let core = Core::bind(Options {
+        db: dir.join("library.db"),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: None,
+        mpv: None,
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    let folder = saved.to_string_lossy().into_owned();
+    assert_eq!(
+        client.post("/api/downloads/folder", json!({ "folder": folder }))["folder"].as_str(),
+        Some(folder.as_str())
+    );
+    client.post("/api/addons", json!({ "link": link }));
+    client.post("/api/addons", json!({ "link": eclipse_link }));
+    // A song an add-on found, kept in the library.
+    let keep = |addon: &str, title: &str| -> i64 {
+        let (_, found) = client.get(&format!(
+            "/api/addons/search?q={title}&addon={addon}&limit=1"
+        ));
+        let track = found["groups"][0]["tracks"][0].clone();
+        client.post(
+            "/api/tracks/keep",
+            json!({ "addon": addon, "track": track }),
+        )["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let until_settled = || -> Value {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let (_, list) = client.get("/api/downloads");
+            let c = &list["counts"];
+            if c["queued"] == 0 && c["saving"] == 0 {
+                return list;
+            }
+            assert!(Instant::now() < deadline, "still saving: {list}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+
+    // Through the contract's download route.
+    let echo = keep("demo.folder", "echo");
+    assert_eq!(
+        client.post("/api/downloads", json!({ "ids": [echo] }))["queued"],
+        1
+    );
+    let list = until_settled();
+    let row = &list["rows"][0];
+    assert_eq!(
+        (
+            row["id"].as_i64(),
+            row["state"].as_str(),
+            row["origin"].as_str(),
+            row["codec"].as_str(),
+            row["addon"].as_str()
+        ),
+        (
+            Some(echo),
+            Some("saved"),
+            Some("file"),
+            Some("pcm"),
+            Some("demo.folder")
+        ),
+        "{list}"
+    );
+    let file = saved.join("Unknown artist").join("echo.wav");
+    assert!(file.is_file(), "{list}");
+    // Its tags say what the library knows it by.
+    {
+        use lofty::file::TaggedFileExt;
+        use lofty::tag::Accessor;
+        let tagged = lofty::read_from_path(&file).unwrap();
+        let tag = tagged.primary_tag().unwrap();
+        assert_eq!(
+            (tag.title().as_deref(), tag.artist().as_deref()),
+            (Some("echo"), Some("Unknown artist"))
+        );
+    }
+    // Asked again: it is a file now, nothing to do.
+    assert_eq!(
+        client.post("/api/downloads", json!({ "ids": [echo] }))["queued"],
+        0
+    );
+
+    // From an add-on made for Eclipse: its stream is the whole file.
+    let foxtrot = keep("demo.folder.eclipse", "foxtrot");
+    client.post("/api/downloads", json!({ "ids": [foxtrot] }));
+    let list = until_settled();
+    assert_eq!(list["counts"]["saved"], 2, "{list}");
+    assert!(saved.join("Unknown artist").join("foxtrot.wav").is_file());
+
+    // Given back: the file goes, its emptied folder with it, and the song plays through the add-ons again.
+    client.post("/api/downloads/remove", json!({ "ids": [echo, foxtrot] }));
+    assert!(!file.exists() && !saved.join("Unknown artist").exists());
+    assert!(saved.is_dir(), "the downloads folder itself stays");
+    let (_, rows) = client.get("/api/search?q=echo&limit=5");
+    assert_eq!(rows["rows"][0]["origin"].as_str(), Some("described"));
+    assert_eq!(
+        client.get("/api/downloads").1["counts"],
+        json!({ "queued": 0, "saving": 0, "saved": 0, "failed": 0 })
+    );
+
+    // With no add-on left that can save it, it fails, and says why.
+    client.post("/api/addons/remove", json!({ "id": "demo.folder" }));
+    client.post("/api/addons/remove", json!({ "id": "demo.folder.eclipse" }));
+    client.post("/api/downloads", json!({ "ids": [echo] }));
+    let list = until_settled();
+    assert_eq!(
+        (
+            list["counts"]["failed"].as_u64(),
+            list["rows"][0]["error"].as_str()
+        ),
+        (Some(1), Some("there is no add-on to save it from")),
+        "{list}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

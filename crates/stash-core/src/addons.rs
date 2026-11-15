@@ -89,6 +89,9 @@ pub struct Manifest {
     /// The add-on's own word for the quality to ask for.
     #[serde(default)]
     pub quality: Option<String>,
+    /// An Eclipse add-on that says its songs are not to be saved (`allowDownloads` set to nothing).
+    #[serde(default)]
+    pub no_downloads: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -394,6 +397,47 @@ impl Addon {
 
     pub fn offers_resource(&self, resource: &str) -> bool {
         self.manifest.resources.iter().any(|r| r == resource)
+    }
+
+    /// Whether songs can be saved from it: an add-on that lists `download`, or one made for Eclipse (whose stream
+    /// is the whole file) that does not say no.
+    pub fn offers_download(&self) -> bool {
+        match self.manifest.dialect {
+            Dialect::Eclipse => self.offers_resource("stream") && !self.manifest.no_downloads,
+            _ => self.offers_resource("download"),
+        }
+    }
+
+    /// A file to keep of one of its tracks (contract section 4.5): one progressive file, the best it has within
+    /// `want`'s tiers. An Eclipse add-on is asked for its stream, which is the whole file.
+    pub fn download(&self, id: &str, want: &StreamRequest) -> Result<StreamInfo> {
+        let want = StreamRequest {
+            deliveries: vec![Delivery::None],
+            ..want.clone()
+        };
+        if self.manifest.dialect == Dialect::Eclipse {
+            if !self.offers_download() {
+                return Err(AddonError::host(
+                    Code::NotFound,
+                    format!("{} does not let its songs be saved", self.manifest.name),
+                ));
+            }
+            return self.stream(id, &want);
+        }
+        self.offers("download")?;
+        let mut url = Url::parse(&format!("{}/download/", self.base))
+            .map_err(|e| AddonError::invalid(e.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|_| AddonError::invalid("the add-on's address has no path"))?
+            .pop_if_empty()
+            .push(id);
+        url.query_pairs_mut()
+            .append_pair("tier", want.tier.as_str())
+            .append_pair("minTier", want.min_tier.as_str())
+            .append_pair("manifest", "none");
+        let info: StreamInfo = get_json(&self.agent, url.as_str())?;
+        check_stream(&info, &want)?;
+        Ok(info)
     }
 
     fn offers(&self, resource: &str) -> Result<()> {
