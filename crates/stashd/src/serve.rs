@@ -266,7 +266,7 @@ pub(crate) fn through_addons<T>(
         } else if addon.offers_resource("search") {
             addon
                 .search(&matching::query(&described.wanted), 20)
-                .map(|found| matching::pick(&described.wanted, &found).cloned())
+                .map(|found| described.pick(&found).cloned())
         } else {
             continue;
         };

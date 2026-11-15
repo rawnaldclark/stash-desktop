@@ -18,6 +18,7 @@ pub mod matching;
 pub mod player;
 pub mod scan;
 pub mod synth;
+pub mod youtube_title;
 
 pub use library::{
     AlbumRow, ArtistRow, Counts, Described, FileState, Library, NewTrack, Origin, PlaylistRow,
