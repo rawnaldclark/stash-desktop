@@ -2,7 +2,7 @@
 //! And the way back out: the library written as the file the Android app and the web player read
 //! (`stash-web-library`, version 1), so a like made here reaches the phone the way a like made there reached here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Map, Value, json};
@@ -88,6 +88,110 @@ impl Library {
             params![key, body, via, at],
         )?;
         Ok(())
+    }
+
+    // ---- Autoplay
+
+    /// Songs to play after `seeds` (the last songs heard; `seed_artists` names their artists, for songs that are not
+    /// the library's): by those artists first, then liked songs, then the most played, then any. None of `queued`,
+    /// none heard since `rested_since_ms`, only files here when `files_only`. At most `n`, the same artist never twice
+    /// in a row when that can be helped.
+    pub fn autoplay_picks(
+        &self,
+        seeds: &[i64],
+        seed_artists: &[String],
+        queued: &HashSet<i64>,
+        rested_since_ms: i64,
+        files_only: bool,
+        n: usize,
+    ) -> Result<Vec<i64>> {
+        let mut artists: Vec<i64> = Vec::new();
+        for id in seeds {
+            if let Some(artist) = self
+                .conn
+                .prepare_cached("SELECT artist_id FROM tracks WHERE id = ?1")?
+                .query_row([id], |r| r.get::<_, i64>(0))
+                .optional()?
+            {
+                artists.push(artist);
+            }
+        }
+        for name in seed_artists {
+            if let Some(artist) = self
+                .conn
+                .prepare_cached("SELECT id FROM artists WHERE name = ?1 COLLATE NOCASE")?
+                .query_row([name], |r| r.get::<_, i64>(0))
+                .optional()?
+            {
+                artists.push(artist);
+            }
+        }
+        artists.sort_unstable();
+        artists.dedup();
+
+        let playable = if files_only {
+            "t.origin = 'file' AND t.missing_since IS NULL"
+        } else {
+            "(t.origin = 'described' OR (t.origin = 'file' AND t.missing_since IS NULL))"
+        };
+        let rested =
+            "NOT EXISTS (SELECT 1 FROM plays p WHERE p.track_id = t.id AND p.played_at_ms >= ?1)";
+        let candidates = |filter: &str, order: &str| -> Result<Vec<(i64, i64)>> {
+            let sql = format!(
+                "SELECT t.id, t.artist_id FROM tracks t WHERE {filter} AND {playable} AND {rested} ORDER BY {order} LIMIT 60"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt
+                .query_map([rested_since_ms], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        };
+        let same_artists = if artists.is_empty() {
+            Vec::new()
+        } else {
+            let list = artists
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            candidates(&format!("t.artist_id IN ({list})"), "random()")?
+        };
+        let liked = candidates("t.liked_at_ms IS NOT NULL", "random()")?;
+        let most_played = candidates("t.play_count > 0", "t.play_count DESC, random()")?;
+        let any = candidates("1", "random()")?;
+
+        let mut picked: Vec<(i64, i64)> = Vec::new();
+        let mut seen: HashSet<i64> = queued.clone();
+        let mut take = |from: &[(i64, i64)], up_to: usize, picked: &mut Vec<(i64, i64)>| {
+            for &(id, artist) in from {
+                if picked.len() >= up_to {
+                    break;
+                }
+                if seen.insert(id) {
+                    picked.push((id, artist));
+                }
+            }
+        };
+        // About half by the artists just heard, the rest from what the listener likes and plays most.
+        take(&same_artists, n.div_ceil(2), &mut picked);
+        take(&liked, n, &mut picked);
+        take(&most_played, n, &mut picked);
+        take(&same_artists, n, &mut picked);
+        take(&any, n, &mut picked);
+
+        // The same artist not twice in a row, when another can come between.
+        let mut ordered: Vec<i64> = Vec::with_capacity(picked.len());
+        let mut last: Option<i64> = None;
+        while !picked.is_empty() {
+            let at = picked
+                .iter()
+                .position(|(_, a)| Some(*a) != last)
+                .unwrap_or(0);
+            let (id, artist) = picked.remove(at);
+            ordered.push(id);
+            last = Some(artist);
+        }
+        Ok(ordered)
     }
 
     // ---- Downloads

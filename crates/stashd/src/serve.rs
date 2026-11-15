@@ -581,12 +581,19 @@ impl Core {
             // The queue is written down as it changes, so the next run opens on it (the program may be closed, or
             // lose power, at any moment: there is no "on the way out" to rely on).
             if let Ok(player) = &state.player {
-                let (library, stop) = (&state.library, &stop);
+                let (library, stop, addons) = (&state.library, &stop, &state.addons);
                 scope.spawn(move || {
                     let mut keeper = crate::kept::Keeper::default();
+                    let mut autoplay = crate::autoplay::Autoplay::default();
                     let mut looks = 0u32;
                     while !stop.load(Ordering::Relaxed) {
                         keeper.look(library, player);
+                        // The last song of the queue started: songs like the last ones are added after it.
+                        let can_ask = addons.read().unwrap().iter().any(|a| {
+                            a.usable()
+                                .is_some_and(|addon| addon.offers_resource("stream"))
+                        });
+                        autoplay.look(library, player, can_ask);
                         // Every few seconds: the output chosen and unplugged is taken back once it is connected.
                         if looks.is_multiple_of(5) {
                             follow_chosen_device(library, player);
@@ -1605,6 +1612,18 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         ),
         (Method::Get, "/api/lyrics") => reply_json(200, lyrics_for(state, &param)?),
         // Whether lyrics are looked up on LRCLIB (on unless switched off).
+        // Whether songs like the last ones are added when the queue ends (on unless switched off).
+        (Method::Get, "/api/settings/autoplay") => {
+            reply_json(200, json!({ "on": crate::autoplay::on(&library()) }))
+        }
+        (Method::Post, "/api/settings/autoplay") => {
+            let on = body_json(request)?
+                .get("on")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            library().set_setting(crate::autoplay::SETTING, if on { "1" } else { "0" })?;
+            reply_json(200, json!({ "on": on }))
+        }
         // Whether closing the window keeps Stash playing in the tray (off unless switched on).
         (Method::Get, "/api/settings/window") => reply_json(
             200,

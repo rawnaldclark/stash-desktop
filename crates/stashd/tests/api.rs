@@ -31,7 +31,12 @@ fn engine() -> Option<PathBuf> {
 
 /// Two seconds of stereo silence, 16-bit 44.1 kHz, with no tags: the scan names it after the file.
 fn silence(path: &Path) {
-    let data: u32 = 44_100 * 2 * 4;
+    silence_for(path, 2);
+}
+
+/// A WAV of `seconds` of silence, 16-bit stereo at 44.1 kHz.
+fn silence_for(path: &Path, seconds: u32) {
+    let data: u32 = 44_100 * 4 * seconds;
     let mut bytes = Vec::with_capacity(44 + data as usize);
     bytes.extend_from_slice(b"RIFF");
     bytes.extend_from_slice(&(36 + data).to_le_bytes());
@@ -2283,5 +2288,89 @@ fn songs_from_add_ons_are_saved_as_files_and_given_back() {
         (Some(1), Some("there is no add-on to save it from")),
         "{list}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn autoplay_goes_on_with_songs_like_the_last_when_the_queue_ends() {
+    let Some(engine) = engine() else {
+        eprintln!("SKIPPED autoplay: no libmpv found");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("stash-api-autoplay-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let music = dir.join("Music");
+    std::fs::create_dir_all(&music).unwrap();
+    for name in ["one", "two", "three", "four"] {
+        silence_for(&music.join(format!("{name}.wav")), 4);
+    }
+    let db = dir.join("library.db");
+    {
+        let mut library = Library::open(&db).unwrap();
+        scan_folder(&mut library, &music, |_| {}).unwrap();
+    }
+    let core = Core::bind(Options {
+        db: db.clone(),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: Some(Output::Silent),
+        mpv: Some(engine),
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    let until = |what: &str, wanted: &dyn Fn(&Value) -> bool| -> Value {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let (_, state) = client.get("/api/player");
+            if wanted(&state) {
+                return state;
+            }
+            assert!(Instant::now() < deadline, "waited for {what}: {state}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    assert_eq!(
+        client.get("/api/settings/autoplay").1,
+        json!({ "on": true })
+    );
+    let one = client.get("/api/search?q=one&limit=1").1["rows"][0]["id"]
+        .as_i64()
+        .unwrap();
+
+    // One song queued: as it starts, the other three follow it (no file can be picked twice).
+    client.post("/api/player/play", json!({ "items": [{ "id": one }] }));
+    let grown = until("the queue to grow", &|s| s["queue_len"].as_u64() == Some(4));
+    assert_eq!(grown["index"].as_u64(), Some(0));
+    let (_, queue) = client.get("/api/player/queue?offset=0&limit=10");
+    let mut ids: Vec<i64> = queue["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["id"].as_i64())
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), 4, "{queue}");
+
+    // Switched off: the queue ends where it ends.
+    assert_eq!(
+        client.post("/api/settings/autoplay", json!({ "on": false })),
+        json!({ "on": false })
+    );
+    client.post("/api/player/play", json!({ "items": [{ "id": one }] }));
+    until("the song to start", &|s| {
+        s["status"] == "playing" && s["queue_len"].as_u64() == Some(1)
+    });
+    std::thread::sleep(Duration::from_millis(2500));
+    assert_eq!(client.get("/api/player").1["queue_len"].as_u64(), Some(1));
     let _ = std::fs::remove_dir_all(&dir);
 }

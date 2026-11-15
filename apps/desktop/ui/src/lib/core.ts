@@ -355,6 +355,9 @@ export function lyrics(song: { id: number } | { title: string; artist: string; a
 	}
 	return get<FoundLyrics>(`/api/lyrics?${q}`, signal);
 }
+/** Whether songs like the last ones are added when the queue ends. */
+export const autoplaySettings = () => get<{ on: boolean }>('/api/settings/autoplay');
+export const setAutoplay = (on: boolean) => post<{ on: boolean }>('/api/settings/autoplay', { on });
 /** Whether closing the window keeps Stash playing in the tray. */
 export const windowSettings = () => get<{ tray: boolean }>('/api/settings/window');
 export const setWindowSettings = (tray: boolean) => post<{ tray: boolean }>('/api/settings/window', { tray });

@@ -138,6 +138,16 @@
 
 	// ---- Lyrics: LRCLIB when no add-on has a song's lyrics (on unless switched off).
 
+	let autoplay = $state<boolean | null>(null);
+	async function setAutoplay(on: boolean) {
+		autoplay = on;
+		try {
+			autoplay = (await core.setAutoplay(on)).on;
+		} catch {
+			autoplay = !on;
+		}
+	}
+
 	let tray = $state<boolean | null>(null);
 	async function setTray(on: boolean) {
 		tray = on;
@@ -167,6 +177,10 @@
 		);
 		void core.windowSettings().then(
 			(s) => (tray = s.tray),
+			() => {}
+		);
+		void core.autoplaySettings().then(
+			(s) => (autoplay = s.on),
 			() => {}
 		);
 		void readOuts();
@@ -229,6 +243,13 @@
 					<p class="set-p">Off, the system mixes Stash with everything else at one fixed rate, and tracks at another rate are resampled.</p>
 					<p class="set-p">The volume here changes the samples themselves. To send a track out untouched, leave it at 100.</p>
 					{#if now}<p class="set-p" role="status"><b>{now}</b></p>{/if}
+				</div>
+				<div class="set-row">
+					<div class="set-lab">
+						<span class="set-name" id="ap-l">Autoplay</span>
+						<span class="set-sub">When the queue ends, the music goes on with songs like the last ones from your library: by the same artists, then your likes and what you play most.</span>
+					</div>
+					<button type="button" class="sw" role="switch" aria-checked={autoplay === true} aria-labelledby="ap-l" disabled={autoplay === null} onclick={() => autoplay !== null && setAutoplay(!autoplay)}><i></i></button>
 				</div>
 				<div class="set-row set-col">
 					<div class="set-lab">
