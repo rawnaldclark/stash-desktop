@@ -84,7 +84,7 @@ class Lib {
 export const L = new Lib();
 
 /** `group`: the menu is for a set of songs (a Home album card): queue, playlist and like act on all of them, `item` (the first) names the artist and album. */
-export type MenuState = { x: number; y: number; item: LibraryItem; group?: LibraryItem[]; queueIndex?: number; queueLength?: number; playlistId?: string; playlistIndex?: number; playlistLength?: number; anchor?: HTMLElement | null };
+export type MenuState = { x: number; y: number; item: LibraryItem; group?: LibraryItem[]; queueIndex?: number; queueLength?: number; playlistId?: string; playlistIndex?: number; playlistLength?: number; /** On Library › Downloads: the song is saved, or on its way. */ download?: 'saved' | 'waiting'; anchor?: HTMLElement | null };
 
 const LS = {
 	get(k: string): string | null {

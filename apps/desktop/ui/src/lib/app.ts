@@ -441,6 +441,33 @@ async function rowOf(item: LibraryItem): Promise<number> {
 	return kept.id;
 }
 
+// ------------------------------------------------------------------------------------------------ saving songs (desktop)
+
+/** Says how a save went: how many songs were put on the list, or that they are on this computer already. */
+function savedWords(queued: number, asked: number): string {
+	if (queued === 0) return asked === 1 ? 'Already on this computer' : 'Already on this computer, or on the way';
+	return queued === 1 ? 'Saving to this computer' : `Saving ${queued} songs to this computer`;
+}
+/** Saves songs to this computer (an add-on's track is kept in the library first). Answers the words to say. */
+export function saveSongs(items: LibraryItem[]): Promise<string> {
+	return change(async () => {
+		const ids: number[] = [];
+		for (const it of items) ids.push(await rowOf(it));
+		return savedWords((await core.saveSongs({ ids })).queued ?? 0, ids.length);
+	});
+}
+export const saveLiked = (): Promise<string> => change(async () => savedWords((await core.saveSongs({ liked: true })).queued ?? 0, 2));
+export const savePlaylist = (id: string): Promise<string> => change(async () => savedWords((await core.saveSongs({ playlist: Number(id) })).queued ?? 0, 2));
+/** Takes songs off the list; saved ones are deleted from this computer and play through the add-ons again. */
+export function unsaveSongs(items: LibraryItem[]): Promise<void> {
+	return change(async () => {
+		const ids = items.map(libIdOf).filter((id): id is number => id !== null);
+		await core.unsaveSongs(ids);
+		await loadLibrary().catch(() => {});
+		changed.update((n) => n + 1);
+	});
+}
+
 const pid = (id: string) => Number(id);
 /** A change shown ahead of the core's answer was refused: the playlist is read again as the core has it. */
 const resync = (id: number): Promise<void> =>

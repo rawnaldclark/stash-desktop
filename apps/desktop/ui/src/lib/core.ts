@@ -317,6 +317,23 @@ export const seekTo = (seconds: number) => told('/api/player/seek', { seconds })
 /** Plays the queue from `index` on. */
 export const jumpTo = (index: number) => told('/api/player/jump', { index });
 export const setVolume = (percent: number) => told('/api/player/volume', { percent });
+// ---- Downloads: songs saved to this computer
+
+export type DownloadState = 'queued' | 'saving' | 'saved' | 'failed';
+export type DownloadRow = TrackRow & { state: DownloadState; error: string | null; bytes: number | null; tier: Tier | null; addon: string | null; saved_at_ms: number | null };
+export type DownloadCounts = { queued: number; saving: number; saved: number; failed: number };
+/** The list (the one coming in first, then those waiting, those not saved, the saved ones newest first), how far the one coming in is, and where songs go. */
+export type Downloads = { rows: DownloadRow[]; counts: DownloadCounts; now: { id: number; bytes: number; of: number | null } | null; folder: string; queued?: number };
+export const downloads = (offset: number, limit: number) => get<Downloads>(`/api/downloads?offset=${offset}&limit=${limit}`);
+/** Puts songs on the list: songs of the library, all the liked songs, or a playlist's. `queued` says how many were not on it or saved already. */
+export const saveSongs = (what: { ids: number[] } | { liked: true } | { playlist: number }) => post<Downloads>('/api/downloads', what);
+/** Takes songs off the list; a saved one's file is deleted and it plays through the add-ons again. */
+export const unsaveSongs = (ids: number[]) => post<Downloads>('/api/downloads/remove', { ids });
+/** Songs that were not saved, back on the list (all of them without `ids`). */
+export const retrySaving = (ids: number[] = []) => post<Downloads>('/api/downloads/retry', { ids });
+/** Where new songs are saved: a folder, or one picked in the system's dialog. */
+export const setDownloadsFolder = (where: { folder: string } | { pick: true }) => post<Downloads>('/api/downloads/folder', where);
+
 // ---- Lyrics
 
 /** A song's lyrics and where they came from (".lrc file", "the file's tags", an add-on's name, "LRCLIB"); `lyrics` null for none. */

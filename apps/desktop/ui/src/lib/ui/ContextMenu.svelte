@@ -3,7 +3,7 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { library, player } from '../app';
+	import { library, player, saveSongs, unsaveSongs } from '../app';
 	import { albumHref, albumLink, artistHref, artistLink } from '../identity';
 	import Icon from './Icon.svelte';
 	import type { IconName } from './icons';
@@ -134,6 +134,16 @@
 				{@render entry(allLiked ? 'favorite' : 'favorite_border', allLiked ? 'Remove from Likes' : `Like all ${targets.length}`, () => run(likeAll))}
 			{:else}
 				{@render entry(L.isLiked(m.item) ? 'favorite' : 'favorite_border', L.isLiked(m.item) ? 'Remove from Likes' : 'Like', () => run(() => L.toggleLike(m.item)))}
+			{/if}
+			{#if m.download === 'saved'}
+				{@render entry('delete', 'Remove from this computer', () => change(() => unsaveSongs(targets), 'Removed from this computer'))}
+			{:else if m.download === 'waiting'}
+				{@render entry('close', 'Don’t save', () => change(() => unsaveSongs(targets), 'Taken off Downloads'))}
+			{:else}
+				{@render entry('download', isGroup ? `Download all ${targets.length}` : 'Download', () => {
+					void saveSongs(targets).then((said) => ui.toast(said), () => {});
+					close();
+				})}
 			{/if}
 			{#if m.queueIndex !== undefined}
 				{#if m.queueIndex > 0}{@render entry('arrow_upward', 'Move up', () => run(() => player.move(m.queueIndex!, m.queueIndex! - 1)))}{/if}

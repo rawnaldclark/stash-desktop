@@ -1,11 +1,12 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { library, player } from '../../lib/app';
+	import { library, player, saveLiked } from '../../lib/app';
 	import type { HistoryEntry, LibraryItem, Playlist } from '../../lib/api';
 	import { measuring } from '../../lib/core';
 	import Albums from '../../lib/desktop/Albums.svelte';
 	import Artists from '../../lib/desktop/Artists.svelte';
+	import Downloads from '../../lib/desktop/Downloads.svelte';
 	import Songs from '../../lib/desktop/Songs.svelte';
 	import { fold } from '../../lib/identity';
 	import Card from '../../lib/ui/Card.svelte';
@@ -14,7 +15,7 @@
 	import { L, LS, ui } from '../../lib/ui/state.svelte';
 	import { dayLabel, songs } from '../../lib/ui/format';
 
-	const TABS = ['songs', 'likes', 'playlists', 'albums', 'artists', 'history'] as const;
+	const TABS = ['songs', 'likes', 'playlists', 'albums', 'artists', 'downloads', 'history'] as const;
 	type Tab = (typeof TABS)[number];
 	const tab = $derived<Tab>(TABS.find((t) => t === page.url.searchParams.get('tab')) ?? 'songs');
 
@@ -24,6 +25,7 @@
 		['playlists', 'Playlists'],
 		['albums', 'Albums'],
 		['artists', 'Artists'],
+		['downloads', 'Downloads'],
 		['history', 'History']
 	];
 
@@ -128,6 +130,7 @@
 			<div class="lib-actions">
 				<button type="button" class="act-play" aria-label="Play your likes" disabled={!likes.length} onclick={() => play(likes)}><Icon name="play_arrow" /></button>
 				<button type="button" class="act-ib" aria-label="Shuffle your likes" title="Shuffle" disabled={!likes.length} onclick={() => { player.setShuffle(true); play(likes); }}><Icon name="shuffle" /></button>
+				<button type="button" class="act-ib" aria-label="Save your likes to this computer" title="Download" onclick={() => void saveLiked().then((said) => ui.toast(said), () => {})}><Icon name="download" /></button>
 				<span class="lib-count">{needle ? `${likes.length} of ${songs(L.likes.length)}` : songs(L.likes.length)}</span>
 			</div>
 			<div class="trk-list">
@@ -159,6 +162,8 @@
 		{#key L.changed}<Albums />{/key}
 	{:else if tab === 'artists'}
 		{#key L.changed}<Artists />{/key}
+	{:else if tab === 'downloads'}
+		<Downloads />
 	{:else if groups.length}
 		{#each groups as g (g.day)}
 			<p class="caps hist-day">{g.day}</p>
