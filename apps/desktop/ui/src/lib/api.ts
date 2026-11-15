@@ -210,6 +210,10 @@ export type PlayerState = {
   tier: Tier | null;
   /** The id of the add-on the stream comes from. */
   served_by: string | null;
+  /** 0 to 100. */
+  volume: number;
+  /** Stash has the sound card to itself. */
+  exclusive: boolean;
   signal: Signal | null;
   error: string | null;
 };
@@ -225,6 +229,8 @@ export const IDLE: PlayerState = {
   duration_ms: 0,
   tier: null,
   served_by: null,
+  volume: 100,
+  exclusive: false,
   signal: null,
   error: null,
 };
@@ -249,6 +255,30 @@ export const setPaused = (paused: boolean) => told("/api/player/pause", { paused
 export const nextTrack = () => told("/api/player/next", {});
 export const previousTrack = () => told("/api/player/previous", {});
 export const seekTo = (seconds: number) => told("/api/player/seek", { seconds });
+export const setVolume = (percent: number) => told("/api/player/volume", { percent });
+/** Takes the sound card for Stash alone, or gives it back. */
+export const setExclusive = (exclusive: boolean) => told("/api/player/exclusive", { exclusive });
+/** Plays the queue from `index` on. */
+export const jumpTo = (index: number) => told("/api/player/jump", { index });
+
+/** A track of the queue, with its place in it. */
+export type QueueRow = { place: number; id: number | null; title: string; artist: string; album: string | null };
+export const queueAt = (offset: number, limit: number) =>
+  get<{ rows: QueueRow[] }>(`/api/player/queue?offset=${offset}&limit=${limit}`).then((r) => r.rows);
+
+// ---- Music folders
+
+export type ScanReport = { files: number; added: number; changed: number; unchanged: number; unreadable: number; missing: number; seconds: number };
+export type Scanning = {
+  scan: { running: boolean; folder: string | null; report: ScanReport | null; error: string | null; finished: number };
+  /** The music folders the listener added. */
+  folders: string[];
+};
+export const scanning = () => get<Scanning>("/api/scan");
+/** Asks for a folder with the system's own dialog; null when the listener closed it. */
+export const pickFolder = () => post<{ folder: string | null }>("/api/scan/pick", {}).then((r) => r.folder);
+/** Scans `folder` and remembers it; without one, scans the remembered folders again. */
+export const scan = (folder?: string) => post<Scanning>("/api/scan", folder ? { folder } : {});
 
 export async function postMeasurement(result: unknown): Promise<void> {
   await fetch(`${core}/api/bench-result`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(result) });

@@ -2,6 +2,8 @@
   import { onMount } from "svelte";
   import Addons from "./lib/Addons.svelte";
   import NowPlaying from "./lib/NowPlaying.svelte";
+  import Queue from "./lib/Queue.svelte";
+  import Sound from "./lib/Sound.svelte";
   import RowMenu from "./lib/RowMenu.svelte";
   import VirtualList from "./lib/VirtualList.svelte";
   import {
@@ -13,12 +15,14 @@
     exportLibrary,
     IDLE,
     importLibrary,
+    jumpTo,
     keepFound,
     likedAt,
     likeTrack,
     measuring,
     moveInPlaylist,
     nextTrack,
+    pickFolder,
     player as fetchPlayer,
     playFound,
     playFrom,
@@ -27,15 +31,20 @@
     playlistTracksAt,
     playPlaylist,
     playTracks,
+    queueAt,
     postMeasurement,
     previousTrack,
     Refused,
     removeFromPlaylist,
     renamePlaylist,
+    scan,
+    scanning as fetchScanning,
     search,
     searchAddon,
     seekTo,
+    setExclusive,
     setPaused,
+    setVolume,
     tracksAt,
     type AddonGroup,
     type AddonInfo,
@@ -45,6 +54,8 @@
     type Imported,
     type PlayerState,
     type PlaylistRow,
+    type QueueRow,
+    type Scanning,
     type TrackRow,
   } from "./lib/api";
   import { measure, type Drawn } from "./lib/bench";
@@ -178,6 +189,77 @@
       notice = trouble(e);
     }
   }
+
+  // ---- Music folders on this computer
+
+  let folders: string[] = $state([]);
+  /** The scan that is running, as the core last told it; null when none is. */
+  let scanned: Scanning["scan"] | null = $state(null);
+
+  const lastPart = (path: string) => path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
+
+  /** Follows a scan until it ends, then takes in what it changed and says so. */
+  async function follow(started: Scanning) {
+    folders = started.folders;
+    scanned = started.scan;
+    while (scanned?.running) {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const state = await fetchScanning().catch(() => null);
+      if (!state) continue;
+      folders = state.folders;
+      scanned = state.scan;
+    }
+    const ended = scanned;
+    scanned = null;
+    counts = await fetchCounts().catch(() => counts);
+    libraryVersion += 1;
+    if (ended?.error) {
+      notice = { text: `The scan stopped: ${ended.error}.`, trouble: true };
+    } else if (ended?.report) {
+      const r = ended.report;
+      const parts = [
+        many(r.added, "new song", "new songs"),
+        r.changed ? `${whole.format(r.changed)} read again` : "",
+        r.missing ? `${whole.format(r.missing)} no longer there` : "",
+        r.unreadable ? `${many(r.unreadable, "file", "files")} that could not be read` : "",
+      ].filter((p) => p !== "");
+      const nothing = r.added === 0 && parts.length === 1;
+      notice = { text: `Scanned ${many(r.files, "file", "files")}: ${nothing ? "nothing has changed" : parts.join(", ")}.`, trouble: false };
+    }
+  }
+
+  async function addFolder() {
+    try {
+      const folder = await pickFolder();
+      if (folder) await follow(await scan(folder));
+    } catch (e) {
+      notice = trouble(e);
+    }
+  }
+
+  async function scanAgain() {
+    try {
+      await follow(await scan());
+    } catch (e) {
+      notice = trouble(e);
+    }
+  }
+
+  // ---- The queue, and the sound
+
+  let queueOpen = $state(false);
+  let queue: QueueRow[] = $state([]);
+  let soundOpen = $state(false);
+
+  // The queue is read when it is opened and whenever it changes or moves on.
+  $effect(() => {
+    void playing.queue_len;
+    void playing.index;
+    if (!queueOpen) return;
+    queueAt(0, 500)
+      .then((rows) => (queue = rows))
+      .catch(() => {});
+  });
 
   // ---- Liking, and playlists
 
@@ -464,6 +546,12 @@
       return;
     }
     [addons, playlists] = await Promise.all([fetchAddons().catch(() => []), fetchPlaylists().catch(() => [])]);
+    // A scan that was running when the window opened is followed to its end.
+    const state = await fetchScanning().catch(() => null);
+    if (state) {
+      folders = state.folders;
+      if (state.scan.running) follow(state);
+    }
   });
 </script>
 
@@ -529,6 +617,7 @@
     <p class="counts">{whole.format(counts.tracks)} tracks · {whole.format(counts.albums)} albums · {whole.format(counts.artists)} artists</p>
   {/if}
   {#if counts && !measuring}
+    <button type="button" class="plain-button" onclick={() => (soundOpen = true)}>Sound</button>
     <button type="button" class="plain-button" onclick={() => (addonsOpen = true)}>Add-ons{addons.length ? ` (${addons.length})` : ""}</button>
   {/if}
 </header>
@@ -566,6 +655,16 @@
         {/each}
       </div>
       <div class="bring">
+        {#if scanned}
+          <p class="scanning" role="status">Scanning {scanned.folder ? lastPart(scanned.folder) : ""}… {whole.format(scanned.report?.files ?? 0)} files</p>
+        {:else}
+          <button type="button" class="plain-button" onclick={addFolder}>Add a music folder…</button>
+          {#if folders.length}
+            <button type="button" class="plain-button" onclick={scanAgain} title={folders.join("\n")}>
+              Scan {folders.length === 1 ? lastPart(folders[0]) : `${folders.length} folders`} again
+            </button>
+          {/if}
+        {/if}
         <input bind:this={picker} type="file" accept=".json,.zip,.db,application/json,application/zip" onchange={importFile} hidden />
         <button type="button" class="plain-button" disabled={importing} onclick={() => picker?.click()}>
           {importing ? "Importing…" : "Import a library…"}
@@ -680,6 +779,9 @@
       {/if}
     </main>
   </div>
+  {#if queueOpen}
+    <Queue rows={queue} current={playing.index} total={playing.queue_len} onJump={(place) => act(jumpTo(place))} onClose={() => (queueOpen = false)} />
+  {/if}
 </div>
 
 <NowPlaying
@@ -689,7 +791,14 @@
   onNext={() => act(nextTrack())}
   onPrevious={() => act(previousTrack())}
   onSeek={(seconds) => act(seekTo(seconds))}
+  onVolume={(percent) => act(setVolume(percent))}
+  onQueue={() => (queueOpen = !queueOpen)}
+  {queueOpen}
 />
+
+{#if soundOpen}
+  <Sound player={playing} onExclusive={(exclusive) => act(setExclusive(exclusive))} onClose={() => (soundOpen = false)} />
+{/if}
 
 {#if addonsOpen}
   <Addons {addons} onChange={(changed) => (addons = changed)} onClose={() => (addonsOpen = false)} />
@@ -849,6 +958,10 @@
     gap: 6px;
     margin-top: auto;
     padding-top: 8px;
+  }
+  .bring .scanning {
+    color: var(--soft);
+    font-size: 12px;
   }
   .bring p {
     margin: 0 2px;

@@ -238,3 +238,25 @@ Section 8 brought a library in. This is the other half: what the listener does o
 - **The Android app's reader has not read a desktop file.** It is the same format and the web player's reader accepts it, but the phone's import was not run. The phone merges a playlist with an `app-…` id back into its own playlist of that number only when the names agree.
 - **Saving the file from inside the desktop app's own window** was not clicked (the save goes through the web view's download); `stashd export` and the core's answer were checked instead.
 - A like taken back here does not travel: importing only ever adds, on every Stash. Reordering is one step at a time (no dragging). No undo. Export speed on a large library was not measured.
+
+## 10. The basics of daily use
+
+Volume, the queue, the sound card setting and scanning from the window. Plain controls in the window as it is; where they sit is for the design pass to decide.
+
+- **Volume:** a slider in the bar; it is the engine's own volume and is kept between runs. In exclusive mode anything but 100 changes the samples, and the Sound panel says so.
+- **Queue:** a panel beside the list with what is playing and what follows; a double-click plays from that place, and the queue stays whole.
+- **Sound:** "Take the sound card for Stash alone" is a setting now, kept between runs, and can be switched while a track plays.
+- **Music folders:** "Add a music folder" asks for a folder with the system's own dialog and scans it in the background through a database connection of its own, with a running count; the folder is remembered, and "Scan again" reads the remembered folders.
+
+### Checked
+
+- **Switching exclusive mode while a track plays, on the real sound card** (a file of digital silence): shared `16-bit 44.1 kHz → 32-bit float 48 kHz, resampled`; switched on, `16-bit 44.1 kHz → 16-bit 44.1 kHz`, mode exclusive, not resampled, the track still playing; switched off, shared again. The position stood still for about a second at each switch while the output was opened again.
+- **In a browser, on a silent output:** the slider moved the core's volume and showed it again after a reload; the queue panel listed the queue with the playing track marked and the played ones dimmed; a double-click on the sixth played it and the list followed; the Sound panel's switch changed the core's setting and back; a folder of 300 files was scanned (0.05 s) and remembered, "Scan More again" appeared and said nothing had changed.
+- **By the tests:** `tests/player.rs` (volume, queue, jump), `tests/lists.rs` (settings and folders kept), `crates/stashd/tests/api.rs` (a scan from the API to its end, a second scan finding one new file, volume and setting kept by a core opened later, the queue and a jump over HTTP).
+
+### Not covered yet
+
+- **The folder dialog itself was not clicked** (it is the system's own window): the route that opens it is untested; scanning a named folder is.
+- A scan cannot be stopped once started, a remembered folder cannot be forgotten from the window, and folders are not scanned by themselves when the app starts or when files change.
+- The queue can be looked at and jumped into, not edited (no removing, reordering, "play next"). No shuffle or repeat.
+

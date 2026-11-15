@@ -12,9 +12,22 @@
     onNext: () => void;
     onPrevious: () => void;
     onSeek: (seconds: number) => void;
+    onVolume: (percent: number) => void;
+    onQueue: () => void;
+    /** The queue is showing. */
+    queueOpen: boolean;
   };
 
-  let { player, addonName, onPause, onNext, onPrevious, onSeek }: Props = $props();
+  let { player, addonName, onPause, onNext, onPrevious, onSeek, onVolume, onQueue, queueOpen }: Props = $props();
+
+  /** The volume while the slider is being moved: the core's own number follows a moment later. */
+  let moving: number | null = $state(null);
+
+  function volumeTo(event: Event, done: boolean) {
+    const percent = Number((event.currentTarget as HTMLInputElement).value);
+    moving = done ? null : percent;
+    onVolume(percent);
+  }
 
   function clock(ms: number): string {
     const seconds = Math.floor(ms / 1000);
@@ -160,6 +173,22 @@
         </span>
       {/if}
     </div>
+    <div class="tools">
+      <button type="button" class:on={queueOpen} aria-pressed={queueOpen} onclick={onQueue} aria-label="The queue" title="The queue">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h12v2H4zm0 5h12v2H4zm0 5h8v2H4zm13-5 5 3.5-5 3.5z" /></svg>
+      </button>
+      <svg class="speaker" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9zm11.5 3a4 4 0 0 0-2-3.5v7a4 4 0 0 0 2-3.5z" /></svg>
+      <input
+        type="range"
+        min="0"
+        max="100"
+        value={moving ?? player.volume}
+        oninput={(e) => volumeTo(e, false)}
+        onchange={(e) => volumeTo(e, true)}
+        aria-label="Volume"
+        title="Volume {moving ?? player.volume}"
+      />
+    </div>
   {:else}
     <p class="notice">{player.error ?? "Double-click a track to play it."}</p>
   {/if}
@@ -168,7 +197,7 @@
 <style>
   footer {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(280px, 2fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 2fr) minmax(0, 1fr) auto;
     align-items: center;
     gap: 16px;
     height: 68px;
@@ -238,6 +267,21 @@
   button:disabled {
     opacity: 0.4;
     cursor: default;
+  }
+  .tools {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .tools button.on {
+    color: var(--accent);
+  }
+  .speaker {
+    color: var(--quiet);
+  }
+  input[type="range"] {
+    width: 96px;
+    accent-color: var(--accent);
   }
   .middle {
     display: flex;
