@@ -212,7 +212,8 @@ The file: 7.1 MB, 14,000 likes, 150 playlists of 120 songs, 5,000 plays; 18,128 
 
 ### Not covered yet
 
-- **The Android app's Backup zip is not read.** Only the "Export for Stash on the web" file is. That file leaves out, by the app's own rule, Daily Mixes, Stash Mixes and the Downloads list as such, and carries the newest 5,000 plays. The optional whole-history section of the file (`listens`) is ignored.
+- **The phone's own library is read too (added after this section was first written):** the Android app's Backup archive (.zip) or its database (`stash.db`), by the app's own export rules, plus what only a database holds: every play, the downloaded songs and the songs of saved albums. Checked by tests on a database made up in the app's shape, and once on a real phone's library copied off a debug build (read as a copy; the second import changed nothing). Not checked: a backup archive written by a real phone (the test archives are made here), and databases of older app versions (missing columns are tolerated by design, not by trial). The optional whole-history section of the shared file (`listens`) is still ignored.
+- **Songs with the same title and artist are one song** when neither has an ISRC, also when they come from different albums or differ in length. That is the shared rule of all three Stashes; on a library without ISRCs it folds a single and its album version together, and can fold two different versions.
 - **No real add-on has answered `resolve` here**, only the demo add-on, which matches by the same words and a close length. How well a real add-on picks the same song is that add-on's doing; the desktop does not second-guess it beyond the length check.
 - A song no add-on has is asked for again every time it comes up; misses are not remembered. Settings in a web backup are not imported. Covers are kept as addresses and not shown yet.
 
