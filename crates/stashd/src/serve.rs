@@ -508,6 +508,8 @@ impl Core {
             if kept("exclusive").as_deref() == Some("1") {
                 let _ = playing.set_exclusive(true);
             }
+            // And the queue as it was left: nothing plays until the listener says so.
+            crate::kept::restore(&library, playing);
         }
         Ok(Self {
             server,
@@ -531,6 +533,18 @@ impl Core {
         let Core { server, state } = self;
         let stop = AtomicBool::new(false);
         std::thread::scope(|scope| {
+            // The queue is written down as it changes, so the next run opens on it (the program may be closed, or
+            // lose power, at any moment: there is no "on the way out" to rely on).
+            if let Ok(player) = &state.player {
+                let (library, stop) = (&state.library, &stop);
+                scope.spawn(move || {
+                    let mut keeper = crate::kept::Keeper::default();
+                    while !stop.load(Ordering::Relaxed) {
+                        keeper.look(library, player);
+                        std::thread::sleep(Duration::from_millis(1000));
+                    }
+                });
+            }
             for _ in 0..WORKERS {
                 scope.spawn(|| {
                     while !stop.load(Ordering::Relaxed) {

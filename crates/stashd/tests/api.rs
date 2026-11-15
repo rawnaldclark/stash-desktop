@@ -461,7 +461,7 @@ fn a_client_reads_the_library_and_drives_the_player_over_http() {
     assert_eq!(removed, json!({ "addons": [] }));
     client.post("/api/player/play", json!({ "addon": "demo.folder", "tracks": [{ "id": "1", "title": "Orphan", "artist": "Nobody" }] }));
     let orphan = client.player_until("the orphan's failure", |s| {
-        s["status"] == "idle" && s["error"].is_string()
+        s["resting"] == true && s["error"].is_string()
     });
     assert_eq!(
         orphan["error"].as_str(),
@@ -604,7 +604,7 @@ fn a_library_file_is_imported_and_its_songs_play_through_an_add_on() {
     // With no add-on there is nowhere to play a described song from, and the player says so.
     client.post("/api/player/play", json!({ "liked": true }));
     let nowhere = client.player_until("the refusal without add-ons", |s| {
-        s["status"] == "idle" && s["error"].is_string()
+        s["resting"] == true && s["error"].is_string()
     });
     assert_eq!(
         nowhere["error"].as_str(),
@@ -1717,5 +1717,176 @@ fn a_files_picture_is_served_and_a_file_without_one_stops_offering_it() {
     // Not a track, not a number.
     assert_eq!(picture("/api/art/track/999999").0, 404);
     assert_eq!(picture("/api/art/track/..%2Fx").0, 404);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_queue_is_there_again_when_the_program_is_opened_again() {
+    let dir = std::env::temp_dir().join(format!("stash-api-kept-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let music = dir.join("Music");
+    std::fs::create_dir_all(&music).unwrap();
+    for name in ["alpha", "bravo", "charlie", "delta"] {
+        silence(&music.join(format!("{name}.wav")));
+    }
+    let db = dir.join("library.db");
+    {
+        let mut library = Library::open(&db).unwrap();
+        scan_folder(&mut library, &music, |_| {}).unwrap();
+    }
+    let Some(engine) = engine() else {
+        eprintln!("SKIPPED the kept queue: no libmpv found");
+        return;
+    };
+    let open = || {
+        let core = Core::bind(Options {
+            db: db.clone(),
+            ui: None,
+            port: 0,
+            bench_out: None,
+            audio: Some(Output::Silent),
+            mpv: Some(engine.clone()),
+            play_counts_between_seconds: None,
+        })
+        .unwrap();
+        let base = format!("http://127.0.0.1:{}", core.port());
+        std::thread::spawn(move || core.run());
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(10)))
+            .build()
+            .into();
+        Client { agent, base }
+    };
+    let kept = |key: &str| {
+        Library::open(&db)
+            .unwrap()
+            .setting(key)
+            .unwrap()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .unwrap_or(Value::Null)
+    };
+    let until_kept = |what: &str, done: &dyn Fn(&Value, &Value) -> bool| {
+        let started = Instant::now();
+        loop {
+            let (queue, place) = (kept("queue"), kept("queue.place"));
+            if done(&queue, &place) {
+                return (queue, place);
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(8),
+                "waited 8 s for {what}; kept: {queue} / {place}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+
+    // The first run: the library plays from its third song, repeat is on, and it is paused a second in.
+    let first = open();
+    assert_eq!(first.get("/api/player").1["status"], "idle");
+    first.post("/api/player/repeat", json!({ "mode": "all" }));
+    first.post(
+        "/api/player/play",
+        json!({ "offset": 0, "from": "Your library" }),
+    );
+    first.post("/api/player/jump", json!({ "index": 2 }));
+    first.player_until("the third song", |s| {
+        s["status"] == "playing" && s["index"] == 2
+    });
+    first.post("/api/player/pause", json!({ "paused": true }));
+    first.post("/api/player/seek", json!({ "seconds": 1.0 }));
+    first.player_until("paused a second in", |s| {
+        s["status"] == "paused"
+            && s["position_ms"]
+                .as_u64()
+                .is_some_and(|ms| (900..1500).contains(&ms))
+    });
+    let (queue, place) = until_kept(
+        "the queue and the place to be written down",
+        &|queue, place| {
+            queue["items"]
+                .as_array()
+                .is_some_and(|items| items.len() == 4)
+                && place["place"] == 2
+                && place["seconds"] == 1.0
+        },
+    );
+    // A song of the library is kept by its row, nothing more.
+    assert!(
+        queue["items"].as_array().unwrap().iter().all(Value::is_i64),
+        "{queue}"
+    );
+    assert_eq!(
+        (place["repeat"].as_str(), place["from"].as_str()),
+        (Some("all"), Some("Your library"))
+    );
+
+    // Before the next run the first song's file goes away.
+    std::fs::remove_file(music.join("alpha.wav")).unwrap();
+    {
+        let mut library = Library::open(&db).unwrap();
+        scan_folder(&mut library, &music, |_| {}).unwrap();
+    }
+
+    // The second run opens on the same song, paused where it was, in a queue without the song that is gone.
+    let second = open();
+    let back = second.get("/api/player").1;
+    assert_eq!(
+        (
+            back["status"].as_str(),
+            back["resting"].as_bool(),
+            back["index"].as_u64(),
+            back["queue_len"].as_u64(),
+            back["track"]["title"].as_str(),
+            back["position_ms"].as_u64(),
+            back["repeat"].as_str(),
+            back["from"].as_str(),
+        ),
+        (
+            Some("paused"),
+            Some(true),
+            Some(1),
+            Some(3),
+            Some("charlie"),
+            Some(1000),
+            Some("all"),
+            Some("Your library")
+        )
+    );
+    let (_, rows) = second.get("/api/player/queue?offset=0&limit=10");
+    let titles: Vec<&str> = rows["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, ["bravo", "charlie", "delta"]);
+    // Nothing plays by itself; play goes on from the second it was left at.
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(second.get("/api/player").1["resting"], true);
+    second.post("/api/player/pause", json!({ "paused": false }));
+    let on = second.player_until("the song to go on", |s| {
+        s["status"] == "playing"
+            && s["resting"] == false
+            && s["index"] == 1
+            && s["position_ms"].as_u64().is_some_and(|ms| ms >= 900)
+    });
+    assert_eq!(on["track"]["title"].as_str(), Some("charlie"));
+
+    // Stopped, there is nothing to bring back.
+    second.post("/api/player/stop", json!({}));
+    until_kept("the empty queue to be written down", &|queue, _| {
+        queue["items"].as_array().is_some_and(Vec::is_empty)
+    });
+    let third = open();
+    let empty = third.get("/api/player").1;
+    assert_eq!(
+        (
+            empty["status"].as_str(),
+            empty["queue_len"].as_u64(),
+            empty["repeat"].as_str()
+        ),
+        (Some("idle"), Some(0), Some("all"))
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

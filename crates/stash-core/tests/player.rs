@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use common::{RATE, library, scratch, signal, write_wav};
 use stash_core::audio::Output;
 use stash_core::player::{
-    AddonTrack, Failure, Located, Player, PlayerState, QueueItem, Repeat, Resolver, Settings,
+    AddonTrack, Failure, Kept, Located, Player, PlayerState, QueueItem, Repeat, Resolver, Settings,
 };
 
 fn item(id: i64, title: &str, path: &Path) -> QueueItem {
@@ -129,12 +129,81 @@ fn a_queue_plays_through_and_the_controls_do_what_they_say() {
         s.index == Some(0) && s.position_ms < 500
     });
 
-    // Left alone from the last track, the queue runs out and the player is idle.
+    // Left alone from the last track, the queue runs out and the player rests on its last track: the queue
+    // stays, nothing plays, and the window still has a song to show.
     player.next().unwrap();
     player.next().unwrap();
     until(&player, "the last track", |s| s.index == Some(2));
-    let done = until(&player, "the end of the queue", |s| s.status == "idle");
-    assert_eq!((done.index, done.track, done.position_ms), (None, None, 0));
+    let done = until(&player, "the end of the queue", |s| s.resting);
+    assert_eq!(
+        (done.status, done.index, done.position_ms, done.queue_len),
+        ("paused", Some(2), 0, 3)
+    );
+    assert_eq!(done.track.as_ref().and_then(|t| t.id), Some(3));
+    assert!(done.signal.is_none());
+    // Next has nowhere to go and changes nothing; a seek moves the place play will go on from.
+    player.next().unwrap();
+    player.seek_to(0.2).unwrap();
+    let moved = player.state();
+    assert_eq!(
+        (moved.resting, moved.index, moved.position_ms),
+        (true, Some(2), 200)
+    );
+    // Previous goes to the track before the one it rests on, and plays.
+    player.previous().unwrap();
+    until(&player, "the track before the last", |s| {
+        s.status == "playing" && !s.resting && s.index == Some(1)
+    });
+    // Songs added to a resting queue are only added: nothing starts by itself.
+    until(&player, "the end of the queue again", |s| s.resting);
+    player.enqueue(vec![item(1, "One", &a)], false);
+    std::thread::sleep(Duration::from_millis(300));
+    let grown = player.state();
+    assert_eq!(
+        (grown.resting, grown.index, grown.queue_len),
+        (true, Some(2), 4)
+    );
+    // Now there is a next one.
+    player.next().unwrap();
+    until(&player, "the added track", |s| {
+        s.status == "playing" && s.index == Some(3)
+    });
+
+    // A queue kept from last time comes back as it was left: nothing plays, and play goes on from the second in.
+    player.stop().unwrap();
+    player.restore(Kept {
+        items: vec![item(1, "One", &a), item(2, "Two", &b), item(3, "Three", &c)],
+        place: 1,
+        seconds: 1.0,
+        from: Some("Waves".into()),
+        shuffle: false,
+        original: None,
+        repeat: Repeat::All,
+    });
+    let back = player.state();
+    assert_eq!(
+        (
+            back.status,
+            back.resting,
+            back.index,
+            back.position_ms,
+            back.queue_len
+        ),
+        ("paused", true, Some(1), 1000, 3)
+    );
+    assert_eq!((back.from.as_deref(), back.repeat), (Some("Waves"), "all"));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        player.state().resting,
+        "a kept queue does not start by itself"
+    );
+    player.set_paused(false).unwrap();
+    let on = until(&player, "the kept track from where it was left", |s| {
+        s.status == "playing" && !s.resting && s.index == Some(1) && s.position_ms >= 900
+    });
+    assert!(on.position_ms < 1500, "{}", on.position_ms);
+    let (_, kept, original) = player.keep();
+    assert_eq!((kept.len(), original), (3, None));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -327,7 +396,7 @@ fn an_add_ons_track_is_asked_for_late_and_one_it_does_not_have_is_passed_over() 
         "the next track was asked for {waited:?} after the first, long before it was needed"
     );
 
-    until(&player, "the end of the queue", |s| s.status == "idle");
+    until(&player, "the end of the queue", |s| s.resting);
     drop(player);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -388,7 +457,7 @@ fn next_and_previous_do_not_wait_for_the_engine_to_have_the_track() {
         });
     }
     player.next().unwrap();
-    let ended = until(&player, "the end", |s| s.status == "idle");
+    let ended = until(&player, "the end", |s| s.resting);
     assert_eq!(ended.queue_len, 4);
     drop(player);
     let _ = std::fs::remove_dir_all(&dir);
@@ -408,23 +477,24 @@ fn trouble_with_the_add_on_is_said_and_the_queue_is_not_marched_through() {
     player
         .play(vec![from_addon("broken", "Broken"), from_addon("a", "A")])
         .unwrap();
-    let state = until(&player, "the failure", |s| {
-        s.status == "idle" && s.error.is_some()
-    });
+    let state = until(&player, "the failure", |s| s.resting && s.error.is_some());
+    // It rests on the track that failed, so play tries that one again.
+    assert_eq!(
+        state.track.as_ref().map(|t| t.title.as_str()),
+        Some("Broken")
+    );
     assert_eq!(
         state.error.as_deref(),
         Some("Broken could not be played: the add-on could not be reached")
     );
     std::thread::sleep(Duration::from_millis(400));
     assert_eq!(addon.asked(), ["broken"]);
-    assert_eq!(player.state().status, "idle");
+    assert!(player.state().resting);
 
     // A player without add-ons says so instead of trying.
     let plain = Player::start(&library, &Output::Silent).unwrap();
     plain.play(vec![from_addon("a", "A")]).unwrap();
-    let state = until(&plain, "the refusal", |s| {
-        s.status == "idle" && s.error.is_some()
-    });
+    let state = until(&plain, "the refusal", |s| s.resting && s.error.is_some());
     assert_eq!(
         state.error.as_deref(),
         Some("A could not be played: this player has no add-ons")
@@ -493,7 +563,7 @@ fn a_play_counts_once_half_the_track_was_really_played() {
     );
     // Skipped before its half, the second does not count; the third, played through, does.
     player.next().unwrap();
-    until(&player, "the end of the queue", |s| s.status == "idle");
+    until(&player, "the end of the queue", |s| s.resting);
     assert_eq!(titles(), ["One", "Three"]);
     drop(player);
     let _ = std::fs::remove_dir_all(&dir);
