@@ -28,9 +28,9 @@ import {
 	type SourceStatus,
 	type Track
 } from './api';
-import { descriptorKey, LIB_REF, LIBRARY_SOURCE, sameSong } from './identity';
+import { descriptorKey, fold, LIB_REF, LIBRARY_SOURCE, sameSong } from './identity';
 import type { Descriptor } from './sources/contract';
-import { emptySearch, mergeTop, type SearchResult, type SearchSection } from './sources/search';
+import { emptySearch, mergeTop, type SearchAlbum, type SearchArtist, type SearchResult, type SearchSection, type TopPick } from './sources/search';
 
 const ro = <T>(s: Readable<T>): Readable<T> => ({ subscribe: s.subscribe });
 
@@ -566,12 +566,22 @@ const search: SearchAPI = {
 	async search(q, opts) {
 		const query = q.trim();
 		if (!query) return emptySearch();
-		const rows = await core.searchTracks(query, LIBRARY_RESULTS, opts?.signal);
-		const lib: SearchSection = { sourceId: LIB_REF, name: 'Your library', items: rows.map(itemOfRow) };
+		const here = await core.searchLibrary(query, LIBRARY_RESULTS, opts?.signal);
+		const lib: SearchSection = { sourceId: LIB_REF, name: 'Your library', items: here.rows.map(itemOfRow) };
+		const artists: SearchArtist[] = here.artists.map((a) => ({ sourceId: LIBRARY_SOURCE, id: String(a.id), name: a.name, ...(artOf(a.art) ? { artwork: artOf(a.art) } : {}) }));
+		const albums: SearchAlbum[] = here.albums.map((a) => ({ sourceId: LIBRARY_SOURCE, id: String(a.id), title: a.title, artist: a.artist, ...(a.year ? { year: a.year } : {}), ...(artOf(a.art) ? { artwork: artOf(a.art) } : {}) }));
+		// The card at the top is the artist or the album whose name is what was typed; else the first song.
+		// ("lanterns" names The Lanterns: a leading article is not part of what is typed.)
+		const bare = (s: string) => fold(s).replace(/^(?:the|a|an)\s+(?=\S)/, '');
+		const typed = bare(query);
+		const named = artists.find((a) => bare(a.name) === typed);
+		const titled = albums.find((a) => bare(a.title) === typed);
+		const topPick: TopPick = named ? { kind: 'artist', artist: named } : titled ? { kind: 'album', album: titled } : { kind: 'track' };
+		const found = { artists, albums, topPick };
 		// The add-ons a search asks: switched on, usable, and offering search. In the listener's order.
 		const asked = get(addonStore).filter((a) => a.enabled && !a.problem && a.resources.includes('search'));
-		if (!asked.length) return { top: mergeTop([lib]), bySource: [lib], failed: [], pending: [] };
-		opts?.onLibrary?.({ top: mergeTop([lib]), bySource: [lib], failed: [], pending: asked.map((a) => a.name) });
+		if (!asked.length) return { top: mergeTop([lib]), ...found, bySource: [lib], failed: [], pending: [] };
+		opts?.onLibrary?.({ top: mergeTop([lib]), ...found, bySource: [lib], failed: [], pending: asked.map((a) => a.name) });
 
 		const failed: SearchResult['failed'] = [];
 		const sections: (SearchSection | null)[] = await Promise.all(
@@ -595,7 +605,7 @@ const search: SearchAPI = {
 		const bySource = [lib, ...sections.filter((s): s is SearchSection => s !== null)];
 		// In the add-ons' own order, whichever answered first.
 		failed.sort((x, y) => asked.findIndex((a) => a.id === x.sourceId) - asked.findIndex((a) => a.id === y.sourceId));
-		return { top: mergeTop(bySource), bySource, failed, pending: [] };
+		return { top: mergeTop(bySource), ...found, bySource, failed, pending: [] };
 	}
 };
 

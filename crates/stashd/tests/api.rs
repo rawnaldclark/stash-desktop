@@ -1350,6 +1350,30 @@ fn the_lists_and_the_queue_the_window_is_built_on() {
             .collect::<Vec<_>>()
     };
 
+    // A search finds albums and artists as well as songs: by the album's title, and an artist's albums by the name.
+    let (_, found) = client.get("/api/search?q=reco");
+    assert_eq!(titles(&found["rows"]).len(), 2, "{found}");
+    assert_eq!(titles(&found["albums"]), ["Record"]);
+    assert_eq!(
+        found["albums"][0]["art"].as_str(),
+        Some("https://covers.example/record.jpg")
+    );
+    assert_eq!(found["artists"], json!([]));
+    let (_, found) = client.get("/api/search?q=band");
+    assert_eq!(titles(&found["albums"]), ["Record"]);
+    assert_eq!(found["artists"][0]["name"].as_str(), Some("Band"));
+    assert_eq!(found["artists"][0]["tracks"].as_u64(), Some(2));
+    // A song's title is not an album or an artist.
+    let (_, found) = client.get("/api/search?q=alpha");
+    assert_eq!(
+        (
+            found["rows"].as_array().unwrap().len(),
+            &found["albums"],
+            &found["artists"]
+        ),
+        (1, &json!([]), &json!([]))
+    );
+
     // A row says what a list needs to draw and link it.
     let (_, liked) = client.get("/api/liked");
     let one = &liked["rows"][0];

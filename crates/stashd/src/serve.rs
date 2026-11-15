@@ -1343,10 +1343,17 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
             200,
             json!({ "rows": library().albums_at(number("offset", 0), limit(120))? }),
         ),
-        (Method::Get, "/api/search") => reply_json(
-            200,
-            json!({ "rows": library().search(&param("q").unwrap_or_default(), limit(50))? }),
-        ),
+        (Method::Get, "/api/search") => {
+            let (query, library) = (param("q").unwrap_or_default(), library());
+            reply_json(
+                200,
+                json!({
+                    "rows": library.search(&query, limit(50))?,
+                    "albums": library.search_albums(&query, 12)?,
+                    "artists": library.search_artists(&query, 12)?,
+                }),
+            )
+        }
         (Method::Post, "/api/bench-result") => {
             let mut body = String::new();
             request

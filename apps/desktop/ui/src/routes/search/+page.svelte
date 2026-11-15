@@ -2,10 +2,13 @@
 	import { page } from '$app/state';
 	import { player, searchApi } from '../../lib/app';
 	import type { LibraryItem, SearchResult } from '../../lib/api';
+	import { albumHref, artistHref } from '../../lib/identity';
+	import Card from '../../lib/ui/Card.svelte';
 	import Empty from '../../lib/ui/Empty.svelte';
 	import Icon from '../../lib/ui/Icon.svelte';
 	import Cover from '../../lib/ui/Cover.svelte';
 	import TrackRow from '../../lib/ui/TrackRow.svelte';
+	import { shelf } from '../../lib/ui/shelf';
 	import { openSongMenu, songMenu } from '../../lib/ui/song-menu';
 	import { clearRecent, loadRecent, recentId, removeRecent, saveRecent, saveRecentSong, L, ui, type RecentEntry } from '../../lib/ui/state.svelte';
 
@@ -53,10 +56,14 @@
 
 	const topItems = $derived<LibraryItem[]>(result?.top ?? []);
 	const sections = $derived(result?.bySource ?? []);
-	// The song card is the first song; the songs beside it follow.
-	const top = $derived(topItems[0]);
-	const topRest = $derived(topItems.slice(1, 6));
-	const nothing = $derived(!!result && !result.pending.length && topItems.length === 0 && sections.every((s) => s.items.length === 0));
+	const pick = $derived(result?.topPick ?? { kind: 'track' as const });
+	// The song card is the first song; behind an artist or album card the songs start at the first one.
+	const songStart = $derived(pick.kind === 'track' ? 1 : 0);
+	const top = $derived(pick.kind === 'track' ? topItems[0] : undefined);
+	const topRest = $derived(topItems.slice(songStart, songStart + 5));
+	const nothing = $derived(!!result && !result.pending.length && topItems.length === 0 && result.artists.length === 0 && result.albums.length === 0 && sections.every((s) => s.items.length === 0));
+	/** Two letters for an artist with no picture ("Vince Staples" -> "VS"). */
+	const initials = (name: string) => name.replace(/[([{].*?[)\]}]/g, ' ').split(/\s+/).filter((w) => /\p{L}/u.test(w)).slice(0, 2).map((w) => w.match(/\p{L}/u)![0].toUpperCase()).join('');
 	/** The add-ons that gave no results, each with its own words for why. */
 	const failed = $derived(result?.failed ?? []);
 	const sentence = (t: string) => (/[.!?]$/.test(t) ? t : `${t}.`);
@@ -108,7 +115,7 @@
 				{/each}
 			</ul>
 		{:else}
-			<p class="s-hint">{withAddons ? 'Songs from your library and from every add-on you have.' : 'Songs from your library.'}</p>
+			<p class="s-hint">{withAddons ? 'Songs, albums and artists from your library, and songs from every add-on you have.' : 'Songs, albums and artists from your library.'}</p>
 		{/if}
 	{:else if loading && !result}
 		<p class="s-hint" role="status">Searching</p>
@@ -119,31 +126,70 @@
 		{#each failed as f (f.sourceId)}<p class="s-hint">{f.name} gave no results: {sentence(f.message)}</p>{/each}
 	{:else if result}
 		<div class="sr">
-			{#if top}
+			{#if top || pick.kind !== 'track'}
 				<div class="sr-top">
 					<div class="top-col">
 						<h2 class="vh2">Top result</h2>
-						<div class="top-card" use:songMenu={{ item: top }}>
-							<button type="button" class="top-main" onclick={() => play(topItems, 0)} aria-label="Play {top.title} by {top.artist}">
-								<span class="top-cv"><Cover artwork={top.artwork} seed={top.title} min={200} class="cv" /></span>
-								<span class="top-kind">Song</span>
-								<b>{top.title}</b>
-								<i>{top.artist}</i>
-							</button>
-							<span class="top-play" aria-hidden="true"><Icon name="play_arrow" /></span>
-							<button type="button" class="more top-more" aria-label="More for {top.title}" aria-haspopup="menu" onclick={(e) => openSongMenu({ item: top }, e.currentTarget)}><Icon name="more_horiz" /></button>
-						</div>
+						{#if pick.kind === 'artist'}
+							<div class="top-card">
+								<a class="top-main" href={artistHref({ sourceId: pick.artist.sourceId, id: pick.artist.id })}>
+									<span class="top-cv"><Cover artwork={pick.artist.artwork} seed={pick.artist.name} min={200} class="cv" ini={initials(pick.artist.name)} /></span>
+									<span class="top-kind">Artist</span>
+									<b>{pick.artist.name}</b>
+								</a>
+							</div>
+						{:else if pick.kind === 'album'}
+							<div class="top-card">
+								<a class="top-main" href={albumHref({ sourceId: pick.album.sourceId, id: pick.album.id })}>
+									<span class="top-cv"><Cover artwork={pick.album.artwork} seed={pick.album.title} min={200} class="cv" /></span>
+									<span class="top-kind">Album</span>
+									<b>{pick.album.title}</b>
+									<i>{pick.album.artist}</i>
+								</a>
+							</div>
+						{:else if top}
+							<div class="top-card" use:songMenu={{ item: top }}>
+								<button type="button" class="top-main" onclick={() => play(topItems, 0)} aria-label="Play {top.title} by {top.artist}">
+									<span class="top-cv"><Cover artwork={top.artwork} seed={top.title} min={200} class="cv" /></span>
+									<span class="top-kind">Song</span>
+									<b>{top.title}</b>
+									<i>{top.artist}</i>
+								</button>
+								<span class="top-play" aria-hidden="true"><Icon name="play_arrow" /></span>
+								<button type="button" class="more top-more" aria-label="More for {top.title}" aria-haspopup="menu" onclick={(e) => openSongMenu({ item: top }, e.currentTarget)}><Icon name="more_horiz" /></button>
+							</div>
+						{/if}
 					</div>
 					{#if topRest.length}
 						<div class="songs-col">
 							<h2 class="vh2">Songs</h2>
 							<div class="sr-songs">
 								{#each topRest as it, i (it.key)}
-									<TrackRow item={it} onplay={() => play(topItems, i + 1)} />
+									<TrackRow item={it} onplay={() => play(topItems, i + songStart)} />
 								{/each}
 							</div>
 						</div>
 					{/if}
+				</div>
+			{/if}
+			{#if result.artists.length}
+				<h2 class="vh2 sec-h">Artists</h2>
+				<div class="shelf-w" use:shelf>
+					<div class="shelf shelf-artists">
+						{#each result.artists as a (a.sourceId + a.id)}
+							<Card title={a.name} artwork={a.artwork} href={artistHref({ sourceId: a.sourceId, id: a.id })} ini={initials(a.name)} />
+						{/each}
+					</div>
+				</div>
+			{/if}
+			{#if result.albums.length}
+				<h2 class="vh2 sec-h">Albums</h2>
+				<div class="shelf-w" use:shelf>
+					<div class="shelf shelf-albums">
+						{#each result.albums as al (al.sourceId + al.id)}
+							<Card title={al.title} sub={[al.year, al.artist].filter(Boolean).join(' · ')} artwork={al.artwork} href={albumHref({ sourceId: al.sourceId, id: al.id })} />
+						{/each}
+					</div>
 				</div>
 			{/if}
 			{#each sections as sec (sec.sourceId)}

@@ -87,6 +87,9 @@ export const counts = () => get<Counts>('/api/counts');
 /** The whole library in title order, a page at a time (`limit` at most 500). */
 export const tracksAt = (offset: number, limit: number, signal?: AbortSignal) => rows<TrackRow>(`/api/tracks?offset=${offset}&limit=${limit}`, signal);
 export const searchTracks = (query: string, limit: number, signal?: AbortSignal) => rows<TrackRow>(`/api/search?q=${encodeURIComponent(query)}&limit=${limit}`, signal);
+/** What the library has for the text: songs (at most `limit`), and the albums and artists it names (a dozen of each). */
+export const searchLibrary = (query: string, limit: number, signal?: AbortSignal) =>
+	get<{ rows: TrackRow[]; albums: AlbumRow[]; artists: ArtistRow[] }>(`/api/search?q=${encodeURIComponent(query)}&limit=${limit}`, signal);
 /** The liked songs, the newest like first. */
 export const likedAt = (offset: number, limit: number, signal?: AbortSignal) => rows<LikedRow>(`/api/liked?offset=${offset}&limit=${limit}`, signal);
 /** What was played, the newest first. */
@@ -264,6 +267,8 @@ export type CorePlayer = {
 	signal: Signal | null;
 	/** The last song that could not be played, and why. */
 	error: string | null;
+	/** Nothing plays and the player rests on `track` (status "paused"): the queue ended there, or it was brought back from last time. Play starts it. */
+	resting: boolean;
 };
 
 /** Nothing playing. */
@@ -284,7 +289,8 @@ export const IDLE: CorePlayer = {
 	repeat: 'off',
 	from: null,
 	signal: null,
-	error: null
+	error: null,
+	resting: false
 };
 
 /** One entry of what is handed to the player: a song of the library by its row, or an add-on's track. */

@@ -1,4 +1,5 @@
 import type { LibraryItem } from '../identity';
+import type { Artwork } from './contract';
 
 /**
  * One section of the search page: the library ("Your library"), or one add-on. `tags` holds a small label for some of its songs,
@@ -6,9 +7,19 @@ import type { LibraryItem } from '../identity';
  */
 export type SearchSection = { sourceId: string; name: string; items: LibraryItem[]; tags?: Record<string, string> };
 
+/** An artist or an album a search found, with the page it opens. */
+export type SearchArtist = { sourceId: string; id: string; name: string; artwork?: Artwork[] };
+export type SearchAlbum = { sourceId: string; id: string; title: string; artist: string; year?: number; artwork?: Artwork[] };
+/** What the "Top result" card is: the first song, or the artist or album the listener typed the name of. */
+export type TopPick = { kind: 'track' } | { kind: 'artist'; artist: SearchArtist } | { kind: 'album'; album: SearchAlbum };
+
 export type SearchResult = {
 	/** Merged songs, round-robin across sections in their order, duplicates folded (a folded duplicate carries every section's ref). */
 	top: LibraryItem[];
+	/** The library's artists and albums the text names. */
+	artists: SearchArtist[];
+	albums: SearchAlbum[];
+	topPick: TopPick;
 	bySource: SearchSection[];
 	/** Sources that did not answer (the UI shows its empty state when all of them failed). */
 	failed: { sourceId: string; name: string; message: string }[];
@@ -18,7 +29,7 @@ export type SearchResult = {
 
 export const TOP_LIMIT = 10;
 
-export const emptySearch = (failed: SearchResult['failed'] = []): SearchResult => ({ top: [], bySource: [], failed, pending: [] });
+export const emptySearch = (failed: SearchResult['failed'] = []): SearchResult => ({ top: [], artists: [], albums: [], topPick: { kind: 'track' }, bySource: [], failed, pending: [] });
 
 /**
  * "Top results", as the web player merges them: round-robin across the sections in order (every section's first song, then every

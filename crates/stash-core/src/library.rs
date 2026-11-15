@@ -177,6 +177,10 @@ macro_rules! art {
     };
 }
 
+/// The most songs a search for albums or artists looks through. A query broad enough to pass it ("a") is answered
+/// from the first that many matches, which is still more albums and artists than a row of results shows.
+const FOUND_CAP: usize = 20_000;
+
 const TRACK_COLUMNS: &str = concat!(
     "t.id, t.title, a.name, al.title, t.duration_ms, t.codec, t.sample_rate, t.bit_depth, t.origin, t.sort_key, t.liked_at_ms IS NOT NULL, ",
     art!(),
@@ -805,6 +809,66 @@ impl Library {
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt
             .query_map(params![limit as i64, offset as i64], artist_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The albums a search finds: every word typed is in the album's title or its songs' artist. Albums whose title
+    /// starts with what was typed come first, then the ones with the most songs that match.
+    pub fn search_albums(&self, query: &str, limit: usize) -> Result<Vec<AlbumRow>> {
+        let Some(fts) = fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        let sql = format!(
+            "WITH hits AS (SELECT rowid FROM tracks_fts WHERE tracks_fts MATCH ?1 LIMIT ?4)
+             SELECT {ALBUM_COLUMNS}
+             FROM (SELECT t.album_id AS id, COUNT(*) AS n FROM hits JOIN tracks t ON t.id = hits.rowid
+                   WHERE t.album_id IS NOT NULL GROUP BY t.album_id) p
+             JOIN albums al ON al.id = p.id JOIN artists a ON a.id = al.artist_id
+             ORDER BY (al.sort_key >= ?2 AND al.sort_key < ?2 || char(1114111)) DESC, p.n DESC, al.sort_key, al.id
+             LIMIT ?3"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    format!("{{artist album}} : ({fts})"),
+                    sort_key(query),
+                    limit as i64,
+                    FOUND_CAP as i64
+                ],
+                album_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The artists a search finds: every word typed is in the artist's name. Names that start with what was typed
+    /// come first, then the artists with the most songs.
+    pub fn search_artists(&self, query: &str, limit: usize) -> Result<Vec<ArtistRow>> {
+        let Some(fts) = fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        let sql = format!(
+            "WITH hits AS (SELECT rowid FROM tracks_fts WHERE tracks_fts MATCH ?1 LIMIT ?4)
+             SELECT {ARTIST_COLUMNS}
+             FROM (SELECT t.artist_id AS id, COUNT(*) AS n FROM hits JOIN tracks t ON t.id = hits.rowid
+                   GROUP BY t.artist_id) p
+             JOIN artists a ON a.id = p.id
+             ORDER BY (a.sort_key >= ?2 AND a.sort_key < ?2 || char(1114111)) DESC, p.n DESC, a.sort_key, a.id
+             LIMIT ?3"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    format!("{{artist}} : ({fts})"),
+                    sort_key(query),
+                    limit as i64,
+                    FOUND_CAP as i64
+                ],
+                artist_row,
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
