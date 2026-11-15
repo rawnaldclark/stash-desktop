@@ -1,5 +1,5 @@
-//! `stashd`: the Stash desktop core without a window. For now it makes a test library and measures it; it will
-//! grow the audio engine, the add-on client and the local API that every shell talks to.
+//! `stashd`: the Stash desktop core without a window: it scans a folder into a library, serves the local API every
+//! shell talks to, and has the tools the measurements are made with.
 
 mod output_check;
 
@@ -87,6 +87,17 @@ enum Command {
         #[arg(long, default_value_t = 0.1)]
         seconds: f32,
     },
+    /// Serve a folder of your own music as an add-on on this computer, to try add-ons in the window with.
+    DemoAddon {
+        /// The folder to serve, with everything below it.
+        #[arg(long)]
+        dir: PathBuf,
+        #[arg(long, default_value_t = 47822)]
+        port: u16,
+        /// Hold every search and stream answer back this long, to see the window wait.
+        #[arg(long, default_value_t = 0)]
+        delay_ms: u64,
+    },
     /// Measure opening, searching and paging a library, as a list or grid would use it.
     Bench {
         #[arg(long)]
@@ -101,6 +112,21 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Synth { db, tracks, seed } => synth_library(&db, tracks, seed),
         Command::Bench { db, json } => bench(&db, json),
+        Command::DemoAddon {
+            dir,
+            port,
+            delay_ms,
+        } => {
+            let addon =
+                stashd::demo_addon::DemoAddon::bind(&dir, port, Duration::from_millis(delay_ms))?;
+            println!(
+                "{} tracks. Add this link in Stash: {}",
+                addon.tracks(),
+                addon.link()
+            );
+            addon.run();
+            Ok(())
+        }
         Command::Scan { db, folder } => scan(&db, &folder),
         Command::SynthFiles {
             dir,
