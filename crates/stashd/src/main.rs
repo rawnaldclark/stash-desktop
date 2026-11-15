@@ -87,6 +87,14 @@ enum Command {
         #[arg(long, default_value_t = 0.1)]
         seconds: f32,
     },
+    /// Bring in a library from Stash on a phone or the web player: the file "Export for Stash on the web" or
+    /// "Save a backup" wrote. Only adds; importing the same file again changes nothing.
+    Import {
+        #[arg(long)]
+        db: PathBuf,
+        /// The library file (stash-library-YYYY-MM-DD.json).
+        file: PathBuf,
+    },
     /// Serve a folder of your own music as an add-on on this computer, to try add-ons in the window with.
     DemoAddon {
         /// The folder to serve, with everything below it.
@@ -108,10 +116,62 @@ enum Command {
     },
 }
 
+fn import(db: &Path, file: &Path) -> Result<()> {
+    let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let started = Instant::now();
+    let incoming = stash_core::import::web_library::read(&bytes, now_ms)?;
+    let read = started.elapsed();
+    let opening = Instant::now();
+    let mut library = Library::open(db).with_context(|| format!("opening {}", db.display()))?;
+    let opened = opening.elapsed();
+    let merging = Instant::now();
+    let summary = library.import(&incoming)?;
+    let merged = merging.elapsed();
+    println!(
+        "{} likes, {} playlists, {} plays in the file{}",
+        incoming.likes.len(),
+        incoming.playlists.len(),
+        incoming.plays.len(),
+        incoming
+            .generator
+            .as_deref()
+            .map(|g| format!(" (from {g})"))
+            .unwrap_or_default()
+    );
+    println!(
+        "new songs {}, here already {}; likes {} (+{} here); playlists {} new, {} merged (+{} songs); plays {} (+{} here)",
+        summary.songs_added,
+        summary.songs_already,
+        summary.likes_added,
+        summary.likes_already,
+        summary.playlists_added,
+        summary.playlists_merged,
+        summary.playlist_songs_added,
+        summary.plays_added,
+        summary.plays_already
+    );
+    let counts = library.counts()?;
+    println!(
+        "library: {} tracks, {} liked, {} playlists (file read {:.2} s, library opened {:.2} s, merged {:.2} s)",
+        counts.tracks,
+        counts.liked,
+        counts.playlists,
+        read.as_secs_f64(),
+        opened.as_secs_f64(),
+        merged.as_secs_f64()
+    );
+    Ok(())
+}
+
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Synth { db, tracks, seed } => synth_library(&db, tracks, seed),
         Command::Bench { db, json } => bench(&db, json),
+        Command::Import { db, file } => import(&db, &file),
         Command::DemoAddon {
             dir,
             port,

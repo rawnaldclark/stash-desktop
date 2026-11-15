@@ -186,3 +186,33 @@ How the player treats an add-on's track: where it plays from is a link the add-o
 - A stream link that runs out while the track is paused for hours, and reading an add-on's manifest again after it changes.
 - The bar says when an add-on's "lossless" is in fact a lossy codec, or its "hi-res" is CD format. That check is written and has not been seen to fire: the demo add-on tells the truth.
 
+## 8. Importing a library from the phone or the web player
+
+The Android app (Settings › Library & Storage › Export for Stash on the web) and the web player (Settings › Your library › Save a backup) write the same file, `stash-web-library` version 1: likes, playlists in order and plays, each song as its description (title, artist, album, length, ISRC, the ids other sources know it by). The desktop reads that file with the rules the other two use and merges it by their rule for "the same song" (the same words, or the same ISRC; two different ISRCs are two recordings). The reader's test fixture is the golden file the Android app's tests write and the web player's tests read.
+
+A song the library already has as a file keeps being the file and gains the like, the playlist place and what it lacked (a length, an ISRC). A song it does not have becomes a row known by its description; when it is about to play, the listener's add-ons are asked for it in their order (the add-on contract's `resolve`: the add-on says which of its tracks is the same song, the host refuses an answer whose length is off by more than 8 s or 3 %), and the name the add-on gave is kept with the song for next time.
+
+### Speed (i7-2600, a made-up phone library into a library of 100,000 files)
+
+The file: 7.1 MB, 14,000 likes, 150 playlists of 120 songs, 5,000 plays; 18,128 different songs.
+
+| | |
+|---|---|
+| Reading and checking the file | 0.21 s |
+| Merging it (18,128 new songs, 14,000 likes, 150 playlists, 5,000 plays) | 3.80 s |
+| The same file again (nothing new, everything recognised) | 0.90 s |
+| Opening a 100,000-track library made by an earlier build for the first time (the tracks table is made again for the new kind of song, once) | 7.16 s |
+| Afterwards, with 118,128 tracks: open 5 ms, list pages 0.7 to 4.6 ms, search 0.3 to 24 ms at p95 | as before |
+
+### Checked by hand
+
+- **In a browser, on a silent output:** the window's Import a library took a phone-style file (7 likes, 2 playlists, 2 plays; two of its songs were files already in the library) and said `Imported from Stash for Android 0.9.125: 11 new songs, 7 likes, 2 playlists, 2 plays. 2 songs were here already.`; the sidebar then listed Liked (7) and the two playlists with their counts; the liked file of this computer carried its heart and played as the file; an imported song showed `Asking your add-ons for this song…` and then played from the demo add-on, the bar naming the add-on and `lossless`; a liked song no add-on has was passed over and named.
+- **In the desktop app, on the real sound card:** the same file through the app's own core; importing it again changed nothing; an imported song played from the demo add-on (`PCM 16-bit 44.1 kHz → shared 32-bit float 48 kHz`); the liked file played as the file.
+- **By the tests:** `tests/import.rs` (the golden file; a second import; a like landing on a file; the ISRC rule; a playlist that is here gaining only what it lacks; what is not a library file, and what does not fit, refused or left out) and `crates/stashd/tests/api.rs` (import over HTTP, the lists, imported songs through an add-on, a stale name replaced, a recording of another length refused).
+
+### Not covered yet
+
+- **The Android app's Backup zip is not read.** Only the "Export for Stash on the web" file is. That file leaves out, by the app's own rule, Daily Mixes, Stash Mixes and the Downloads list as such, and carries the newest 5,000 plays. The optional whole-history section of the file (`listens`) is ignored.
+- **No real add-on has answered `resolve` here**, only the demo add-on, which matches by the same words and a close length. How well a real add-on picks the same song is that add-on's doing; the desktop does not second-guess it beyond the length check.
+- A song no add-on has is asked for again every time it comes up; misses are not remembered. Settings in a web backup are not imported. Covers are kept as addresses and not shown yet. Likes, playlists and plays can come in, but cannot yet be made, edited or sent back out from the desktop.
+

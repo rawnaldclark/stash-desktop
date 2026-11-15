@@ -2,7 +2,7 @@
 
 A desktop music client for Windows, macOS and Linux, from the people who make [Stash](https://github.com/rawnaldclark/Stash) for Android.
 
-**Status: early prototype.** There is no app to download yet. What is here: a core that scans a music folder, searches it, plays it gapless and plays from add-ons, a first window that lists, searches and plays, and the measurements that decide whether the design holds.
+**Status: early prototype.** There is no app to download yet. What is here: a core that scans a music folder, searches it, plays it gapless, plays from add-ons and takes in a library from the Android app or the web player, a first window for all of that, and the measurements that decide whether the design holds.
 
 ## What it is going to be
 
@@ -50,6 +50,8 @@ To see the UI: `cd apps/desktop/ui && npm install && npm run build`, then `targe
 To run the desktop app on that library: build the UI as above, then `cargo build --release -p stash-desktop` and start `target/release/stash-desktop` with `STASH_DB` set to the path of `test.db`. Without `STASH_DB` it opens (and creates) an empty library in your user data folder; scanning is a command for now (above), not a button.
 
 To hear it, the programs need libmpv: copy `third_party/mpv/libmpv-2.dll` beside them in `target/release/`, or set `STASH_MPV_LIBRARY` to its path. Then double-click a track. The bar at the bottom shows what is playing and the signal path: what the engine decoded and what the sound card was opened at. `STASH_EXCLUSIVE=1` takes the sound card for Stash alone. `stashd serve --silent` plays to nowhere, for trying the window without sound.
+
+To bring your library over from Stash on your phone or the web: on the phone, Settings › Library & Storage › Export for Stash on the web; in the web player, Settings › Your library › Save a backup. Then in the window, Import a library (or `target/release/stashd import --db my.db <the file>`). Likes, playlists and plays come in. A song you already have as a file stays that file; any other song plays through your add-ons. Importing only adds, so the same file can be imported again.
 
 To try add-ons without having one: `target/release/stashd demo-addon --dir <a music folder>` serves that folder on this computer the way an add-on serves a catalogue, and prints its link. In the window, open Add-ons, paste the link, and search: the add-on's results appear under your library's. Stash desktop comes with no add-ons; each is added by its link, and the link stays in your library file (it can carry your key, so the window never shows it).
 
