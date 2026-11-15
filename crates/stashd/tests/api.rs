@@ -1914,3 +1914,85 @@ fn the_queue_is_there_again_when_the_program_is_opened_again() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_sound_output_is_chosen_and_kept() {
+    let Some(engine) = engine() else {
+        eprintln!("SKIPPED the sound outputs: no libmpv found");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("stash-api-device-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("library.db");
+    let open = || {
+        let core = Core::bind(Options {
+            db: db.clone(),
+            ui: None,
+            port: 0,
+            bench_out: None,
+            audio: Some(Output::Silent),
+            mpv: Some(engine.clone()),
+            play_counts_between_seconds: None,
+        })
+        .unwrap();
+        let base = format!("http://127.0.0.1:{}", core.port());
+        std::thread::spawn(move || core.run());
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(10)))
+            .build()
+            .into();
+        Client { agent, base }
+    };
+
+    let first = open();
+    let (_, listed) = first.get("/api/player/devices");
+    assert_eq!(
+        listed["devices"][0]["name"].as_str(),
+        Some("auto"),
+        "{listed}"
+    );
+    assert_eq!(
+        (listed["device"].as_str(), &listed["missing"]),
+        (Some("auto"), &Value::Null)
+    );
+    // An output that is not there is refused.
+    let refused = first
+        .agent
+        .post(format!("{}/api/player/device", first.base))
+        .send_json(json!({ "name": "nowhere/1" }))
+        .unwrap();
+    assert_eq!(refused.status().as_u16(), 400);
+    // One that is: chosen, and kept for the next run.
+    let last = listed["devices"].as_array().unwrap().last().unwrap()["name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let chosen = first.post("/api/player/device", json!({ "name": last }));
+    assert_eq!(chosen["device"].as_str(), Some(last.as_str()));
+    let second = open();
+    assert_eq!(
+        second.get("/api/player/devices").1["device"].as_str(),
+        Some(last.as_str())
+    );
+
+    // Chosen, then gone (unplugged) by the next run: the system's choice plays, and the window is told which one is missing.
+    Library::open(&db)
+        .unwrap()
+        .set_setting(
+            "device",
+            &json!({ "name": "wasapi/{gone}", "description": "Headphones" }).to_string(),
+        )
+        .unwrap();
+    let third = open();
+    let (_, now) = third.get("/api/player/devices");
+    assert_eq!(
+        (
+            now["device"].as_str(),
+            now["missing"]["description"].as_str()
+        ),
+        (Some("auto"), Some("Headphones"))
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

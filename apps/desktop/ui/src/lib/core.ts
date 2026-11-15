@@ -312,6 +312,13 @@ export const seekTo = (seconds: number) => told('/api/player/seek', { seconds })
 /** Plays the queue from `index` on. */
 export const jumpTo = (index: number) => told('/api/player/jump', { index });
 export const setVolume = (percent: number) => told('/api/player/volume', { percent });
+/** A sound output of the system: `name` is the engine's ("auto" for the system's own choice), `description` the system's. */
+export type Device = { name: string; description: string };
+/** The outputs, the one in use, and the one chosen last when it is not connected now. */
+export type Devices = { devices: Device[]; device: string; missing: Device | null };
+export const devices = () => get<Devices>('/api/player/devices');
+/** Sends the sound to another output; it holds until changed. */
+export const setDevice = (name: string) => post<Devices>('/api/player/device', { name });
 /** Takes the sound card for Stash alone, or gives it back. */
 export const setExclusive = (exclusive: boolean) => told('/api/player/exclusive', { exclusive });
 export const setShuffle = (on: boolean) => told('/api/player/shuffle', { on });

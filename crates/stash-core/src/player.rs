@@ -266,6 +266,21 @@ struct Shared {
     last: Option<u64>,
 }
 
+/// A sound output of the system.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Device {
+    /// The engine's name for it (`"wasapi/{…}"`, `"pulse/…"`), or `"auto"` for the system's own choice.
+    pub name: String,
+    /// What the system calls it ("Speakers (USB Sound Device)").
+    pub description: String,
+}
+
+/// A system's name for an output, without the padding some drivers leave in it.
+fn tidy(description: &str) -> String {
+    let words = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    words.replace("( ", "(").replace(" )", ")")
+}
+
 /// A queue to bring back as it was left: nothing plays until the listener says so.
 #[derive(Debug, Clone, Default)]
 pub struct Kept {
@@ -1229,6 +1244,70 @@ impl Player {
             .engine
             .mpv()
             .set("volume", &format!("{:.0}", percent.clamp(0.0, 100.0)))
+    }
+
+    /// The sound outputs the system offers: the system's own choice (`"auto"`) first, then each output of the
+    /// system's sound driver. (Outputs of the engine's fallback drivers are left out: they are the same outputs
+    /// again, and exclusive mode does not reach through them.)
+    pub fn devices(&self) -> Vec<Device> {
+        let listed: Vec<serde_json::Value> = self
+            .ctx
+            .engine
+            .mpv()
+            .get("audio-device-list")
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        let all: Vec<Device> = listed
+            .iter()
+            .filter_map(|d| {
+                Some(Device {
+                    name: d["name"].as_str()?.to_string(),
+                    description: tidy(d["description"].as_str().unwrap_or_default()),
+                })
+            })
+            .collect();
+        let driver = all
+            .iter()
+            .find(|d| d.name != "auto")
+            .map(|d| d.name.split('/').next().unwrap_or_default().to_string());
+        let mut devices: Vec<Device> = all
+            .into_iter()
+            .filter(|d| {
+                d.name == "auto"
+                    || driver
+                        .as_deref()
+                        .is_some_and(|driver| d.name.split('/').next() == Some(driver))
+            })
+            .collect();
+        if !devices.iter().any(|d| d.name == "auto") {
+            devices.insert(
+                0,
+                Device {
+                    name: "auto".into(),
+                    description: "Autoselect device".into(),
+                },
+            );
+        }
+        devices
+    }
+
+    /// The output the sound goes to: `"auto"` for the system's own choice.
+    pub fn device(&self) -> String {
+        self.ctx
+            .engine
+            .mpv()
+            .get("audio-device")
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| "auto".into())
+    }
+
+    /// Sends the sound to the output `name` (one of [`Player::devices`], or `"auto"`). The output is opened again
+    /// at once, also in the middle of a track.
+    pub fn set_device(&self, name: &str) -> Result<()> {
+        let mpv = self.ctx.engine.mpv();
+        mpv.set("audio-device", name)?;
+        let _ = mpv.command(&["ao-reload"]);
+        Ok(())
     }
 
     /// Takes the sound card for Stash alone, or gives it back. The output is opened again at once, also in the

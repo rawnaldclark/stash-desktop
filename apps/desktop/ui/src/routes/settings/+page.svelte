@@ -16,6 +16,25 @@
 
 	const now = $derived(outputSentence(S.v.signal));
 
+	/** Where the sound goes: the system's outputs, read again whenever the window comes back to the front (one may have been plugged in). */
+	let outs = $state<core.Devices | null>(null);
+	let outTrouble = $state<string | null>(null);
+	const readOuts = () =>
+		core.devices().then(
+			(d) => (outs = d),
+			() => {}
+		);
+	async function chooseOut(name: string) {
+		outTrouble = null;
+		try {
+			outs = await core.setDevice(name);
+		} catch (e) {
+			outTrouble = trouble(e);
+			void readOuts();
+		}
+	}
+	const outName = (d: core.Device) => (d.name === 'auto' ? 'The system’s choice' : d.description || d.name);
+
 	// ---- Add-ons: where music beyond the listener's own files comes from. Each is added by its link; the order is the listener's.
 
 	let link = $state('');
@@ -115,6 +134,10 @@
 	onMount(() => {
 		void folders.init();
 		void sources.reload().catch(() => {});
+		void readOuts();
+		const back = () => void readOuts();
+		window.addEventListener('focus', back);
+		return () => window.removeEventListener('focus', back);
 	});
 
 	// ---- Appearance
@@ -145,6 +168,21 @@
 					<span>{S.v.reason ?? 'The player is not available'}.</span>
 				</div>
 			{:else}
+				{#if outs && outs.devices.length > 1}
+					<div class="set-row set-col">
+						<div class="set-lab">
+							<span class="set-name" id="out-l">Play through</span>
+							<span class="set-sub">The output changes at once, also in the middle of a song, and stays chosen.</span>
+						</div>
+						<div class="chips" role="group" aria-labelledby="out-l">
+							{#each outs.devices as d (d.name)}
+								<button type="button" class="chip" class:on={outs.device === d.name} aria-pressed={outs.device === d.name} onclick={() => chooseOut(d.name)}>{outName(d)}</button>
+							{/each}
+						</div>
+						{#if outs.missing}<p class="set-sub" role="status">{outs.missing.description || 'The output you chose'} is not connected. Stash plays through the system’s choice until it is back.</p>{/if}
+						{#if outTrouble}<p class="set-sub set-trouble" role="alert">{outTrouble}</p>{/if}
+					</div>
+				{/if}
 				<div class="set-row">
 					<div class="set-lab">
 						<span class="set-name" id="ex-l">Take the sound card for Stash alone</span>

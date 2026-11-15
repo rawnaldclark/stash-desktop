@@ -861,3 +861,19 @@ fn the_queue_is_edited_while_it_plays() {
     drop(player);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_sound_outputs_are_listed_and_one_is_chosen() {
+    let Some(library) = library() else { return };
+    let player = Player::start(&library, &Output::Silent).unwrap();
+    let devices = player.devices();
+    // The system's own choice is always there, first.
+    assert_eq!(devices[0].name, "auto", "{devices:?}");
+    assert!(devices.iter().all(|d| !d.description.contains("  ")));
+    assert_eq!(player.device(), "auto");
+    let last = devices.last().unwrap().name.clone();
+    player.set_device(&last).unwrap();
+    assert_eq!(player.device(), last);
+    player.set_device("auto").unwrap();
+    assert_eq!(player.device(), "auto");
+}

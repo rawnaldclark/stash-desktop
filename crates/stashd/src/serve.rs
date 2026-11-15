@@ -508,6 +508,13 @@ impl Core {
             if kept("exclusive").as_deref() == Some("1") {
                 let _ = playing.set_exclusive(true);
             }
+            // The output chosen last time, when it is connected; else the system's own choice, and the choice
+            // holds for when it is back.
+            if let Some(chosen) = kept("device").and_then(|text| chosen_device(&text))
+                && playing.devices().iter().any(|d| d.name == chosen.0)
+            {
+                let _ = playing.set_device(&chosen.0);
+            }
             // And the queue as it was left: nothing plays until the listener says so.
             crate::kept::restore(&library, playing);
         }
@@ -539,8 +546,14 @@ impl Core {
                 let (library, stop) = (&state.library, &stop);
                 scope.spawn(move || {
                     let mut keeper = crate::kept::Keeper::default();
+                    let mut looks = 0u32;
                     while !stop.load(Ordering::Relaxed) {
                         keeper.look(library, player);
+                        // Every few seconds: the output chosen and unplugged is taken back once it is connected.
+                        if looks.is_multiple_of(5) {
+                            follow_chosen_device(library, player);
+                        }
+                        looks = looks.wrapping_add(1);
                         std::thread::sleep(Duration::from_millis(1000));
                     }
                 });
@@ -721,6 +734,13 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
     if *request.method() == Method::Get && path == "/api/player" {
         return Ok(Some(player_reply(player)));
     }
+    // The sound outputs, the one in use and the one chosen.
+    if *request.method() == Method::Get && path == "/api/player/devices" {
+        return Ok(Some(match player {
+            Ok(playing) => reply_json(200, devices_reply(state, playing)),
+            Err(_) => player_reply(player),
+        }));
+    }
     // The queue from `offset` on, each track with its place.
     if *request.method() == Method::Get && path == "/api/player/queue" {
         let url =
@@ -866,6 +886,21 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
                 .unwrap()
                 .set_setting("volume", &format!("{percent:.0}"))?;
         }
+        // Sends the sound to another output (`{"name": "auto"}` for the system's own choice); it holds until changed.
+        // Answers the outputs, as GET /api/player/devices does.
+        "/api/player/device" => {
+            let name = body.get("name").and_then(Value::as_str).unwrap_or("auto");
+            let Some(device) = playing.devices().into_iter().find(|d| d.name == name) else {
+                return Ok(Some(refuse(400, "that sound output is not connected")));
+            };
+            playing.set_device(&device.name)?;
+            state
+                .library
+                .lock()
+                .unwrap()
+                .set_setting("device", &json!(device).to_string())?;
+            return Ok(Some(reply_json(200, devices_reply(state, playing))));
+        }
         // Takes the sound card for Stash alone, or gives it back; it holds until it is changed again.
         "/api/player/exclusive" => {
             let exclusive = body
@@ -882,6 +917,53 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
         _ => return Ok(None),
     }
     Ok(Some(player_reply(player)))
+}
+
+/// The output kept in the settings: its name and what it was called.
+fn chosen_device(text: &str) -> Option<(String, String)> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    let name = value["name"].as_str()?.to_string();
+    let description = value["description"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    Some((name, description))
+}
+
+/// Sound goes to the output the listener chose whenever it is connected: one that was unplugged (the system's own
+/// choice played meanwhile) is taken back when it is there again. A choice of "auto" is left alone.
+fn follow_chosen_device(library: &Mutex<Library>, player: &Player) {
+    let chosen = library
+        .lock()
+        .unwrap()
+        .setting("device")
+        .ok()
+        .flatten()
+        .and_then(|text| chosen_device(&text));
+    let Some((name, _)) = chosen else { return };
+    if name == "auto" || player.device() != "auto" {
+        return;
+    }
+    if player.devices().iter().any(|d| d.name == name) {
+        let _ = player.set_device(&name);
+    }
+}
+
+/// The outputs, the one in use, and the one chosen when it is not connected now (so the window can say so).
+fn devices_reply(state: &State, playing: &Player) -> Value {
+    let devices = playing.devices();
+    let chosen = state
+        .library
+        .lock()
+        .unwrap()
+        .setting("device")
+        .ok()
+        .flatten()
+        .and_then(|text| chosen_device(&text));
+    let missing = chosen
+        .filter(|(name, _)| name != "auto" && !devices.iter().any(|d| d.name == *name))
+        .map(|(name, description)| json!({ "name": name, "description": description }));
+    json!({ "devices": devices, "device": playing.device(), "missing": missing })
 }
 
 /// Asks `asked` for tracks matching `query`, all at once; one group of results (or one reason) per add-on, in the
