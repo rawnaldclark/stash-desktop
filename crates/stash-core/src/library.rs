@@ -95,6 +95,18 @@ pub struct Library {
     conn: Connection,
 }
 
+/// An add-on as the library keeps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredAddon {
+    /// The id its manifest gives.
+    pub id: String,
+    /// The address of its manifest. It can carry the listener's own key: not for showing.
+    pub link: String,
+    /// The manifest as last read, as JSON.
+    pub manifest: String,
+    pub enabled: bool,
+}
+
 /// The most matches a search ranks. Above it the query is broad and answered from the title index instead
 /// ([`Library::search`]). Ranking 2,000 rows takes a few milliseconds; ranking 50,000 took about 170 ms.
 pub const RANK_CAP: usize = 2_000;
@@ -349,10 +361,11 @@ impl Library {
         for id in ids {
             let mut rows = stmt.query_map([id], |r| {
                 Ok(crate::player::QueueItem {
-                    id: r.get(0)?,
+                    id: Some(r.get(0)?),
                     title: r.get(1)?,
                     artist: r.get(2)?,
                     album: r.get(3)?,
+                    addon: None,
                     locator: r.get(4)?,
                 })
             })?;
@@ -361,6 +374,81 @@ impl Library {
             }
         }
         Ok(items)
+    }
+
+    /// The add-ons the listener added, in the listener's order.
+    pub fn addons(&self) -> Result<Vec<StoredAddon>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, link, manifest, enabled FROM addons ORDER BY position, id",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(StoredAddon {
+                    id: r.get(0)?,
+                    link: r.get(1)?,
+                    manifest: r.get(2)?,
+                    enabled: r.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Keeps an add-on: a new one goes last; one that is there already keeps its place and gets the new link and
+    /// manifest.
+    pub fn save_addon(&mut self, id: &str, link: &str, manifest: &str) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.conn.execute(
+            "INSERT INTO addons(id, link, manifest, position, added_at)
+             VALUES (?1, ?2, ?3, (SELECT IFNULL(MAX(position), 0) + 1 FROM addons), ?4)
+             ON CONFLICT(id) DO UPDATE SET link = excluded.link, manifest = excluded.manifest",
+            params![id, link, manifest, now],
+        )?;
+        Ok(())
+    }
+
+    /// Forgets an add-on. Says whether there was one.
+    pub fn remove_addon(&mut self, id: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM addons WHERE id = ?1", [id])?
+            > 0)
+    }
+
+    pub fn set_addon_enabled(&mut self, id: &str, enabled: bool) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE addons SET enabled = ?2 WHERE id = ?1",
+            params![id, enabled],
+        )? > 0)
+    }
+
+    /// Puts the add-ons in the order of `ids`; any not named keep their order, after the named ones.
+    pub fn order_addons(&mut self, ids: &[String]) -> Result<()> {
+        let mut order: Vec<String> = Vec::new();
+        for id in ids {
+            if !order.contains(id) {
+                order.push(id.clone());
+            }
+        }
+        let known: Vec<String> = self.addons()?.into_iter().map(|a| a.id).collect();
+        order.retain(|id| known.contains(id));
+        for id in known {
+            if !order.contains(&id) {
+                order.push(id);
+            }
+        }
+        let tx = self.conn.transaction()?;
+        for (position, id) in order.iter().enumerate() {
+            tx.execute(
+                "UPDATE addons SET position = ?2 WHERE id = ?1",
+                params![id, position as i64 + 1],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// The ids of the tracks from `offset` on in title order: what plays when a row of the list is started.
@@ -608,6 +696,56 @@ fn fts_query(input: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn add_ons_are_kept_in_the_listeners_order() {
+        let mut library = Library::open_in_memory().unwrap();
+        for id in ["one", "two", "three"] {
+            library
+                .save_addon(id, &format!("https://{id}.example/manifest.json"), "{}")
+                .unwrap();
+        }
+        let ids = |library: &Library| {
+            library
+                .addons()
+                .unwrap()
+                .into_iter()
+                .map(|a| a.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&library), ["one", "two", "three"]);
+
+        // Named ones first, in the order named; the rest keep theirs; an unknown id is ignored.
+        library
+            .order_addons(&["three".into(), "nine".into(), "one".into()])
+            .unwrap();
+        assert_eq!(ids(&library), ["three", "one", "two"]);
+
+        // Adding one that is there keeps its place and its switch, and takes the new link.
+        assert!(library.set_addon_enabled("one", false).unwrap());
+        library
+            .save_addon("one", "https://one.example/v2/manifest.json", "{\"v\":2}")
+            .unwrap();
+        let one = library.addons().unwrap().remove(1);
+        assert_eq!(
+            (
+                one.id.as_str(),
+                one.link.as_str(),
+                one.manifest.as_str(),
+                one.enabled
+            ),
+            (
+                "one",
+                "https://one.example/v2/manifest.json",
+                "{\"v\":2}",
+                false
+            )
+        );
+
+        assert!(library.remove_addon("three").unwrap());
+        assert!(!library.remove_addon("three").unwrap());
+        assert_eq!(ids(&library), ["one", "two"]);
+    }
 
     fn track(title: &str, artist: &str, album: &str, no: u32) -> NewTrack {
         NewTrack {

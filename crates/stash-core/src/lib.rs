@@ -1,4 +1,4 @@
-//! The Stash desktop core: the library database, and later the audio engine, the add-on client and the local API.
+//! The Stash desktop core: the library database, the audio engine and its player, and the add-on client.
 //!
 //! The core has no UI and no window. Every shell (the Tauri app, a phone remote, a hosted web page) talks to it
 //! through the same API, so the shell can be replaced without touching what the listener owns: the library.
@@ -11,7 +11,9 @@ pub mod player;
 pub mod scan;
 pub mod synth;
 
-pub use library::{AlbumRow, Counts, FileState, Library, NewTrack, Origin, ScanChange, TrackRow};
+pub use library::{
+    AlbumRow, Counts, FileState, Library, NewTrack, Origin, ScanChange, StoredAddon, TrackRow,
+};
 
 /// What can go wrong in the core.
 #[derive(Debug, thiserror::Error)]

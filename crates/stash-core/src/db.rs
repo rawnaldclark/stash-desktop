@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
@@ -83,6 +83,20 @@ const V2: &str = "
     CREATE UNIQUE INDEX tracks_locator ON tracks(origin, IFNULL(addon_id, ''), locator);
 ";
 
+/// Version 3: the add-ons the listener added. `link` is the address of the add-on's manifest (it can carry the
+/// listener's own key, so it is never shown whole); `manifest` is the manifest as last read, so the add-on is there
+/// when the computer is offline; `position` is the listener's order: the first add-on is asked first.
+const V3: &str = "
+    CREATE TABLE addons(
+        id        TEXT PRIMARY KEY,
+        link      TEXT NOT NULL,
+        manifest  TEXT NOT NULL,
+        position  INTEGER NOT NULL,
+        enabled   INTEGER NOT NULL DEFAULT 1,
+        added_at  INTEGER NOT NULL
+    );
+";
+
 /// Opens (or creates) the library at `path` and migrates it to [`SCHEMA_VERSION`].
 pub fn open(path: &std::path::Path) -> Result<Connection> {
     prepare(Connection::open(path)?)
@@ -117,6 +131,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V2)?;
         tx.pragma_update(None, "user_version", 2)?;
+        tx.commit()?;
+    }
+    if found < 3 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V3)?;
+        tx.pragma_update(None, "user_version", 3)?;
         tx.commit()?;
     }
     Ok(())

@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 /// The longest URL an add-on may name.
@@ -30,7 +30,7 @@ pub enum Tier {
 }
 
 impl Tier {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Tier::Low => "low",
             Tier::High => "high",
@@ -59,7 +59,7 @@ impl Delivery {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Manifest {
     pub stash: u32,
     pub id: String,
@@ -167,7 +167,54 @@ pub struct AddonError {
     pub retry_after: Option<u32>,
 }
 
+impl Code {
+    /// The code in the contract's spelling; the host's own three in the same style.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Code::BadRequest => "bad_request",
+            Code::Unauthorized => "unauthorized",
+            Code::NotFound => "not_found",
+            Code::QualityUnavailable => "quality_unavailable",
+            Code::RegionUnavailable => "region_unavailable",
+            Code::RateLimited => "rate_limited",
+            Code::QuotaExceeded => "quota_exceeded",
+            Code::Unavailable => "unavailable",
+            Code::Timeout => "timeout",
+            Code::Network => "network",
+            Code::InvalidResponse => "invalid_response",
+        }
+    }
+}
+
 impl AddonError {
+    /// The failure in a listener's words.
+    pub fn in_words(&self) -> String {
+        let what = match self.code {
+            Code::BadRequest => "the add-on did not understand the request",
+            Code::Unauthorized => "the add-on did not accept your key",
+            Code::NotFound => "the add-on does not have it",
+            Code::QualityUnavailable => {
+                "the add-on does not have it in a quality that was asked for"
+            }
+            Code::RegionUnavailable => "the add-on cannot give it in your region",
+            Code::RateLimited => "the add-on is being asked too often",
+            Code::QuotaExceeded => "your allowance with the add-on is used up",
+            Code::Unavailable => "the add-on is not working right now",
+            Code::Timeout => "the add-on did not answer in time",
+            Code::Network => "the add-on could not be reached",
+            Code::InvalidResponse => {
+                "the add-on answered with something the contract does not allow"
+            }
+        };
+        match self.code {
+            // The host's own messages say what was wrong with the answer.
+            Code::InvalidResponse | Code::BadRequest if !self.message.is_empty() => {
+                format!("{what} ({})", self.message)
+            }
+            _ => what.to_string(),
+        }
+    }
+
     fn host(code: Code, message: impl Into<String>) -> Self {
         Self {
             code,
@@ -194,6 +241,7 @@ type Result<T> = std::result::Result<T, AddonError>;
 /// An add-on the listener added, ready to be asked.
 pub struct Addon {
     pub manifest: Manifest,
+    link: String,
     base: String,
     agent: ureq::Agent,
 }
@@ -204,32 +252,54 @@ impl Addon {
     /// The link must be https (plain http only on this computer, for development), and the manifest must be a v1
     /// server add-on with a well-formed id. Redirects are not followed: an add-on is the origin its link names.
     pub fn from_link(link: &str) -> Result<Self> {
-        let url = checked_url(link, "the add-on link")?;
-        let Some(base) = url
-            .as_str()
-            .split('?')
-            .next()
-            .and_then(|u| u.strip_suffix("/manifest.json"))
-        else {
-            return Err(AddonError::host(
-                Code::BadRequest,
-                "an add-on link ends in /manifest.json",
-            ));
-        };
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(TIMEOUT))
-            .max_redirects(0)
-            .http_status_as_error(false)
-            .user_agent(concat!("Stash-desktop/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .into();
+        let (url, base) = base_of(link)?;
+        let agent = agent();
         let manifest: Manifest = get_json(&agent, url.as_str())?;
         check_manifest(&manifest)?;
         Ok(Self {
             manifest,
-            base: base.to_string(),
+            link: url.into(),
+            base,
             agent,
         })
+    }
+
+    /// An add-on added earlier, from the link and the manifest that were kept. Nothing is asked of the add-on, so
+    /// it is there when the computer is offline; the link and the manifest are checked as when they were first read.
+    pub fn from_stored(link: &str, manifest: &str) -> Result<Self> {
+        let (url, base) = base_of(link)?;
+        let manifest: Manifest = serde_json::from_str(manifest).map_err(|e| {
+            AddonError::invalid(format!("the manifest that was kept cannot be read: {e}"))
+        })?;
+        check_manifest(&manifest)?;
+        Ok(Self {
+            manifest,
+            link: url.into(),
+            base,
+            agent: agent(),
+        })
+    }
+
+    /// The address of the manifest. It can carry the listener's own key: keep it, do not show it.
+    pub fn link(&self) -> &str {
+        &self.link
+    }
+
+    /// The manifest as JSON, for keeping.
+    pub fn manifest_json(&self) -> String {
+        serde_json::to_string(&self.manifest).unwrap_or_else(|_| "{}".into())
+    }
+
+    /// The server the add-on is on: the part of its link that is safe to show.
+    pub fn host(&self) -> String {
+        Url::parse(&self.link)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default()
+    }
+
+    pub fn offers_resource(&self, resource: &str) -> bool {
+        self.manifest.resources.iter().any(|r| r == resource)
     }
 
     fn offers(&self, resource: &str) -> Result<()> {
@@ -276,6 +346,34 @@ impl Addon {
         check_stream(&info, want)?;
         Ok(info)
     }
+}
+
+/// The link as a URL, and the address everything else of the add-on is under.
+fn base_of(link: &str) -> Result<(Url, String)> {
+    let url = checked_url(link, "the add-on link")?;
+    let base = url
+        .as_str()
+        .split('?')
+        .next()
+        .and_then(|u| u.strip_suffix("/manifest.json"))
+        .map(str::to_string);
+    match base {
+        Some(base) => Ok((url, base)),
+        None => Err(AddonError::host(
+            Code::BadRequest,
+            "an add-on link ends in /manifest.json",
+        )),
+    }
+}
+
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(TIMEOUT))
+        .max_redirects(0)
+        .http_status_as_error(false)
+        .user_agent(concat!("Stash-desktop/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .into()
 }
 
 /// A URL an add-on (or the listener's link) names: https, or http on this computer only; no credentials in it.
