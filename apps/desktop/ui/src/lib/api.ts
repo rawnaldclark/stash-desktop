@@ -11,11 +11,13 @@ export type TrackRow = {
   codec: string | null;
   sample_rate: number | null;
   bit_depth: number | null;
-  origin: "file" | "addon";
+  /** "described": a song known by its description (imported); it plays through the add-ons. */
+  origin: "file" | "addon" | "described";
   sort_key: string;
+  liked: boolean;
 };
 
-export type Counts = { tracks: number; albums: number; artists: number };
+export type Counts = { tracks: number; albums: number; artists: number; liked: number; playlists: number };
 
 type Shell = { __STASH_CORE__?: string; __STASH_BENCH__?: boolean };
 const shell = window as unknown as Shell;
@@ -51,6 +53,43 @@ export const tracksAt = (offset: number, limit: number, signal?: AbortSignal) =>
 
 export const search = (query: string, limit: number, signal?: AbortSignal) =>
   get<{ rows: TrackRow[] }>(`/api/search?q=${encodeURIComponent(query)}&limit=${limit}`, signal).then((r) => r.rows);
+
+// ---- The listener's lists, and bringing a library in from another Stash
+
+export type PlaylistRow = { id: number; name: string; tracks: number; followed: boolean };
+
+export const likedAt = (offset: number, limit: number, signal?: AbortSignal) =>
+  get<{ rows: TrackRow[] }>(`/api/liked?offset=${offset}&limit=${limit}`, signal).then((r) => r.rows);
+
+export const playlists = () => get<{ rows: PlaylistRow[] }>("/api/playlists").then((r) => r.rows);
+
+export const playlistTracksAt = (id: number, offset: number, limit: number, signal?: AbortSignal) =>
+  get<{ rows: TrackRow[] }>(`/api/playlists/${id}/tracks?offset=${offset}&limit=${limit}`, signal).then((r) => r.rows);
+
+/** What an import changed. */
+export type Imported = {
+  source: string;
+  /** Who wrote the file, in the file's own words. */
+  generator: string | null;
+  summary: {
+    songs_added: number;
+    songs_already: number;
+    likes_added: number;
+    likes_already: number;
+    playlists_added: number;
+    playlists_merged: number;
+    playlist_songs_added: number;
+    plays_added: number;
+    plays_already: number;
+  };
+  counts: Counts;
+};
+
+/** Hands the core a library file from the Android app or the web player. The file goes as it is: the core reads it. */
+export async function importLibrary(file: Blob): Promise<Imported> {
+  const sent = { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file };
+  return answer<Imported>("/api/import", await fetch(`${core}/api/import`, sent));
+}
 
 // ---- Add-ons
 
@@ -140,6 +179,8 @@ export type PlayerState = {
   duration_ms: number;
   /** What the add-on said the stream is. */
   tier: Tier | null;
+  /** The id of the add-on the stream comes from. */
+  served_by: string | null;
   signal: Signal | null;
   error: string | null;
 };
@@ -154,6 +195,7 @@ export const IDLE: PlayerState = {
   position_ms: 0,
   duration_ms: 0,
   tier: null,
+  served_by: null,
   signal: null,
   error: null,
 };
@@ -165,6 +207,10 @@ const told = (path: string, body: unknown) => post<Partial<PlayerState>>(path, b
 export const player = () => get<Partial<PlayerState>>("/api/player").then(whole);
 /** Plays the library's rows from `offset` on, in the list's order. */
 export const playFrom = (offset: number) => told("/api/player/play", { offset });
+/** Plays the liked songs from `offset` on, the newest like first. */
+export const playLiked = (offset: number) => told("/api/player/play", { liked: true, offset });
+/** Plays a playlist from `offset` on. */
+export const playPlaylist = (playlist: number, offset: number) => told("/api/player/play", { playlist, offset });
 /** Plays these library tracks, in this order. */
 export const playTracks = (ids: number[]) => told("/api/player/play", { ids });
 /** Plays these tracks an add-on found, in this order. */

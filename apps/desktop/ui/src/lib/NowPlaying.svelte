@@ -59,7 +59,7 @@
 
   /** Where an add-on's track comes from, and whether the sound is what the add-on said: "Demo folder, lossless". */
   function origin(): { text: string; disagrees: boolean } | null {
-    const from = addonName ?? (player.track?.addon ? "an add-on" : null);
+    const from = addonName ?? (player.track?.addon || player.served_by ? "an add-on" : null);
     if (!from) return null;
     if (!player.tier) return { text: from, disagrees: false };
     const codec = player.signal?.codec ?? "";
@@ -152,7 +152,7 @@
     </div>
     <div class="signal" title="What the audio engine reports between the file and the sound card">
       {#if loading}
-        <span>Asking {addonName ?? "the add-on"} for the stream…</span>
+        <span>{addonName ? `Asking ${addonName} for the stream…` : "Asking your add-ons for this song…"}</span>
       {:else if signal}
         <span>{signal.from} → {signal.to}</span>
         <span class="note">

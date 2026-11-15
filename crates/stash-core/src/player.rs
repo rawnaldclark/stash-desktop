@@ -628,7 +628,7 @@ impl Player {
     }
 
     pub fn state(&self) -> PlayerState {
-        let (queue_len, index, starting, track, tier, served_by, accepted, error) = {
+        let (queue_len, index, starting, asking, track, tier, served_by, accepted, error) = {
             let shared = self.ctx.shared.lock().unwrap();
             let index = shared.index();
             let track = index
@@ -639,6 +639,8 @@ impl Player {
                 shared.queue.len(),
                 index,
                 shared.starting,
+                // A file that is starting is as good as playing; a track that has to be asked for is not yet.
+                track.as_ref().is_some_and(|t| t.asks()),
                 track,
                 shared.slot().and_then(|s| s.tier.clone()),
                 shared.slot().and_then(|s| s.addon.clone()),
@@ -694,10 +696,10 @@ impl Player {
         });
         PlayerState {
             status: if !playing {
-                if starting.is_some() {
-                    "loading"
-                } else {
-                    "idle"
+                match starting {
+                    Some(_) if asking => "loading",
+                    Some(_) => "playing",
+                    None => "idle",
                 }
             } else if mpv.get("pause").as_deref() == Some("yes") {
                 "paused"
