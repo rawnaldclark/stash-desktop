@@ -15,6 +15,11 @@
 	// ---- Sound
 
 	const now = $derived(outputSentence(S.v.signal));
+	const RG = [
+		['off', 'Off'],
+		['track', 'By song'],
+		['album', 'By album']
+	] as const;
 
 	/** Where the sound goes: the system's outputs, read again whenever the window comes back to the front (one may have been plugged in). */
 	let outs = $state<core.Devices | null>(null);
@@ -210,6 +215,17 @@
 					<p class="set-p">Off, the system mixes Stash with everything else at one fixed rate, and tracks at another rate are resampled.</p>
 					<p class="set-p">The volume here changes the samples themselves. To send a track out untouched, leave it at 100.</p>
 					{#if now}<p class="set-p" role="status"><b>{now}</b></p>{/if}
+				</div>
+				<div class="set-row set-col">
+					<div class="set-lab">
+						<span class="set-name" id="rg-l">Even out loudness</span>
+						<span class="set-sub">Uses the loudness measured in a song’s tags (ReplayGain). By song makes every song equally loud; by album keeps the quiet and loud songs of an album as they were made. A song it evens out has its samples changed, so it is not bit-perfect; songs without the tags play as they are.</span>
+					</div>
+					<div class="chips" role="group" aria-labelledby="rg-l">
+						{#each RG as [mode, label] (mode)}
+							<button type="button" class="chip" class:on={S.v.replaygain === mode} aria-pressed={S.v.replaygain === mode} onclick={() => player.setReplaygain(mode)}>{label}</button>
+						{/each}
+					</div>
 				</div>
 			{/if}
 		</div>

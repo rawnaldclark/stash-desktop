@@ -1971,10 +1971,25 @@ fn the_sound_output_is_chosen_and_kept() {
         .to_string();
     let chosen = first.post("/api/player/device", json!({ "name": last }));
     assert_eq!(chosen["device"].as_str(), Some(last.as_str()));
+    // Evening out loudness: refused unless off, track or album; kept for the next run like the output.
+    let wrong = first
+        .agent
+        .post(format!("{}/api/player/replaygain", first.base))
+        .send_json(json!({ "mode": "loud" }))
+        .unwrap();
+    assert_eq!(wrong.status().as_u16(), 400);
+    assert_eq!(
+        first.post("/api/player/replaygain", json!({ "mode": "album" }))["replaygain"].as_str(),
+        Some("album")
+    );
     let second = open();
     assert_eq!(
         second.get("/api/player/devices").1["device"].as_str(),
         Some(last.as_str())
+    );
+    assert_eq!(
+        second.get("/api/player").1["replaygain"].as_str(),
+        Some("album")
     );
 
     // Chosen, then gone (unplugged) by the next run: the system's choice plays, and the window is told which one is missing.

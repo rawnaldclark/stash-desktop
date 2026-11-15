@@ -223,6 +223,8 @@ export type Signal = {
 	mode: 'exclusive' | 'shared' | null;
 	resampled: boolean;
 	converted: boolean;
+	/** The samples are made louder or softer on the way: the volume is not at 100, or ReplayGain evens the song out. */
+	scaled: boolean;
 };
 
 export type CoreTrack = {
@@ -260,6 +262,8 @@ export type CorePlayer = {
 	volume: number;
 	/** Stash has the sound card to itself. */
 	exclusive: boolean;
+	/** How loudness is evened out between songs (ReplayGain). */
+	replaygain: Replaygain;
 	shuffle: boolean;
 	repeat: 'off' | 'all' | 'one';
 	/** What the queue is playing from, in the words it was started with. */
@@ -285,6 +289,7 @@ export const IDLE: CorePlayer = {
 	served_by: null,
 	volume: 100,
 	exclusive: false,
+	replaygain: 'off',
 	shuffle: false,
 	repeat: 'off',
 	from: null,
@@ -346,6 +351,9 @@ export const devices = () => get<Devices>('/api/player/devices');
 export const setDevice = (name: string) => post<Devices>('/api/player/device', { name });
 /** Takes the sound card for Stash alone, or gives it back. */
 export const setExclusive = (exclusive: boolean) => told('/api/player/exclusive', { exclusive });
+/** Off; every song equally loud ("track"); or the album's own differences kept ("album"). */
+export type Replaygain = 'off' | 'track' | 'album';
+export const setReplaygain = (mode: Replaygain) => told('/api/player/replaygain', { mode });
 export const setShuffle = (on: boolean) => told('/api/player/shuffle', { on });
 export const setRepeat = (mode: 'off' | 'all' | 'one') => told('/api/player/repeat', { mode });
 /** Adds songs to the queue: at its end, or (`next`) right after the one playing. */

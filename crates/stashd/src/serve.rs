@@ -508,6 +508,9 @@ impl Core {
             if kept("exclusive").as_deref() == Some("1") {
                 let _ = playing.set_exclusive(true);
             }
+            if let Some(mode) = kept("replaygain") {
+                let _ = playing.set_replaygain(&mode);
+            }
             // The output chosen last time, when it is connected; else the system's own choice, and the choice
             // holds for when it is back.
             if let Some(chosen) = kept("device").and_then(|text| chosen_device(&text))
@@ -913,6 +916,19 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
                 .lock()
                 .unwrap()
                 .set_setting("exclusive", if exclusive { "1" } else { "0" })?;
+        }
+        // Evens out loudness between songs: {"mode": "off" | "track" | "album"}; it holds until changed.
+        "/api/player/replaygain" => {
+            let mode = body.get("mode").and_then(Value::as_str).unwrap_or("off");
+            if !["off", "track", "album"].contains(&mode) {
+                return Ok(Some(refuse(400, "mode is off, track or album")));
+            }
+            playing.set_replaygain(mode)?;
+            state
+                .library
+                .lock()
+                .unwrap()
+                .set_setting("replaygain", mode)?;
         }
         _ => return Ok(None),
     }

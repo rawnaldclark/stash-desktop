@@ -136,6 +136,9 @@ pub struct Signal {
     pub resampled: bool,
     /// The sample format sent to the output is not the decoder's.
     pub converted: bool,
+    /// The samples are made louder or softer on the way: the volume is not at 100, or ReplayGain evens this track
+    /// out.
+    pub scaled: bool,
 }
 
 /// What happens at the end of the queue, or of a track.
@@ -192,6 +195,8 @@ pub struct PlayerState {
     pub volume: u32,
     /// Stash has the sound card to itself: each track goes out at its own format and other programs are silent.
     pub exclusive: bool,
+    /// How loudness is evened out between songs from the gain in their tags: "off", "track" or "album".
+    pub replaygain: &'static str,
     pub signal: Option<Signal>,
     /// The last track that could not be played, and why.
     pub error: Option<String>,
@@ -273,6 +278,17 @@ pub struct Device {
     pub name: String,
     /// What the system calls it ("Speakers (USB Sound Device)").
     pub description: String,
+}
+
+/// A gain as tags write it ("-6.50 dB", "+1.2 dB"; R128's whole numbers in 1/256 dB are told apart only by being
+/// non-zero, which is all that is asked of them here).
+fn gain_db(text: &str) -> Option<f64> {
+    let number = text.split_whitespace().next()?;
+    let number = number
+        .strip_suffix("dB")
+        .or_else(|| number.strip_suffix("db"))
+        .unwrap_or(number);
+    number.trim_start_matches('+').parse::<f64>().ok()
 }
 
 /// A system's name for an output, without the padding some drivers leave in it.
@@ -1320,6 +1336,18 @@ impl Player {
         Ok(())
     }
 
+    /// Evens out loudness between songs from the gain their tags carry (ReplayGain): `"track"` makes every song
+    /// equally loud, `"album"` keeps the differences between the songs of an album, `"off"` plays them as they are.
+    /// Heard at once, also in the middle of a song. A song without the tags plays as it is.
+    pub fn set_replaygain(&self, mode: &str) -> Result<()> {
+        let mode = match mode {
+            "track" | "album" => mode,
+            _ => "no",
+        };
+        self.ctx.engine.mpv().set("replaygain", mode)?;
+        Ok(())
+    }
+
     /// The queue from `offset` on.
     pub fn queue_at(&self, offset: usize, limit: usize) -> Vec<QueueItem> {
         let shared = self.ctx.shared.lock().unwrap();
@@ -1462,6 +1490,15 @@ impl Player {
         };
         let number = |name: &str| mpv.get(name).and_then(|v| v.parse::<u32>().ok());
         let playing = index.is_some();
+        let volume = mpv
+            .get("volume")
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(100.0);
+        let replaygain = match mpv.get("replaygain").as_deref() {
+            Some("track") => "track",
+            Some("album") => "album",
+            _ => "off",
+        };
         let resting_length = track.as_ref().and_then(|t| t.duration_ms).unwrap_or(0);
         let signal = playing.then(|| {
             let decoded = Format {
@@ -1483,6 +1520,22 @@ impl Player {
                 converted: decoded.format.is_some()
                     && output.format.is_some()
                     && plain(&decoded.format) != plain(&output.format),
+                scaled: (volume - 100.0).abs() > 0.01 || {
+                    // The engine evens a track out when its tags carry a track gain; by album, the album's gain
+                    // when there is one.
+                    let gain = |key: &str| {
+                        mpv.get(&format!("metadata/by-key/{key}"))
+                            .and_then(|text| gain_db(&text))
+                            .is_some_and(|db| db.abs() >= 0.005)
+                    };
+                    let track = gain("REPLAYGAIN_TRACK_GAIN") || gain("R128_TRACK_GAIN");
+                    let album = gain("REPLAYGAIN_ALBUM_GAIN") || gain("R128_ALBUM_GAIN");
+                    match replaygain {
+                        "track" => track,
+                        "album" => track || album,
+                        _ => false,
+                    }
+                },
                 decoded,
                 output,
                 driver: mpv.get("current-ao"),
@@ -1533,12 +1586,9 @@ impl Player {
             },
             tier,
             served_by,
-            volume: mpv
-                .get("volume")
-                .and_then(|v| v.parse::<f64>().ok())
-                .map(|v| v.round().clamp(0.0, 100.0) as u32)
-                .unwrap_or(100),
+            volume: volume.round().clamp(0.0, 100.0) as u32,
             exclusive: mpv.get("audio-exclusive").as_deref() == Some("yes"),
+            replaygain,
             signal,
             error,
             resting: resting.is_some(),

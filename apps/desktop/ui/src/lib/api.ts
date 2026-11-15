@@ -7,7 +7,7 @@ import type { Readable } from 'svelte/store';
 import type { SearchResult } from './sources/search';
 import type { Album, Artist, Artwork, Descriptor, Lyrics, LyricLine, LyricWord, Track } from './sources/contract';
 import type { LibraryItem } from './identity';
-import type { AddonInfo, Counts, Signal, Tier } from './core';
+import type { AddonInfo, Counts, Replaygain, Signal, Tier } from './core';
 
 export type { Readable, SearchResult, Counts, Album, Artist, Artwork, Descriptor, Lyrics, LyricLine, LyricWord, Track, LibraryItem, Signal, Tier };
 
@@ -57,6 +57,8 @@ export interface PlayerState {
 	servedBy: string | null;
 	/** Stash has the sound card to itself (Settings › Sound). */
 	exclusive: boolean;
+	/** How loudness is evened out between songs (Settings › Sound). */
+	replaygain: Replaygain;
 }
 
 export interface PlayerAPI {
@@ -85,6 +87,7 @@ export interface PlayerAPI {
 	setVolume(v: number): void;
 	/** Takes the sound card for Stash alone, or gives it back. */
 	setExclusive(on: boolean): void;
+	setReplaygain(mode: Replaygain): void;
 	/** Every song of the queue, in order (read from the core a page at a time): what "Save as playlist" keeps. */
 	wholeQueue(): Promise<LibraryItem[]>;
 }
@@ -191,5 +194,6 @@ export const INITIAL_PLAYER_STATE: PlayerState = {
 	sourceBitDepth: null,
 	tier: null,
 	servedBy: null,
-	exclusive: false
+	exclusive: false,
+	replaygain: 'off'
 };

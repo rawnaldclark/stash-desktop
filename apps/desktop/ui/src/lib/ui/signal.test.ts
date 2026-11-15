@@ -10,6 +10,7 @@ const sig = (over: Partial<Signal> & { decoded?: Signal['decoded'] } = {}): Sign
 	mode: 'shared',
 	resampled: false,
 	converted: false,
+	scaled: false,
 	...over
 });
 
@@ -41,6 +42,8 @@ describe('verdict', () => {
 	it('Lossless: a lossless codec that is not bit-perfect and not resampled', () => {
 		expect(verdict(sig())).toEqual({ word: 'Lossless', color: '#93C5FD' });
 		expect(verdict(sig({ mode: 'exclusive', converted: true }))?.word).toBe('Lossless');
+		// The volume below 100, or ReplayGain, makes the samples louder or softer: not bit-perfect.
+		expect(verdict(sig({ mode: 'exclusive', scaled: true }))?.word).toBe('Lossless');
 		expect(verdict(sig({ codec: 'pcm_s24le' }))?.word).toBe('Lossless');
 	});
 	it('Resampled: the sample rate is changed on the way', () => {

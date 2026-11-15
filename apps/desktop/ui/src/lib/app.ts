@@ -230,7 +230,8 @@ function take(a: core.CorePlayer): void {
 		sourceBitDepth: a.track?.id !== null && a.track?.id !== undefined ? (seen.get(a.track.id)?.bitDepth ?? null) : null,
 		tier: a.tier,
 		servedBy: a.served_by,
-		exclusive: a.exclusive
+		exclusive: a.exclusive,
+		replaygain: a.replaygain ?? 'off'
 	});
 	readQueue(a);
 	// A stream from an add-on the window has not heard of (added from somewhere else): the list is read again.
@@ -362,6 +363,7 @@ const player: PlayerAPI = {
 		void command(() => core.setVolume(Math.round(to * 100)));
 	},
 	setExclusive: (on) => void command(() => core.setExclusive(on)),
+	setReplaygain: (mode) => void command(() => core.setReplaygain(mode)),
 	wholeQueue: async () => (await allPages((o, l) => core.queueAt(o, l))).map(itemOfQueued)
 };
 

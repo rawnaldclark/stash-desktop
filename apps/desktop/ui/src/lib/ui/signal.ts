@@ -60,14 +60,15 @@ export const VERDICTS = {
 
 /**
  * The verdict beside the badge. A lossy codec is Lossy whatever happens after it. Otherwise: Resampled when the engine changes the
- * sample rate; Bit-perfect when Stash has the sound card alone and the samples go out untouched; Lossless for a lossless codec that
- * is not bit-perfect (the system's mixer is in the way, or the sample format was changed). Null when the codec is not known.
+ * sample rate; Bit-perfect when Stash has the sound card alone and the samples go out untouched (same format, volume at 100, no
+ * ReplayGain); Lossless for a lossless codec that is not bit-perfect (the system's mixer is in the way, the sample format was
+ * changed, or the samples were made louder or softer). Null when the codec is not known.
  */
 export function verdict(signal: Signal | null | undefined): Verdict | null {
 	if (!signal) return null;
 	if (isLossy(signal.codec)) return VERDICTS.lossy;
 	if (signal.resampled) return VERDICTS.resampled;
-	if (signal.mode === 'exclusive' && !signal.converted) return VERDICTS.bitPerfect;
+	if (signal.mode === 'exclusive' && !signal.converted && !signal.scaled) return VERDICTS.bitPerfect;
 	if (isLossless(signal.codec)) return VERDICTS.lossless;
 	return null;
 }
@@ -94,6 +95,6 @@ export function origin(addonName: string | null, tier: Tier | null, signal: Sign
 export function outputSentence(signal: Signal | null | undefined): string | null {
 	if (!signal || !signal.output.sample_rate) return null;
 	const how = signal.mode === 'exclusive' ? 'for Stash alone' : signal.mode === 'shared' ? 'shared with other programs' : '';
-	const kept = !signal.resampled && !signal.converted;
+	const kept = !signal.resampled && !signal.converted && !signal.scaled;
 	return `Right now the sound card is open at ${kHz(signal.output.sample_rate)}${how ? `, ${how}` : ''}. The track is ${kept ? 'going out as it is' : 'being changed on the way'} (${kHz(signal.decoded.sample_rate)} in).`;
 }

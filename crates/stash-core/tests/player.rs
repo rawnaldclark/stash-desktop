@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use common::{RATE, library, scratch, signal, write_wav};
+use common::{RATE, library, read_wav, scratch, signal, write_wav};
 use stash_core::audio::Output;
 use stash_core::player::{
     AddonTrack, Failure, Kept, Located, Player, PlayerState, QueueItem, Repeat, Resolver, Settings,
@@ -876,4 +876,67 @@ fn the_sound_outputs_are_listed_and_one_is_chosen() {
     assert_eq!(player.device(), last);
     player.set_device("auto").unwrap();
     assert_eq!(player.device(), "auto");
+}
+
+#[test]
+fn replaygain_evens_a_song_out_and_the_signal_says_the_samples_are_scaled() {
+    let Some(library) = library() else { return };
+    let dir = scratch("replaygain");
+    let song = dir.join("tagged.wav");
+    write_wav(&song, RATE, &signal(RATE as usize * 3));
+    // A track gain of -6.02 dB in the file's tags: half as loud, sample for sample.
+    {
+        use lofty::config::WriteOptions;
+        use lofty::file::{AudioFile, TaggedFileExt};
+        use lofty::tag::{ItemKey, Tag, TagType};
+        let mut file = lofty::read_from_path(&song).unwrap();
+        let mut tag = Tag::new(TagType::Id3v2);
+        tag.insert_text(ItemKey::ReplayGainTrackGain, "-6.02 dB".into());
+        file.insert_tag(tag);
+        file.save_to_path(&song, WriteOptions::default()).unwrap();
+    }
+    let peak = |path: &Path| {
+        read_wav(path)
+            .samples()
+            .iter()
+            .map(|s| (*s as i32).abs())
+            .max()
+            .unwrap_or(0)
+    };
+    // Played to a file, as fast as the decoder goes: off, then by song.
+    let played = |mode: &str, out: &Path| {
+        let player = Player::start(&library, &Output::PcmFile(out.to_path_buf())).unwrap();
+        player.set_replaygain(mode).unwrap();
+        player.play(vec![item(1, "Tagged", &song)]).unwrap();
+        until(&player, "the end of the queue", |s| s.resting);
+    };
+    let (plain, evened) = (dir.join("plain.wav"), dir.join("evened.wav"));
+    played("off", &plain);
+    played("track", &evened);
+    let (loud, soft) = (peak(&plain), peak(&evened));
+    let ratio = soft as f64 / loud as f64;
+    assert!(
+        (ratio - 0.5).abs() < 0.02,
+        "peaks {loud} and {soft}: ratio {ratio}"
+    );
+
+    // In real time: the signal says when the samples are scaled, by ReplayGain or by the volume, changed mid-song.
+    let player = Player::start(&library, &Output::Silent).unwrap();
+    player.set_replaygain("track").unwrap();
+    player.play(vec![item(1, "Tagged", &song)]).unwrap();
+    let on = until(&player, "the song playing", |s| {
+        s.signal.as_ref().is_some_and(|g| g.codec.is_some())
+    });
+    assert_eq!(
+        (on.replaygain, on.signal.as_ref().map(|g| g.scaled)),
+        ("track", Some(true))
+    );
+    player.set_replaygain("off").unwrap();
+    until(&player, "nothing scaling the samples", |s| {
+        s.replaygain == "off" && s.signal.as_ref().is_some_and(|g| !g.scaled)
+    });
+    player.set_volume(80.0).unwrap();
+    until(&player, "the volume scaling the samples", |s| {
+        s.signal.as_ref().is_some_and(|g| g.scaled)
+    });
 }
