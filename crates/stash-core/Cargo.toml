@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+libloading = "0.9.1"
 rusqlite = { version = "0.42.0", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"

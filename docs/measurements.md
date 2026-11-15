@@ -3,7 +3,7 @@
 Milestone 1 asks four questions, each answered with numbers on real hardware:
 
 1. Does a 100,000-track library open, search and page fast enough that a list never waits? **Measured below.**
-2. Does the audio engine play gapless, and in an exclusive bit-perfect mode? *Not measured yet.*
+2. Does the audio engine play gapless, and in an exclusive bit-perfect mode? **Gapless and bit-exact output: measured below. Exclusive mode on a real device: not yet.**
 3. Does a list of 100,000 rows and an album grid scroll smoothly in the window? *Not measured yet.*
 4. What do start-up time and memory look like for the whole app? *Not measured yet.*
 
@@ -46,3 +46,21 @@ Building the library took 8.0 s (12,500 tracks a second), in one transaction.
 ### Not covered yet
 
 Measured on one machine and one made-up library. Real libraries have longer titles, more words, non-Latin scripts and messy tags. A second run on a real collection's tags, and on a slower disk, would say more.
+
+## 2. The audio engine
+
+The engine is libmpv (client API 2.6, the build `scripts/fetch-mpv.ps1` pins), loaded at run time. The tests in `crates/stash-core/tests/gapless.rs` send the engine's output to a WAV file holding exactly the samples a sound card would receive, and compare them with what went in.
+
+| Question | How it was asked | Result |
+|---|---|---|
+| Is a join between two tracks gapless? | One continuous stereo signal (441 Hz left, 663 Hz right, 16-bit, 44.1 kHz) is cut into two WAV files at frame 30,011, not on a zero crossing or a block boundary, and the two are played one after the other. | The output is the uncut signal **sample for sample**: 70,018 frames in, 70,018 out, no sample added, dropped or changed. The audio output was opened once for both tracks. |
+| Is the path bit-exact? | The same comparison: any resampling, dither or volume scaling would change sample values. | Every sample is identical, and the output's format is the files' own (16-bit, 44.1 kHz, stereo). |
+| What happens when the next track has another sample rate? | A 44.1 kHz file followed by a 96 kHz file. | The output is closed and opened again at 96 kHz; the second track is not resampled. The join is then not gapless, which is the trade-off of never resampling. |
+| What does a file that cannot be opened do? | A missing file followed by a real one. | The missing one ends with an error and the next one plays. |
+
+### Not covered yet
+
+- **Exclusive mode on a real device.** These measurements stop at the engine's output stream. Whether WASAPI exclusive mode opens at each track's own rate, and what it does to other programs' sound, has to be checked on a sound card.
+- **Compressed formats.** WAV has no encoder delay. Gapless FLAC should behave the same; AAC, MP3 and Opus carry padding the decoder must trim, and need their own test files.
+- **Streams.** A join between two network streams depends on the next one being ready in time (`prefetch-playlist`), which needs a server to measure against.
+- **Crossfade.** mpv has none; it needs a mixer of our own.

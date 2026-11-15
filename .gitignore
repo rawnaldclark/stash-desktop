@@ -6,3 +6,4 @@ node_modules/
 dist/
 .env
 *.pem
+third_party/
