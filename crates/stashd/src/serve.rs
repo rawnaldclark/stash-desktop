@@ -22,8 +22,11 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use stash_core::addons::{Addon, AddonError, Code, StreamRequest, Track};
 use stash_core::audio::{Output, find_library};
+use stash_core::import::Song;
 use stash_core::import::{ImportError, web_library};
-use stash_core::player::{AddonTrack, Failure, Located, Player, QueueItem, Resolver, Settings};
+use stash_core::player::{
+    AddonTrack, Failure, Located, OnPlay, Player, QueueItem, Resolver, Settings,
+};
 use stash_core::{Library, StoredAddon};
 use tiny_http::{Header, Method, Request, Response, Server};
 use url::Url;
@@ -52,6 +55,8 @@ pub struct Options {
     pub audio: Option<Output>,
     /// The libmpv file for the player; without it, the one `STASH_MPV_LIBRARY` names or one beside the program.
     pub mpv: Option<PathBuf>,
+    /// When a play counts, in seconds (see the player's settings); `None` is the rule the other Stashes use.
+    pub play_counts_between_seconds: Option<(f64, f64)>,
 }
 
 type Reply = Response<std::io::Cursor<Vec<u8>>>;
@@ -272,6 +277,22 @@ fn resolver(registry: Registry, library: Arc<Mutex<Library>>) -> Resolver {
     })
 }
 
+/// A play that counted is kept with its song, when the song is the library's.
+fn keep_plays(library: Arc<Mutex<Library>>) -> OnPlay {
+    Arc::new(move |item: &QueueItem, started_at_ms: i64| {
+        if let Some(id) = item.id {
+            let _ = library.lock().unwrap().record_play(id, started_at_ms);
+        }
+    })
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 fn addon_error(e: &AddonError) -> Value {
     json!({ "code": e.code.as_str(), "message": e.in_words(), "retry_after": e.retry_after })
 }
@@ -349,6 +370,10 @@ impl Core {
                 Some(engine) => {
                     let settings = Settings {
                         resolver: Some(resolver(Arc::clone(&addons), Arc::clone(&library))),
+                        on_play: Some(keep_plays(Arc::clone(&library))),
+                        counts_between_seconds: options
+                            .play_counts_between_seconds
+                            .unwrap_or(Settings::default().counts_between_seconds),
                         ..Settings::default()
                     };
                     Player::start_with(&engine, output, settings).map_err(|e| e.to_string())
@@ -424,7 +449,10 @@ fn answer(state: &State, mut request: Request) -> bool {
                 done = finished;
                 response
             }
-            Err(e) => refuse(500, &format!("{e:#}")),
+            Err(e) => match e.downcast_ref::<stash_core::Error>() {
+                Some(stash_core::Error::Refused(why)) => refuse(400, why),
+                _ => refuse(500, &format!("{e:#}")),
+            },
         }
     };
     // The desktop window is another origin than this server: it is told it may read the answer.
@@ -697,6 +725,128 @@ fn addons_route(
     Ok(Some(state.addons_reply()))
 }
 
+/// The listener's own doing: liking, playlists, and the library written out. `None`: the path is not one of these.
+fn lists_route(state: &State, request: &mut Request, path: &str) -> Result<Option<Reply>> {
+    // The library as the file the Android app and the web player read.
+    if *request.method() == Method::Get && path == "/api/export" {
+        let file = state.library.lock().unwrap().export(
+            now_ms(),
+            concat!("Stash desktop ", env!("CARGO_PKG_VERSION")),
+        )?;
+        let day = file["exportedAt"]
+            .as_str()
+            .unwrap_or_default()
+            .get(..10)
+            .unwrap_or("backup")
+            .to_string();
+        let named = format!("attachment; filename=\"stash-library-{day}.json\"");
+        return Ok(Some(
+            reply(200, "application/json", file.to_string().into_bytes())
+                .with_header(header("Content-Disposition", &named)),
+        ));
+    }
+    if *request.method() != Method::Post {
+        return Ok(None);
+    }
+    let playlist_verb = path
+        .strip_prefix("/api/playlists/")
+        .and_then(|rest| rest.split_once('/'))
+        .and_then(|(id, verb)| Some((id.parse::<i64>().ok()?, verb)));
+    if !matches!(
+        path,
+        "/api/tracks/like" | "/api/tracks/keep" | "/api/playlists"
+    ) && playlist_verb.is_none()
+    {
+        return Ok(None);
+    }
+    let body = body_json(request)?;
+    let number = |name: &str| body.get(name).and_then(Value::as_u64).map(|n| n as usize);
+    let mut library = state.library.lock().unwrap();
+    let now = now_ms();
+    let mut answer = json!({});
+    match (path, playlist_verb) {
+        ("/api/tracks/like", _) => {
+            let id = body.get("id").and_then(Value::as_i64).unwrap_or(0);
+            let liked = body.get("liked").and_then(Value::as_bool).unwrap_or(true);
+            if !library.set_liked(id, liked, now)? {
+                return Ok(Some(refuse(404, "no such song")));
+            }
+            answer = json!({ "id": id, "liked": liked });
+        }
+        // A track an add-on found becomes the library's own: the row it has for that song, or a new one.
+        ("/api/tracks/keep", _) => {
+            let addon = body
+                .get("addon")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let Some(item) =
+                addon_queue(addon, body.get("track").map(|t| json!([t])).as_ref()).pop()
+            else {
+                return Ok(Some(refuse(400, "not a track of an add-on")));
+            };
+            let theirs = item.addon.expect("made from an add-on's track");
+            let duration_ms = body["track"]
+                .get("duration_ms")
+                .and_then(Value::as_u64)
+                .filter(|ms| *ms > 0);
+            let id = library.adopt(&Song {
+                title: item.title,
+                artist: item.artist,
+                album: item.album,
+                duration_ms,
+                refs: vec![(theirs.addon, theirs.track)],
+                added_at_ms: Some(now),
+                ..Song::default()
+            })?;
+            answer = json!({ "id": id });
+        }
+        ("/api/playlists", _) => {
+            let name = body.get("name").and_then(Value::as_str).unwrap_or_default();
+            answer = json!({ "id": library.create_playlist(name, now)? });
+        }
+        (_, Some((id, verb))) => {
+            let done = match verb {
+                "rename" => library.rename_playlist(
+                    id,
+                    body.get("name").and_then(Value::as_str).unwrap_or_default(),
+                    now,
+                )?,
+                "delete" => library.delete_playlist(id)?,
+                "add" => {
+                    let ids: Vec<i64> = body
+                        .get("ids")
+                        .and_then(Value::as_array)
+                        .map(|ids| {
+                            ids.iter()
+                                .filter_map(Value::as_i64)
+                                .take(PAGE_CAP)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    answer = json!({ "added": library.add_to_playlist(id, &ids, now)? });
+                    true
+                }
+                "remove" => {
+                    library.remove_from_playlist(id, number("index").unwrap_or(usize::MAX), now)?
+                }
+                "move" => library.move_in_playlist(
+                    id,
+                    number("from").unwrap_or(usize::MAX),
+                    number("to").unwrap_or(usize::MAX),
+                    now,
+                )?,
+                _ => return Ok(None),
+            };
+            answer["done"] = json!(done);
+        }
+        _ => return Ok(None),
+    }
+    // Every answer carries the lists as they now are, so the window need not ask again.
+    answer["playlists"] = json!(library.playlists()?);
+    answer["counts"] = json!(library.counts()?);
+    Ok(Some(reply_json(200, answer)))
+}
+
 /// Takes in a library from another Stash: the request's body is the file. The file is read and checked with nothing
 /// else waiting, then merged in one go.
 fn import_route(state: &State, request: &mut Request) -> Result<Reply> {
@@ -709,11 +859,7 @@ fn import_route(state: &State, request: &mut Request) -> Result<Reply> {
     if bytes.len() as u64 > IMPORT_CAP {
         return Ok(refused(&ImportError::TooBig));
     }
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    let incoming = match web_library::read(&bytes, now_ms) {
+    let incoming = match web_library::read(&bytes, now_ms()) {
         Ok(incoming) => incoming,
         Err(e) => return Ok(refused(&e)),
     };
@@ -756,6 +902,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
     let library = || state.library.lock().unwrap();
     if *request.method() == Method::Post && path == "/api/import" {
         return Ok((import_route(state, request)?, false));
+    }
+    if let Some(response) = lists_route(state, request, &path)? {
+        return Ok((response, false));
     }
     // A playlist's tracks: /api/playlists/{id}/tracks
     if *request.method() == Method::Get

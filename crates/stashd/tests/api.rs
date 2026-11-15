@@ -144,6 +144,7 @@ fn a_client_reads_the_library_and_drives_the_player_over_http() {
         bench_out: None,
         audio: Some(Output::Silent),
         mpv: engine.clone(),
+        play_counts_between_seconds: None,
     })
     .unwrap();
     let base = format!("http://127.0.0.1:{}", core.port());
@@ -442,6 +443,7 @@ fn a_client_reads_the_library_and_drives_the_player_over_http() {
         bench_out: None,
         audio: None,
         mpv: None,
+        play_counts_between_seconds: None,
     })
     .unwrap();
     let second = Client {
@@ -491,6 +493,7 @@ fn a_library_file_is_imported_and_its_songs_play_through_an_add_on() {
         bench_out: None,
         audio: Some(Output::Silent),
         mpv: engine.clone(),
+        play_counts_between_seconds: None,
     })
     .unwrap();
     let base = format!("http://127.0.0.1:{}", core.port());
@@ -678,5 +681,238 @@ fn a_library_file_is_imported_and_its_songs_play_through_an_add_on() {
     assert_eq!(refs("bravo").len(), 1);
     assert!(refs("Nowhere").is_empty());
     assert!(refs("echo").is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn what_is_done_here_goes_out_as_a_library_file() {
+    let dir = std::env::temp_dir().join(format!("stash-api-lists-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let catalogue = dir.join("Catalogue");
+    std::fs::create_dir_all(&catalogue).unwrap();
+    for name in ["alpha", "bravo", "charlie"] {
+        silence(&catalogue.join(format!("{name}.wav")));
+    }
+    let engine = engine();
+    let core = Core::bind(Options {
+        db: dir.join("library.db"),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: Some(Output::Silent),
+        mpv: engine.clone(),
+        // The rule's floor of 30 s would leave nothing to count in 2 s of silence: here half the track decides.
+        play_counts_between_seconds: Some((0.2, 240.0)),
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    let demo = DemoAddon::bind(&catalogue, 0, Duration::from_millis(20)).unwrap();
+    let link = demo.link();
+    std::thread::spawn(move || demo.run());
+    client.post("/api/addons", json!({ "link": link }));
+
+    // A track the add-on found is kept: it becomes a song of the library, once.
+    let (_, found) = client.get("/api/addons/search?q=a&limit=10");
+    let track = |title: &str| {
+        found["groups"][0]["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["title"] == title)
+            .unwrap()
+            .clone()
+    };
+    let keep = |title: &str| {
+        client.post(
+            "/api/tracks/keep",
+            json!({ "addon": "demo.folder", "track": track(title) }),
+        )["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let (alpha, bravo, charlie) = (keep("alpha"), keep("bravo"), keep("charlie"));
+    assert_eq!(keep("alpha"), alpha);
+    assert_eq!(client.get("/api/counts").1["tracks"], 3);
+
+    // Liked, and the like taken back.
+    let liked = client.post("/api/tracks/like", json!({ "id": alpha, "liked": true }));
+    assert_eq!(
+        (liked["liked"].as_bool(), liked["counts"]["liked"].as_u64()),
+        (Some(true), Some(1))
+    );
+    client.post("/api/tracks/like", json!({ "id": bravo, "liked": true }));
+    let unliked = client.post("/api/tracks/like", json!({ "id": bravo, "liked": false }));
+    assert_eq!(unliked["counts"]["liked"].as_u64(), Some(1));
+    assert_eq!(
+        client
+            .send("/api/tracks/like", json!({ "id": 999, "liked": true }))
+            .0,
+        404
+    );
+
+    // A playlist: made, filled, reordered, renamed. A playlist without a name is refused in words.
+    let (status, refused) = client.send("/api/playlists", json!({ "name": "   " }));
+    assert_eq!(
+        (status, refused["error"]["message"].as_str()),
+        (400, Some("A playlist needs a name"))
+    );
+    let made = client.post("/api/playlists", json!({ "name": "Made here" }));
+    let mix = made["id"].as_i64().unwrap();
+    assert_eq!(
+        made["playlists"],
+        json!([{ "id": mix, "name": "Made here", "tracks": 0, "followed": false }])
+    );
+    let added = client.post(
+        &format!("/api/playlists/{mix}/add"),
+        json!({ "ids": [alpha, bravo, charlie, alpha] }),
+    );
+    assert_eq!(
+        (
+            added["added"].as_u64(),
+            added["playlists"][0]["tracks"].as_u64()
+        ),
+        (Some(3), Some(3))
+    );
+    let titles = |rows: &Value| {
+        rows["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["title"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        client.post(
+            &format!("/api/playlists/{mix}/move"),
+            json!({ "from": 2, "to": 0 })
+        )["done"],
+        true
+    );
+    assert_eq!(
+        titles(&client.get(&format!("/api/playlists/{mix}/tracks")).1),
+        ["charlie", "alpha", "bravo"]
+    );
+    assert_eq!(
+        client.post(
+            &format!("/api/playlists/{mix}/remove"),
+            json!({ "index": 2 })
+        )["playlists"][0]["tracks"],
+        2
+    );
+    assert_eq!(
+        client.post(
+            &format!("/api/playlists/{mix}/remove"),
+            json!({ "index": 7 })
+        )["done"],
+        false
+    );
+    assert_eq!(
+        client.post(
+            &format!("/api/playlists/{mix}/rename"),
+            json!({ "name": "Late drive" })
+        )["playlists"][0]["name"],
+        "Late drive"
+    );
+
+    // Played past its half, a song's play is kept.
+    let export = || {
+        let mut response = client
+            .agent
+            .get(&format!("{}/api/export", client.base))
+            .call()
+            .unwrap();
+        let named = response
+            .headers()
+            .get("content-disposition")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        (named, response.body_mut().read_json::<Value>().unwrap())
+    };
+    if engine.is_some() {
+        client.post("/api/player/play", json!({ "playlist": mix }));
+        client.player_until("charlie playing", |s| {
+            s["status"] == "playing" && s["track"]["title"] == "charlie"
+        });
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while export().1["history"].as_array().unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "the play was not kept");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        client.post("/api/player/stop", json!({}));
+    } else {
+        eprintln!("SKIPPED the player: no libmpv found");
+    }
+
+    // The library goes out as the file the other Stashes read.
+    let (named, file) = export();
+    assert!(
+        named.starts_with("attachment; filename=\"stash-library-") && named.ends_with(".json\""),
+        "{named}"
+    );
+    assert_eq!(
+        (file["kind"].as_str(), file["v"].as_i64()),
+        (Some("stash-web-library"), Some(1))
+    );
+    assert!(
+        file["generator"]
+            .as_str()
+            .unwrap()
+            .starts_with("Stash desktop ")
+    );
+    assert_eq!(file["likes"].as_array().unwrap().len(), 1);
+    let like = &file["likes"][0]["item"];
+    assert_eq!(
+        (
+            like["title"].as_str(),
+            like["artist"].as_str(),
+            like["durationMs"].as_u64(),
+            like["refs"]["demo.folder"].is_string()
+        ),
+        (Some("alpha"), Some("Unknown artist"), Some(2000), true)
+    );
+    let playlist = &file["playlists"][0];
+    assert_eq!(playlist["name"], "Late drive");
+    assert_eq!(
+        playlist["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["title"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["charlie", "alpha"]
+    );
+    if engine.is_some() {
+        assert_eq!(file["history"][0]["item"]["title"], "charlie");
+    }
+    // The core's own import reads what it wrote: everything is here already.
+    let (status, again) = client.upload("/api/import", file.to_string().as_bytes());
+    assert_eq!(status, 200);
+    assert_eq!(
+        (
+            again["summary"]["songs_added"].as_u64(),
+            again["summary"]["likes_added"].as_u64(),
+            again["summary"]["playlists_added"].as_u64(),
+            again["summary"]["plays_added"].as_u64()
+        ),
+        (Some(0), Some(0), Some(0), Some(0))
+    );
+
+    let deleted = client.post(&format!("/api/playlists/{mix}/delete"), json!({}));
+    assert_eq!(
+        (
+            deleted["done"].as_bool(),
+            deleted["playlists"].as_array().map(Vec::len),
+            deleted["counts"]["tracks"].as_u64()
+        ),
+        (Some(true), Some(0), Some(3))
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -95,6 +95,13 @@ enum Command {
         /// The library file (stash-library-YYYY-MM-DD.json).
         file: PathBuf,
     },
+    /// Write the library as the file Stash on a phone or the web reads (likes, playlists, plays), to import there.
+    Export {
+        #[arg(long)]
+        db: PathBuf,
+        /// The file to write (for example stash-library.json).
+        file: PathBuf,
+    },
     /// Serve a folder of your own music as an add-on on this computer, to try add-ons in the window with.
     DemoAddon {
         /// The folder to serve, with everything below it.
@@ -172,6 +179,30 @@ fn main() -> Result<()> {
         Command::Synth { db, tracks, seed } => synth_library(&db, tracks, seed),
         Command::Bench { db, json } => bench(&db, json),
         Command::Import { db, file } => import(&db, &file),
+        Command::Export { db, file } => {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let started = Instant::now();
+            let library =
+                Library::open(&db).with_context(|| format!("opening {}", db.display()))?;
+            let out =
+                library.export(now_ms, concat!("Stash desktop ", env!("CARGO_PKG_VERSION")))?;
+            let text = out.to_string();
+            std::fs::write(&file, &text).with_context(|| format!("writing {}", file.display()))?;
+            let count = |name: &str| out[name].as_array().map(Vec::len).unwrap_or(0);
+            println!(
+                "{} likes, {} playlists, {} plays written to {} ({:.1} MB, {:.2} s)",
+                count("likes"),
+                count("playlists"),
+                count("history"),
+                file.display(),
+                text.len() as f64 / 1e6,
+                started.elapsed().as_secs_f64()
+            );
+            Ok(())
+        }
         Command::DemoAddon {
             dir,
             port,
@@ -224,6 +255,7 @@ fn main() -> Result<()> {
                 (false, false) => Some(stash_core::audio::Output::Device { exclusive }),
             },
             mpv,
+            play_counts_between_seconds: None,
         }),
     }
 }

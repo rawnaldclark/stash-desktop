@@ -46,6 +46,7 @@ fn main() -> Result<()> {
             exclusive: std::env::var_os("STASH_EXCLUSIVE").is_some_and(|v| v == "1"),
         }),
         mpv: None,
+        play_counts_between_seconds: None,
     })?;
     let port = core.port();
     std::thread::Builder::new()
