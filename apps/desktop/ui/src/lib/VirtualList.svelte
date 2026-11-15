@@ -3,6 +3,10 @@
   // `fetchPage`, asked for as the list scrolls; a row whose page has not arrived yet is drawn as a placeholder, so
   // dragging the scrollbar anywhere never waits. Every row has the same height: the position of row n is n × height.
   //
+  // The rows on screen are a fixed set of boxes that are used again: when the list scrolls, the box of a row that left
+  // is given the row that arrived (its text and picture change in place) and moved there. Nothing is built or thrown
+  // away while scrolling, which is what keeps a fast scroll on time when a row is more than a line of text.
+  //
   // The list scrolls by itself (it fills its parent), or, given `scroller`, it lies in a page that scrolls (the
   // window's main column): it is then as tall as all its rows and draws the ones the page shows.
   import type { Snippet } from "svelte";
@@ -46,12 +50,20 @@
   const first = $derived(Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN));
   const last = $derived(Math.min(count, Math.ceil((scrollTop + height) / rowHeight) + OVERSCAN));
 
+  /** How many boxes there are: never fewer than the rows drawn at once, and the same until the window is resized. */
+  const slots = $derived(Math.ceil(height / rowHeight) + 2 * OVERSCAN + 2);
+
+  /** The rows drawn, in the order of their boxes: row n is always in box n mod `slots`, so a box changes rows only when its row leaves. */
   const visible = $derived.by(() => {
     void arrivals;
-    const out: { index: number; data: Row | undefined }[] = [];
-    for (let i = first; i < last; i++) out.push({ index: i, data: pages.get(Math.floor(i / pageSize))?.[i % pageSize] });
-    return out;
+    const out: { slot: number; index: number; data: Row | undefined }[] = [];
+    for (let i = first; i < last; i++) out.push({ slot: i % slots, index: i, data: pages.get(Math.floor(i / pageSize))?.[i % pageSize] });
+    return out.sort((a, b) => a.slot - b.slot);
   });
+
+  /** Which way the list last moved: the page beyond the rows drawn, on that side, is asked for before it is needed. */
+  let before = 0;
+  let down = true;
 
   // In a page that scrolls: the list follows the page's scroller.
   $effect(() => {
@@ -81,6 +93,11 @@
     if (count === 0 || last <= first) return;
     const from = Math.floor(first / pageSize);
     const to = Math.floor((last - 1) / pageSize);
+    if (first !== before) down = first > before;
+    before = first;
+    const lastPage = Math.floor((count - 1) / pageSize);
+    const ahead = down ? Math.min(lastPage, to + 1) : Math.max(0, from - 1);
+    const wanted = [...Array.from({ length: to - from + 1 }, (_, i) => from + i), ...(ahead < from || ahead > to ? [ahead] : [])];
     // A page asked for a place the list has left is let go: its answer would be thrown away anyway.
     for (const [page, controller] of asked) {
       if (page < from - 1 || page > to + 1) {
@@ -88,7 +105,7 @@
         asked.delete(page);
       }
     }
-    for (let page = from; page <= to; page++) {
+    for (const page of wanted) {
       if ((pages.has(page) && !stale.has(page)) || asked.has(page)) continue;
       const controller = new AbortController();
       asked.set(page, controller);
@@ -165,13 +182,19 @@
   role="list"
 >
   <div class="spacer" style:height="{count * rowHeight}px">
-    <div class="rows" style:transform="translateY({first * rowHeight}px)">
-      {#each visible as item (item.index)}
-        <div class="row" role="listitem" style:height="{rowHeight}px" ondblclick={() => onActivate?.(item.index, item.data)}>
-          {@render row(item.data, item.index)}
-        </div>
-      {/each}
-    </div>
+    {#each visible as item (item.slot)}
+      <div
+        class="row"
+        role="listitem"
+        aria-posinset={item.index + 1}
+        aria-setsize={count}
+        style:height="{rowHeight}px"
+        style:transform="translateY({item.index * rowHeight}px)"
+        ondblclick={() => onActivate?.(item.index, item.data)}
+      >
+        {@render row(item.data, item.index)}
+      </div>
+    {/each}
   </div>
 </div>
 
@@ -191,12 +214,10 @@
     position: relative;
     width: 100%;
   }
-  .rows {
+  /* each box is placed by itself (its row's place in the list), so a box can change rows without the others moving */
+  .row {
     position: absolute;
     inset: 0 0 auto 0;
-    will-change: transform;
-  }
-  .row {
     contain: layout paint style;
     overflow: hidden;
   }

@@ -19,7 +19,10 @@
 </script>
 
 {#if url && failed !== url}
-	<img class={cls} src={url} alt="" loading={eager ? 'eager' : 'lazy'} decoding="async" referrerpolicy="no-referrer" draggable="false" onerror={() => (failed = url)} />
+	<!-- A new picture is a new element: a row that is given another song never shows the last one's cover while the new one loads. -->
+	{#key url}
+		<img class={cls} src={url} alt="" loading={eager ? 'eager' : 'lazy'} decoding="async" referrerpolicy="no-referrer" draggable="false" onerror={() => (failed = url)} />
+	{/key}
 {:else}
 	<span class="{cls} cv-ph" style="--h:{hue}" data-ini={ini || undefined} aria-hidden="true"></span>
 {/if}
