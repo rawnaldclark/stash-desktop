@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 19;
+pub const SCHEMA_VERSION: i64 = 20;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
@@ -316,6 +316,17 @@ const V19: &str = "
     ALTER TABLE downloads ADD COLUMN tried_at INTEGER;
 ";
 
+/// Version 20: what Last.fm said is like a song or an artist (radio and autoplay, `similar.rs`), by the question asked
+/// (`similar::Ask::key`): the artists and songs it named as JSON, or NULL for "it does not know that one", and when
+/// (Unix seconds), so each question is asked once in two weeks.
+const V20: &str = "
+    CREATE TABLE similar_cache(
+        key   TEXT PRIMARY KEY,
+        body  TEXT,
+        at    INTEGER NOT NULL
+    ) WITHOUT ROWID;
+";
+
 /// Version 16: what a list kept on this computer leaves alone. A song the listener took off the downloads is
 /// remembered (`download_declined`), so a kept list does not put it back; and a song a list put on the downloads says
 /// so (`by_list`), so it is taken off again when no kept list holds it, while one asked for by hand stays.
@@ -522,6 +533,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V19)?;
         tx.pragma_update(None, "user_version", 19)?;
+        tx.commit()?;
+    }
+    if found < 20 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V20)?;
+        tx.pragma_update(None, "user_version", 20)?;
         tx.commit()?;
     }
     Ok(())

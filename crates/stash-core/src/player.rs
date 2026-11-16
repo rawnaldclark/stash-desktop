@@ -207,6 +207,8 @@ pub struct PlayerState {
     pub queue_len: usize,
     /// Goes up whenever the queue's tracks or their order change: a reader of the queue reads it again then.
     pub queue_version: u64,
+    /// Goes up only when the whole queue is replaced (a new queue, a stop, a kept queue brought back).
+    pub queue_id: u64,
     pub shuffle: bool,
     /// "off", "all" or "one".
     pub repeat: &'static str,
@@ -299,6 +301,9 @@ struct Shared {
     edits: u64,
     next_qid: u64,
     version: u64,
+    /// Goes up only when the whole queue is replaced (a new queue, a stop, a kept queue brought back): what was begun
+    /// for one queue (a radio's next songs) is not added to another.
+    queue_id: u64,
     shuffle: bool,
     /// While shuffled: the queue's qids in the order they had before, which turning shuffle off restores.
     original: Option<Vec<u64>>,
@@ -966,9 +971,37 @@ impl Player {
             shared.queue = items;
             shared.from = from;
             shared.version += 1;
+            shared.queue_id += 1;
         }
         self.start_at(start);
         Ok(())
+    }
+
+    /// Replaces what comes after the playing track with `items`: the track goes on playing, as the first of a queue
+    /// that is new (`from` says what it is), so what played before it is let go too. False when nothing plays.
+    pub fn play_after_current(&self, mut items: Vec<QueueItem>, from: Option<String>) -> bool {
+        let start = {
+            let mut shared = self.ctx.shared.lock().unwrap();
+            let Some(current) = shared.index().or(shared.starting) else {
+                return false;
+            };
+            let Some(playing) = shared.queue.get(current).cloned() else {
+                return false;
+            };
+            shared.number(&mut items);
+            let mut queue = Vec::with_capacity(items.len() + 1);
+            queue.push(playing);
+            queue.extend(items);
+            shared.queue = queue;
+            shared.original = None;
+            shared.from = from;
+            shared.queue_id += 1;
+            self.after_edit(&mut shared, Some(current), Some(0))
+        };
+        if let Some(place) = start {
+            self.start_at(place);
+        }
+        true
     }
 
     /// After the queue was edited while it plays: what the engine holds beyond the current track is taken back
@@ -1016,14 +1049,43 @@ impl Player {
     }
 
     /// Adds `items` to the queue: right after the playing track (`next`), or at the end. With an empty queue they
-    /// start to play; with the player resting on a track they are only added.
-    pub fn enqueue(&self, mut items: Vec<QueueItem>, next: bool) {
-        if items.is_empty() {
-            return;
-        }
+    /// start to play; with the player resting on a track they are only added. Answers the queue numbers they got.
+    pub fn enqueue(&self, items: Vec<QueueItem>, next: bool) -> Vec<u64> {
+        self.enqueue_when(items, next, |_| true).unwrap_or_default()
+    }
+
+    /// Adds `items` at the end of the queue, as [`Player::enqueue`] does, only while the queue is the one `queue_id`
+    /// names (see [`PlayerState::queue_id`]) and, with `after`, its last track is that one (by its queue number): songs
+    /// found for one queue are not added to another. `None` when they were not added.
+    pub fn enqueue_onto(
+        &self,
+        items: Vec<QueueItem>,
+        queue_id: u64,
+        after: Option<u64>,
+    ) -> Option<Vec<u64>> {
+        self.enqueue_when(items, false, |shared| {
+            shared.queue_id == queue_id
+                && after.is_none_or(|qid| shared.queue.last().map(|t| t.qid) == Some(qid))
+        })
+    }
+
+    fn enqueue_when(
+        &self,
+        mut items: Vec<QueueItem>,
+        next: bool,
+        may: impl Fn(&Shared) -> bool,
+    ) -> Option<Vec<u64>> {
+        let qids: Vec<u64>;
         let start = {
             let mut shared = self.ctx.shared.lock().unwrap();
+            if !may(&shared) {
+                return None;
+            }
+            if items.is_empty() {
+                return Some(Vec::new());
+            }
             shared.number(&mut items);
+            qids = items.iter().map(|t| t.qid).collect();
             let current = shared.index().or(shared.starting);
             let resting = shared.resting().map(|(place, _)| place);
             let at = match (current.or(resting), next) {
@@ -1045,6 +1107,7 @@ impl Player {
         if let Some(place) = start {
             self.start_at(place);
         }
+        Some(qids)
     }
 
     /// Takes the track at `place` out of the queue. The playing track taken out makes way for the one after it.
@@ -1580,6 +1643,7 @@ impl Player {
         shared.from = kept.from;
         shared.generation += 1;
         shared.version += 1;
+        shared.queue_id += 1;
         shared.slots.clear();
         shared.pos = None;
         shared.starting = None;
@@ -1623,6 +1687,7 @@ impl Player {
             shared.rest = None;
             shared.last = None;
             shared.version += 1;
+            shared.queue_id += 1;
         }
         self.ctx.engine.stop()
     }
@@ -1663,6 +1728,7 @@ impl Player {
                 (shared.error.clone(), shared.error_id, shared.errors),
                 (
                     shared.version,
+                    shared.queue_id,
                     shared.shuffle,
                     shared.repeat,
                     shared.from.clone(),
@@ -1672,7 +1738,7 @@ impl Player {
                     && shared.pos.is_some_and(|pos| pos + 1 >= shared.slots.len()),
             )
         };
-        let (queue_version, shuffle, repeat, from) = queue;
+        let (queue_version, queue_id, shuffle, repeat, from) = queue;
         let mpv = self.ctx.engine.mpv();
         let seconds = |name: &str| {
             mpv.get(name)
@@ -1762,6 +1828,7 @@ impl Player {
             index: index.or(starting).or(resting.map(|(place, _)| place)),
             queue_len,
             queue_version,
+            queue_id,
             shuffle,
             repeat: repeat.as_str(),
             from,

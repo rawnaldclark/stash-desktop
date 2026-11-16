@@ -92,6 +92,10 @@ pub type WindowShell = Arc<dyn Fn(View) -> bool + Send + Sync>;
 /// those it could not hold, with why. A key pressed comes back to the core as `POST /api/shortcut {"action"}`.
 pub type KeysShell = Arc<dyn Fn(&[(String, String)]) -> Vec<(String, String)> + Send + Sync>;
 
+/// Opens a link in the listener's browser, when the core runs inside a window (a station's page on Last.fm). True
+/// when it was opened.
+pub type OpenShell = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 pub(crate) type Reply = Response<std::io::Cursor<Vec<u8>>>;
 
 pub(crate) fn header(name: &str, value: &str) -> Header {
@@ -291,7 +295,7 @@ impl Lacks {
     }
 
     /// The add-on answered (whatever it said): it could be reached.
-    fn heard(&self, addon: &str) {
+    pub(crate) fn heard(&self, addon: &str) {
         self.heard
             .lock()
             .unwrap()
@@ -326,11 +330,17 @@ impl Lacks {
     }
 
     /// Notes the add-on's trouble (it could not be reached, its allowance is spent…), for the window.
-    fn troubled(&self, addon: &str, e: &AddonError) {
+    pub(crate) fn troubled(&self, addon: &str, e: &AddonError) {
         self.troubles
             .lock()
             .unwrap()
             .insert(addon.to_string(), (now_ms(), e.in_words()));
+    }
+
+    /// Whether the add-on is in trouble: its last trouble came within `for_ms`, and after the last song it gave.
+    pub(crate) fn in_trouble(&self, addon: &str, for_ms: i64) -> bool {
+        let (gave, trouble) = self.health(addon);
+        trouble.is_some_and(|(at, _)| now_ms() - at < for_ms && gave.is_none_or(|gave| gave < at))
     }
 
     /// When the add-on last gave a song, and its last trouble.
@@ -756,7 +766,7 @@ fn addon_error(e: &AddonError) -> Value {
 
 /// A track an add-on found, as the window shows it. What an add-on sends is cut to size; a track without a usable
 /// id is left out.
-fn found_track(track: &Track) -> Option<Value> {
+pub(crate) fn found_track(track: &Track) -> Option<Value> {
     if track.id.is_empty() || track.id.len() > 512 {
         return None;
     }
@@ -830,6 +840,10 @@ pub(crate) struct State {
     /// Goes up with each change to the likes and the playlists, so every window (the mini player too) can tell when
     /// its lists are behind: a change may come from another window, or from a shortcut.
     pub(crate) edits: AtomicU64,
+    /// Radio, and autoplay that knows what is like what (Last.fm, when this build has it).
+    pub(crate) radio: crate::radio::Radio,
+    /// Opens a link in the browser, when the core runs inside a window.
+    pub(crate) opener: Option<OpenShell>,
 }
 
 impl State {
@@ -927,6 +941,8 @@ impl Core {
                 .join("Played"),
             &library,
         ));
+        let mut library = library;
+        crate::radio::prune(&mut library);
         let library = Arc::new(Mutex::new(library));
         let lacks = Arc::new(Lacks::default());
         let scrobbling = Arc::new(crate::scrobbling::Scrobbling::default());
@@ -1022,6 +1038,8 @@ impl Core {
                 key: None,
                 shortcuts: crate::shortcuts::Shortcuts::default(),
                 edits: AtomicU64::new(0),
+                radio: crate::radio::Radio::new(None),
+                opener: None,
             },
         })
     }
@@ -1044,6 +1062,19 @@ impl Core {
         self
     }
 
+    /// Radio, and autoplay that knows what is like what: Last.fm is asked through Stash's proxy at `proxy` (see
+    /// [`crate::radio`]). The address is never shown, in an answer or a message.
+    pub fn with_similar(mut self, proxy: &str) -> Self {
+        self.state.radio = crate::radio::Radio::new(Some(proxy));
+        self
+    }
+
+    /// Lets the core open a link in the browser through `shell` (a station's page on Last.fm).
+    pub fn with_opener(mut self, shell: OpenShell) -> Self {
+        self.state.opener = Some(shell);
+        self
+    }
+
     /// Lets `shell` hold the listener's shortcuts that work in any app.
     pub fn with_shortcuts(mut self, shell: KeysShell) -> Self {
         self.state.shortcuts.shell = Some(shell);
@@ -1058,21 +1089,17 @@ impl Core {
             // The queue is written down as it changes, so the next run opens on it (the program may be closed, or
             // lose power, at any moment: there is no "on the way out" to rely on).
             if let Ok(player) = &state.player {
-                let (library, stop, addons, offline) =
-                    (&state.library, &stop, &state.addons, &state.offline);
+                let (state, stop) = (&state, &stop);
+                let library = &state.library;
                 scope.spawn(move || {
                     let mut keeper = crate::kept::Keeper::default();
-                    let mut autoplay = crate::autoplay::Autoplay::default();
                     let mut looks = 0u32;
                     while !stop.load(Ordering::Relaxed) {
                         keeper.look(library, player);
                         // The last song of the queue started: songs like the last ones are added after it.
-                        let can_ask = !offline.load(Ordering::Relaxed)
-                            && addons.read().unwrap().iter().any(|a| {
-                                a.usable()
-                                    .is_some_and(|addon| addon.offers_resource("stream"))
-                            });
-                        autoplay.look(library, player, can_ask);
+                        crate::autoplay::look(state, player);
+                        // A station with few songs left grows; one whose queue was replaced ends.
+                        state.radio.look(player);
                         // Every few seconds: the output chosen and unplugged is taken back once it is connected.
                         if looks.is_multiple_of(5) {
                             follow_chosen_device(library, player);
@@ -1091,6 +1118,11 @@ impl Core {
             {
                 let (state, stop) = (&state, &stop);
                 scope.spawn(move || crate::scrobbling::run(state, stop));
+            }
+            // The stations' next songs, from Last.fm and the add-ons.
+            {
+                let (state, stop) = (&state, &stop);
+                scope.spawn(move || crate::radio::run(state, stop));
             }
             // The shortcuts as the listener left them (the shell holds them once its window is up).
             if state.shortcuts.shell.is_some() {
@@ -1220,6 +1252,7 @@ fn player_reply(state: &State) -> Reply {
             let mut answer = json!(player.state());
             answer["available"] = json!(true);
             answer["edits"] = json!(state.edits.load(Ordering::Relaxed));
+            answer["station"] = state.radio.summary(player);
             reply_json(200, answer)
         }
         Err(why) => reply_json(
@@ -1255,7 +1288,7 @@ fn cover(value: Option<&Value>) -> Option<String> {
 }
 
 /// One track an add-on found, as a queue item. `None` without a usable id.
-fn addon_item(addon: &str, track: &Value) -> Option<QueueItem> {
+pub(crate) fn addon_item(addon: &str, track: &Value) -> Option<QueueItem> {
     let text = |name: &str| track.get(name).and_then(Value::as_str).map(capped);
     let id = track.get("id").and_then(Value::as_str)?;
     if addon.is_empty() || id.is_empty() || id.len() > 512 {
@@ -1642,6 +1675,15 @@ const OFFLINE_SETTING: &str = "offline";
 const NOT_HERE_OFFLINE: &str = "Stash is offline, and none of that is on this computer";
 
 /// Stash is offline: nothing is asked of the network for music (no add-on, no LRCLIB, no scrobbling service).
+/// Whether songs can come from the add-ons now: online, with an add-on that streams.
+pub(crate) fn can_stream(state: &State) -> bool {
+    !offline(state)
+        && state.addons.read().unwrap().iter().any(|a| {
+            a.usable()
+                .is_some_and(|addon| addon.offers_resource("stream"))
+        })
+}
+
 pub(crate) fn offline(state: &State) -> bool {
     state.offline.load(Ordering::Relaxed)
 }
@@ -2329,6 +2371,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::saving::kept_route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::radio::route(state, request, &path)? {
         return Ok((response, false));
     }
     if let Some(response) = lists_route(state, request, &path)? {

@@ -83,8 +83,35 @@ pub fn spread_from<T>(
     }
 }
 
+/// `items` (each with its artist) in an order where the same artist never comes twice in a row when another can come
+/// between, starting after `last` (the artist heard last). Of the artists that can come next, the one with the most
+/// items left goes, so the rest can be spread between them; among those, the item that came first.
+pub fn apart<T, K: Eq + std::hash::Hash + Clone>(
+    mut items: Vec<(T, K)>,
+    last: Option<K>,
+) -> Vec<T> {
+    let mut ordered = Vec::with_capacity(items.len());
+    let mut last = last;
+    while !items.is_empty() {
+        let mut left: HashMap<&K, usize> = HashMap::new();
+        for (_, artist) in &items {
+            *left.entry(artist).or_default() += 1;
+        }
+        let at = items
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, artist))| Some(artist) != last.as_ref())
+            .max_by_key(|(place, (_, artist))| (left[artist], std::cmp::Reverse(*place)))
+            .map_or(0, |(place, _)| place);
+        let (item, artist) = items.remove(at);
+        ordered.push(item);
+        last = Some(artist);
+    }
+    ordered
+}
+
 /// The artist a credit is counted under: the first one it names, folded.
-fn artist_key(credit: &str) -> String {
+pub fn artist_key(credit: &str) -> String {
     artists(credit)
         .into_iter()
         .next()
@@ -141,6 +168,34 @@ fn read(mut placed: Vec<(f64, usize)>) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apart_never_puts_an_artist_twice_in_a_row_when_another_can_come_between() {
+        let items = |list: &[(&'static str, &'static str)]| {
+            list.iter().map(|&(i, a)| (i, a)).collect::<Vec<_>>()
+        };
+        // Three by A, one each by B and C: A first (the most left), then between the others.
+        let out = apart(
+            items(&[
+                ("a1", "A"),
+                ("a2", "A"),
+                ("a3", "A"),
+                ("b", "B"),
+                ("c", "C"),
+            ]),
+            None,
+        );
+        assert_eq!(out, ["a1", "b", "a2", "c", "a3"]);
+        // Not after the artist heard last.
+        let out = apart(items(&[("a1", "A"), ("a2", "A"), ("b", "B")]), Some("A"));
+        assert_eq!(out, ["b", "a1", "a2"]);
+        // Only one artist: as given.
+        assert_eq!(
+            apart(items(&[("a1", "A"), ("a2", "A")]), Some("A")),
+            ["a1", "a2"]
+        );
+        assert!(apart(Vec::<((), &str)>::new(), None).is_empty());
+    }
 
     type Song = (String, Option<String>, usize);
 

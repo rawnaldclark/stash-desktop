@@ -47,6 +47,8 @@ pub struct DemoAddon {
     /// Out of reach: nothing answers on its port at all (to try what Stash does with no connection, or the add-on's
     /// server down). Shared, like `spent`.
     reach: Reach,
+    /// What it was asked, as `path` or `path?q=…` (a search's words), in the order asked. Shared, like `spent`.
+    asked: Arc<Mutex<Vec<String>>>,
 }
 
 /// Switches a [`DemoAddon`] out of reach and back, also once it runs.
@@ -303,7 +305,13 @@ impl DemoAddon {
                 reach.door.0.lock().unwrap().port = port;
                 reach
             },
+            asked: Default::default(),
         })
+    }
+
+    /// What the add-on was asked, also once it runs: each request's path, a search's with its words (`/search?q=…`).
+    pub fn asked(&self) -> Arc<Mutex<Vec<String>>> {
+        self.asked.clone()
     }
 
     /// Switches the allowance spent (true) or back (false), also once the add-on runs.
@@ -358,6 +366,10 @@ impl DemoAddon {
                 .map(|(_, v)| v.into_owned())
         };
         let path = url.path();
+        self.asked.lock().unwrap().push(match (path, param("q")) {
+            ("/search", Some(q)) => format!("/search?q={q}"),
+            _ => path.to_string(),
+        });
 
         if path == "/manifest.json" {
             if self.eclipse {

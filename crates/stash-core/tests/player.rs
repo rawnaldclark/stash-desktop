@@ -1078,3 +1078,71 @@ fn a_song_whose_file_is_gone_is_asked_for_through_the_add_ons() {
     assert_eq!(state.served_by.as_deref(), Some("somewhere"));
     assert_eq!(*asked.lock().unwrap(), vec![Some(7)]);
 }
+
+#[test]
+fn a_radio_from_the_song_playing_keeps_it_and_songs_are_added_only_to_the_queue_they_were_found_for()
+ {
+    let Some(library) = library() else { return };
+    let dir = scratch("player-station");
+    let paths: Vec<_> = (0..6).map(|n| dir.join(format!("{n}.wav"))).collect();
+    for path in &paths {
+        write_wav(path, RATE, &signal(RATE as usize * 3));
+    }
+    let track = |n: usize| item(n as i64, &format!("T{n}"), &paths[n]);
+    let player = Player::start(&library, &Output::Silent).unwrap();
+    let titles = || {
+        player
+            .queue_at(0, 50)
+            .iter()
+            .map(|t| t.title.clone())
+            .collect::<Vec<_>>()
+    };
+
+    assert!(
+        !player.play_after_current(vec![track(5)], None),
+        "nothing plays"
+    );
+    player
+        .play_from((0..3).map(track).collect(), 1, None)
+        .unwrap();
+    let playing = until(&player, "the second track", |s| {
+        s.status == "playing" && s.index == Some(1)
+    });
+    let (qid, queue_id) = (playing.track.as_ref().unwrap().qid, playing.queue_id);
+
+    // Edits keep the queue's id: it is the same queue.
+    let added = player.enqueue(vec![track(3)], false);
+    assert_eq!(player.state().queue_id, queue_id);
+    // Added only while the queue is that one, and its last track is the one named.
+    assert_eq!(
+        player.enqueue_onto(vec![track(4)], queue_id + 1, None),
+        None
+    );
+    assert_eq!(
+        player.enqueue_onto(vec![track(4)], queue_id, Some(qid)),
+        None
+    );
+    assert!(
+        player
+            .enqueue_onto(vec![track(4)], queue_id, Some(added[0]))
+            .is_some()
+    );
+    assert_eq!(titles(), ["T0", "T1", "T2", "T3", "T4"]);
+    assert_eq!(player.state().queue_id, queue_id);
+
+    // The song playing plays on, as the first of a new queue; what came before and after it goes.
+    assert!(player.play_after_current(vec![track(5)], Some("T1 radio".into())));
+    let now = until(&player, "the new queue", |s| s.queue_id > queue_id);
+    assert_eq!(titles(), ["T1", "T5"]);
+    assert_eq!(
+        (now.track.as_ref().map(|t| t.qid), now.index),
+        (Some(qid), Some(0))
+    );
+    assert_eq!(
+        (now.status, now.from.as_deref()),
+        ("playing", Some("T1 radio"))
+    );
+    // Songs found for the old queue are not added to the new one.
+    assert_eq!(player.enqueue_onto(vec![track(4)], queue_id, None), None);
+    assert_eq!(titles(), ["T1", "T5"]);
+}

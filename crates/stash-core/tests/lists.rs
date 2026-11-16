@@ -580,3 +580,141 @@ fn copies_of_played_songs_are_kept_in_the_room_given_and_the_least_played_go_fir
     );
     assert_eq!(library.played_room().unwrap().songs, 0);
 }
+
+/// The id of the song titled exactly `title`.
+fn titled(library: &Library, title: &str) -> i64 {
+    library
+        .tracks_at(0, 500)
+        .unwrap()
+        .into_iter()
+        .find(|t| t.title == title)
+        .unwrap_or_else(|| panic!("no song titled {title}"))
+        .id
+}
+
+#[test]
+fn a_radio_finds_an_artists_songs_here_and_leaves_out_what_must_not_play() {
+    use stash_core::blocks::BlockKind;
+    use stash_core::lists::Room;
+    use stash_core::shuffle::artist_key;
+    let mut library = Library::open_in_memory().unwrap();
+    let songs = [
+        ("Song - 2011 Remaster", "A"),
+        ("Song (Live)", "A"),
+        ("Other", "A"),
+        ("Liked", "A"),
+        ("Duet", "A feat. B"),
+        ("Gone", "A"),
+        ("Heard", "A"),
+        ("Blocked", "A"),
+        ("Queued", "A"),
+        ("One", "The xx"),
+        ("Two", "the xx"),
+        ("Elsewhere", "B"),
+    ];
+    library
+        .add_tracks(
+            songs
+                .iter()
+                .enumerate()
+                .map(|(n, (title, artist))| file_track(title, artist, &format!("C:/m/{n}.flac"))),
+        )
+        .unwrap();
+    let id = |title: &str| titled(&library, title);
+    let (liked, gone, heard, queued) = (id("Liked"), id("Gone"), id("Heard"), id("Queued"));
+    library.set_liked(liked, true, NOW_MS).unwrap();
+    library.record_play(heard, NOW_MS).unwrap();
+    library
+        .set_blocked(BlockKind::Song, "Blocked", "A", true, NOW_MS)
+        .unwrap();
+    let seen = (0..songs.len())
+        .filter(|n| songs[*n].0 != "Gone")
+        .map(|n| format!("C:/m/{n}.flac"))
+        .collect();
+    library.mark_missing("C:/m", &seen, NOW_MS).unwrap();
+    assert!(
+        library.here_of(&[gone]).unwrap().is_empty(),
+        "the missing file is not here"
+    );
+    let room = Room {
+        not: [queued].into_iter().collect(),
+        rested_since_ms: NOW_MS - 3 * 3_600_000,
+        here_only: false,
+    };
+    let titles = |ids: Vec<i64>| -> Vec<String> {
+        ids.into_iter()
+            .map(|id| library.describe(id).unwrap().unwrap().kept.title)
+            .collect()
+    };
+    for _ in 0..10 {
+        let found = titles(
+            library
+                .songs_by_artist(&artist_key("A"), &["Song".into()], &room, 10)
+                .unwrap(),
+        );
+        // The title Last.fm named first (a release label is the same song; a live one is not), then the liked one.
+        assert_eq!(&found[..2], ["Song - 2011 Remaster", "Liked"], "{found:?}");
+        let mut rest = found[2..].to_vec();
+        rest.sort();
+        // "A feat. B" counts as A. Never a song missing, heard lately, chosen not to be played, or queued.
+        assert_eq!(rest, ["Duet", "Other", "Song (Live)"], "{found:?}");
+    }
+    // "The xx" and "the xx" are one artist; at most `n`.
+    let mut xx = titles(
+        library
+            .songs_by_artist(&artist_key("The xx"), &[], &room, 10)
+            .unwrap(),
+    );
+    xx.sort();
+    assert_eq!(xx, ["One", "Two"]);
+    assert_eq!(
+        library
+            .songs_by_artist(&artist_key("A"), &[], &room, 2)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        library
+            .songs_by_artist(&artist_key("Nobody"), &[], &room, 10)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn what_last_fm_said_is_kept_ages_and_goes() {
+    use stash_core::similar::{Answer, Like};
+    let mut library = Library::open_in_memory().unwrap();
+    let found = Answer::Found(vec![Like {
+        artist: "B".into(),
+        title: Some("Song".into()),
+        score: 0.5,
+    }]);
+    library.keep_similar("one", &found, 100).unwrap();
+    library.keep_similar("two", &Answer::NotFound, 200).unwrap();
+    assert_eq!(
+        library.kept_similar("one").unwrap(),
+        Some((found.clone(), 100))
+    );
+    assert_eq!(
+        library.kept_similar("two").unwrap(),
+        Some((Answer::NotFound, 200))
+    );
+    assert_eq!(library.kept_similar("three").unwrap(), None);
+    // Asked again: the new answer is kept.
+    library.keep_similar("two", &found, 250).unwrap();
+    assert_eq!(
+        library.kept_similar("two").unwrap(),
+        Some((found.clone(), 250))
+    );
+    // Too old, or past the most kept (the oldest go).
+    assert_eq!(library.prune_similar(150, 10).unwrap(), 1);
+    assert_eq!(library.kept_similar("one").unwrap(), None);
+    library.keep_similar("three", &found, 300).unwrap();
+    library.keep_similar("four", &found, 400).unwrap();
+    assert_eq!(library.prune_similar(0, 2).unwrap(), 1);
+    assert_eq!(library.kept_similar("two").unwrap(), None);
+    assert_eq!(library.forget_similar().unwrap(), 2);
+    assert_eq!(library.kept_similar("four").unwrap(), None);
+}

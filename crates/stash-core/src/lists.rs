@@ -18,6 +18,15 @@ const AFTER: usize = crate::library::TRACK_COLUMN_COUNT;
 /// The setting that keeps the liked songs on this computer ("1"), as a playlist's `download` keeps it.
 pub const DOWNLOAD_LIKED: &str = "download.liked";
 
+/// What a radio's songs must leave room for (`Library::songs_by_artist`): songs already queued or had (`not`), songs
+/// heard since `rested_since_ms` (Unix milliseconds), and with `here_only` (offline), songs not on this computer.
+#[derive(Debug, Clone, Default)]
+pub struct Room {
+    pub not: HashSet<i64>,
+    pub rested_since_ms: i64,
+    pub here_only: bool,
+}
+
 /// How far a list kept on this computer is: its songs, how many play with no connection, how many wait to be saved
 /// (or are coming in), and how many could not be saved.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
@@ -108,12 +117,162 @@ impl Library {
         Ok(())
     }
 
+    // ---- Similar music (Last.fm)
+
+    /// What Last.fm said to the question `key` (`similar::Ask::key`), and when (Unix seconds), if it was asked.
+    pub fn kept_similar(&self, key: &str) -> Result<Option<(crate::similar::Answer, i64)>> {
+        use crate::similar::{Answer, Like};
+        Ok(self
+            .conn
+            .prepare_cached("SELECT body, at FROM similar_cache WHERE key = ?1")?
+            .query_row([key], |r| {
+                Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?))
+            })
+            .optional()?
+            .and_then(|(body, at)| {
+                let answer = match body {
+                    None => Answer::NotFound,
+                    // A body this program cannot read is as if nothing was kept: it is asked again.
+                    Some(body) => Answer::Found(serde_json::from_str::<Vec<Like>>(&body).ok()?),
+                };
+                Some((answer, at))
+            }))
+    }
+
+    /// Keeps what Last.fm said to the question `key`, at `at_s` (Unix seconds).
+    pub fn keep_similar(
+        &mut self,
+        key: &str,
+        answer: &crate::similar::Answer,
+        at_s: i64,
+    ) -> Result<()> {
+        let body = match answer {
+            crate::similar::Answer::Found(likes) => {
+                Some(serde_json::to_string(likes).unwrap_or_default())
+            }
+            crate::similar::Answer::NotFound => None,
+        };
+        self.conn.execute(
+            "INSERT INTO similar_cache(key, body, at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET body = excluded.body, at = excluded.at",
+            params![key, body, at_s],
+        )?;
+        Ok(())
+    }
+
+    /// Lets go of everything Last.fm said (similar music switched off). Answers how much went.
+    pub fn forget_similar(&mut self) -> Result<usize> {
+        Ok(self.conn.execute("DELETE FROM similar_cache", [])?)
+    }
+
+    /// Lets go of answers kept since before `older_than_s` (Unix seconds), and of the oldest past `cap_rows`. Answers
+    /// how many went.
+    pub fn prune_similar(&mut self, older_than_s: i64, cap_rows: usize) -> Result<usize> {
+        let old = self
+            .conn
+            .execute("DELETE FROM similar_cache WHERE at < ?1", [older_than_s])?;
+        let over = self.conn.execute(
+            "DELETE FROM similar_cache WHERE key IN
+               (SELECT key FROM similar_cache ORDER BY at DESC, key LIMIT -1 OFFSET ?1)",
+            [cap_rows as i64],
+        )?;
+        Ok(old + over)
+    }
+
+    /// Up to `n` of the library's songs by the artist counted under `key` (`shuffle::artist_key`: the first artist a
+    /// credit names, folded), for a radio: those whose titles are among `titles` (what Last.fm named) first, in that
+    /// order, then liked songs, then the most played, then any. Only songs that can play (with `room.here_only`, only
+    /// those on this computer), none chosen not to be played, none heard since `room.rested_since_ms`, none of
+    /// `room.not`.
+    pub fn songs_by_artist(
+        &self,
+        key: &str,
+        titles: &[String],
+        room: &Room,
+        n: usize,
+    ) -> Result<Vec<i64>> {
+        if key.is_empty() || n == 0 {
+            return Ok(Vec::new());
+        }
+        // The artists counted under the key: by their whole name ("The xx" and "the xx"), or by the first one a
+        // credit names ("A feat. B" is A's).
+        let mut artists: Vec<i64> = Vec::new();
+        {
+            let mut stmt = self.conn.prepare_cached("SELECT id, name FROM artists")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (id, name) = row?;
+                if crate::identity::fold(&name) == key || crate::shuffle::artist_key(&name) == key {
+                    artists.push(id);
+                }
+            }
+        }
+        if artists.is_empty() {
+            return Ok(Vec::new());
+        }
+        let playable = if room.here_only {
+            here!()
+        } else {
+            "(t.origin = 'file' AND t.missing_since IS NULL
+              OR t.origin = 'described' AND NOT EXISTS (SELECT 1 FROM unfound u WHERE u.track_id = t.id))"
+        };
+        let list = artists
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT t.id, t.title, t.liked_at_ms IS NOT NULL, t.play_count FROM tracks t
+             WHERE t.artist_id IN ({list}) AND {playable} AND NOT {blocked}
+               AND NOT EXISTS (SELECT 1 FROM plays p WHERE p.track_id = t.id AND p.played_at_ms >= ?1)
+             ORDER BY random() LIMIT 2000",
+            blocked = crate::blocks::blocked!()
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map([room.rested_since_ms], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, bool>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut songs: Vec<_> = rows
+            .into_iter()
+            .enumerate()
+            .filter(|(_, (id, ..))| !room.not.contains(id))
+            .map(|(by_chance, (id, title, liked, plays))| {
+                let wanted = titles
+                    .iter()
+                    .position(|t| crate::matching::same_title(t, &title))
+                    .unwrap_or(usize::MAX);
+                (
+                    (wanted, !liked, -plays, by_chance),
+                    id,
+                    crate::identity::fold(&title),
+                )
+            })
+            .collect();
+        songs.sort_unstable_by_key(|s| s.0);
+        // One copy of a song: the first of those with the same title.
+        let mut seen_titles: HashSet<String> = HashSet::new();
+        Ok(songs
+            .into_iter()
+            .filter(|(_, _, title)| seen_titles.insert(title.clone()))
+            .map(|(_, id, _)| id)
+            .take(n)
+            .collect())
+    }
+
     // ---- Autoplay
 
     /// Songs to play after `seeds` (the last songs heard; `seed_artists` names their artists, for songs that are not
     /// the library's): by those artists first, then liked songs, then the most played, then any. None of `queued`,
-    /// none heard since `rested_since_ms`, only files here when `files_only`. At most `n`, the same artist never twice
-    /// in a row when that can be helped (nor right after the last song heard, `seed_artists[0]`).
+    /// none heard since `rested_since_ms`, only songs on this computer when `files_only` (files, and songs kept as they
+    /// were played). At most `n`, the same artist never twice in a row when that can be helped (nor right after the
+    /// last song heard, `seed_artists[0]`).
     pub fn autoplay_picks(
         &self,
         seeds: &[i64],
@@ -147,9 +306,10 @@ impl Library {
         artists.sort_unstable();
         artists.dedup();
 
-        // Songs no add-on could find are left out: they would only be passed over.
+        // Songs no add-on could find are left out: they would only be passed over. Offline, only songs on this
+        // computer: files, and songs kept as they were played.
         let playable = if files_only {
-            "t.origin = 'file' AND t.missing_since IS NULL"
+            here!()
         } else {
             "(t.origin = 'file' AND t.missing_since IS NULL
               OR t.origin = 'described' AND NOT EXISTS (SELECT 1 FROM unfound u WHERE u.track_id = t.id))"
@@ -201,10 +361,8 @@ impl Library {
         take(&same_artists, n, &mut picked);
         take(&any, n, &mut picked);
 
-        // The same artist not twice in a row, when another can come between, starting from the song heard last. Of the
-        // artists that can come next, the one with the most songs left goes, so the rest can be spread between them.
-        let mut ordered: Vec<i64> = Vec::with_capacity(picked.len());
-        let mut last: Option<i64> = match seed_artists.first() {
+        // The same artist not twice in a row, when another can come between, starting from the song heard last.
+        let last: Option<i64> = match seed_artists.first() {
             Some(name) => self
                 .conn
                 .prepare_cached("SELECT id FROM artists WHERE name = ?1 COLLATE NOCASE")?
@@ -212,22 +370,7 @@ impl Library {
                 .optional()?,
             None => None,
         };
-        while !picked.is_empty() {
-            let mut left: HashMap<i64, usize> = HashMap::new();
-            for (_, artist) in &picked {
-                *left.entry(*artist).or_default() += 1;
-            }
-            let at = picked
-                .iter()
-                .enumerate()
-                .filter(|(_, (_, artist))| Some(*artist) != last)
-                .max_by_key(|(place, (_, artist))| (left[artist], std::cmp::Reverse(*place)))
-                .map_or(0, |(place, _)| place);
-            let (id, artist) = picked.remove(at);
-            ordered.push(id);
-            last = Some(artist);
-        }
-        Ok(ordered)
+        Ok(crate::shuffle::apart(picked, last))
     }
 
     // ---- Downloads

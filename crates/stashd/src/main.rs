@@ -54,6 +54,10 @@ enum Command {
         /// Play to nowhere, at the speed of a sound card: everything works, nothing is heard.
         #[arg(long)]
         silent: bool,
+        /// The address of Stash's Last.fm proxy, for radio and autoplay that knows what is like what (else
+        /// STASH_LASTFM_PROXY; without either there is no radio). It is never printed.
+        #[arg(long, hide = true)]
+        lastfm_proxy: Option<String>,
     },
     /// Play a moment of silence at several formats and report what the sound card opened at for each.
     OutputCheck {
@@ -259,19 +263,30 @@ fn main() -> Result<()> {
             exclusive,
             no_audio,
             silent,
-        } => stashd::serve::serve(stashd::serve::Options {
-            db,
-            ui,
-            port,
-            bench_out,
-            audio: match (no_audio, silent) {
-                (true, _) => None,
-                (false, true) => Some(stash_core::audio::Output::Silent),
-                (false, false) => Some(stash_core::audio::Output::Device { exclusive }),
-            },
-            mpv,
-            play_counts_between_seconds: None,
-        }),
+            lastfm_proxy,
+        } => {
+            let mut core = stashd::serve::Core::bind(stashd::serve::Options {
+                db,
+                ui,
+                port,
+                bench_out,
+                audio: match (no_audio, silent) {
+                    (true, _) => None,
+                    (false, true) => Some(stash_core::audio::Output::Silent),
+                    (false, false) => Some(stash_core::audio::Output::Device { exclusive }),
+                },
+                mpv,
+                play_counts_between_seconds: None,
+            })?;
+            if let Some(proxy) = lastfm_proxy
+                .or_else(|| std::env::var("STASH_LASTFM_PROXY").ok())
+                .filter(|p| !p.trim().is_empty())
+            {
+                core = core.with_similar(&proxy);
+            }
+            println!("listening on http://127.0.0.1:{}", core.port());
+            core.run()
+        }
     }
 }
 

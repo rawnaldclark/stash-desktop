@@ -71,6 +71,9 @@ fn main() -> Result<()> {
     if !measuring {
         // Shortcuts that work in any app (the listener's choice, off unless switched on in Settings).
         shell = shell.plugin(shortcuts::plugin());
+        // Links the core opens in the browser (a station's page on Last.fm). The window is granted none of it: only
+        // the core asks, through `with_opener`.
+        shell = shell.plugin(tauri_plugin_opener::init());
     }
     shell
         .setup(move |app| {
@@ -88,13 +91,26 @@ fn main() -> Result<()> {
             let port = core.port();
             let key = run_key()?;
             let core = core.with_key(key.clone());
+            // Radio and autoplay that knows what is like what, when this build was given the address of Stash's
+            // Last.fm proxy (it holds the key; see `stashd::radio`). Never in the source, and never shown.
+            let core = match option_env!("STASH_LASTFM_PROXY").filter(|p| !p.trim().is_empty()) {
+                Some(proxy) => core.with_similar(proxy),
+                None => core,
+            };
             // The page may ask for the mini player (a measurement keeps the one window it measures).
             let core = if measuring {
                 core
             } else {
                 let handle = app.handle().clone();
+                let opener = app.handle().clone();
                 core.with_window(Arc::new(move |view| windows::show(&handle, view)))
                     .with_shortcuts(shortcuts::keys_shell(app.handle().clone(), port))
+                    .with_opener(Arc::new(move |link: &str| {
+                        use tauri_plugin_opener::OpenerExt;
+                        // Only Last.fm's pages, whatever asks.
+                        link.starts_with("https://www.last.fm/")
+                            && opener.opener().open_url(link, None::<&str>).is_ok()
+                    }))
             };
             std::thread::Builder::new()
                 .name("stash-core".into())

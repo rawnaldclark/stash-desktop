@@ -99,6 +99,31 @@ fn names_version(part: &str) -> bool {
     fold(part).split(' ').any(|w| VERSION_WORDS.contains(&w))
 }
 
+/// Whether a title names another version of a song in a part of its own: in brackets ("Song (Live)", "Song [Remix]")
+/// or after a dash ("Song - Acoustic"). A release label ("Song - 2011 Remaster") is not another version.
+pub fn names_other_version(title: &str) -> bool {
+    let mut parts: Vec<&str> = Vec::new();
+    for (open, close) in [('(', ')'), ('[', ']')] {
+        let mut rest = title;
+        while let Some(at) = rest.find(open) {
+            let inner = &rest[at + 1..];
+            let end = inner.find(close).unwrap_or(inner.len());
+            parts.push(&inner[..end]);
+            rest = &inner[end..];
+        }
+    }
+    parts.extend(title.split(" - ").skip(1));
+    parts
+        .into_iter()
+        .any(|part| names_version(part) && !is_release_label(part))
+}
+
+/// Whether two titles name the same song, as matching compares them: "Song - 2011 Remaster" is "Song", and
+/// "Song (Live)" is not.
+pub fn same_title(a: &str, b: &str) -> bool {
+    title_key(a) == title_key(b)
+}
+
 /// A title as it is compared: folded, and without a trailing release label ("Song - 2011 Remaster", "Song (Mono)",
 /// "Song [Deluxe Edition]"). A bracket or a dash part that says anything else stays: it names a version. In a bracket
 /// of parts joined by a slash, the parts that are labels go and the rest stays ("(Radio Edit / Remastered 2025)" is

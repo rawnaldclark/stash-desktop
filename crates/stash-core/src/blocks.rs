@@ -169,6 +169,15 @@ impl Library {
         Ok(out)
     }
 
+    /// Whether the listener chose not to play the artist `name` (as a credit names them, folded).
+    pub fn artist_blocked(&self, name: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM blocked WHERE kind = 'artist' AND key = ?1)",
+            [fold(name)],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Whether a song by its words (one that is not the library's: an add-on's) is one the listener chose not to play.
     pub fn words_blocked(&self, title: &str, artist: &str) -> Result<bool> {
         let artist_key = fold(artist);
