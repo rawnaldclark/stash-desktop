@@ -909,8 +909,16 @@ fn tracks_are_taken_out_wherever_they_are_in_one_go() {
     );
     // The playing track goes and none is kept after it: playback ends, the rest of the queue stays.
     assert_eq!(player.retain(without(&["T5"])), 1);
-    let ended = until(&player, "playback ended", |s| s.status == "idle");
+    // (It is idle for a moment; then it rests on the last track left, as a queue that ended does.)
+    let ended = until(&player, "playback ended", |s| {
+        s.status == "idle" || (s.resting && now(s) == Some("T1".into()))
+    });
     assert_eq!((ended.queue_len, titles()), (1, vec!["T1".to_string()]));
+    let rests = until(&player, "resting on the track left", |s| s.resting);
+    assert_eq!(
+        (rests.status, now(&rests), rests.position_ms),
+        ("paused", Some("T1".into()), 0)
+    );
 
     // The queue played out, the player still showing its last track: it goes, and nothing is left to show.
     player.play_from(vec![track(0), track(1)], 1, None).unwrap();

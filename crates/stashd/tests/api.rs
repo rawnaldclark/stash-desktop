@@ -5051,3 +5051,191 @@ fn a_credit_names_each_artist_and_an_artist_has_their_songs_with_others() {
     assert_eq!(duo["with"], json!([]));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A playlist file from another player comes in: files the library has (by full or relative path), a file it did not
+/// have (added), a song by its words; a web address and an entry naming nothing are left out. A playlist goes out as
+/// an .m3u8 of its files, and that file comes back in whole.
+#[test]
+fn a_playlist_file_comes_in_and_goes_out() {
+    let dir = std::env::temp_dir().join(format!("stash-api-m3u-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (music, elsewhere, lists) = (dir.join("Music"), dir.join("Elsewhere"), dir.join("Lists"));
+    for folder in [&music, &elsewhere, &lists] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    silence(&music.join("alpha.wav"));
+    silence(&music.join("bravo.wav"));
+    silence(&elsewhere.join("charlie.wav"));
+    let core = Core::bind(Options {
+        db: dir.join("library.db"),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: None,
+        mpv: None,
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    client.post("/api/scan", json!({ "folder": music.to_string_lossy() }));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while client.get("/api/counts").1["tracks"] != 2 {
+        assert!(Instant::now() < deadline, "the scan did not finish");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let alpha = std::path::absolute(music.join("alpha.wav")).unwrap();
+    let road = lists.join("Road.m3u8");
+    std::fs::write(
+        &road,
+        format!(
+            "#EXTM3U\n#PLAYLIST:Road trip\n#EXTINF:2,Unknown artist - alpha\n{}\n../Music/bravo.wav\n\
+             #EXTINF:2,Someone - charlie\n..\\Elsewhere\\charlie.wav\n#EXTINF:200,Nobody Here - Far Away\n\
+             Z:\\nowhere\\far away.mp3\n#EXTINF:-1,Radio\nhttp://radio.example/stream\nnameless.mp3\n",
+            alpha.display()
+        ),
+    )
+    .unwrap();
+    let came = client.post(
+        "/api/playlists/file",
+        json!({ "path": road.to_string_lossy() }),
+    );
+    let brought = &came["brought"];
+    assert_eq!(
+        (
+            brought["name"].as_str(),
+            brought["songs"].as_u64(),
+            brought["files"].as_u64(),
+            brought["added"].as_u64(),
+            brought["by_words"].as_u64(),
+            brought["left_out"].as_u64()
+        ),
+        (
+            Some("Road trip"),
+            Some(4),
+            Some(2),
+            Some(1),
+            Some(1),
+            Some(2)
+        ),
+        "{came}"
+    );
+    assert!(
+        came["edits"].as_u64().is_some() && came["counts"]["tracks"] == 4,
+        "{came}"
+    );
+    let id = brought["id"].as_i64().unwrap();
+    let titles = |id: i64| -> Vec<String> {
+        client
+            .get(&format!("/api/playlists/{id}/tracks?offset=0&limit=50"))
+            .1["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["title"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(titles(id), ["alpha", "bravo", "charlie", "Far Away"]);
+
+    // Out: the files, by their full paths; the song only the add-ons could play is left out, and said so.
+    let mut response = client
+        .agent
+        .get(&format!("{}/api/playlists/{id}/file", client.base))
+        .call()
+        .unwrap();
+    let said = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    };
+    let (songs, left_out, disposition) = (
+        said("x-songs"),
+        said("x-left-out"),
+        said("content-disposition"),
+    );
+    let text = response.body_mut().read_to_string().unwrap();
+    assert_eq!(
+        (songs.as_deref(), left_out.as_deref()),
+        (Some("3"), Some("1")),
+        "{text}"
+    );
+    assert!(
+        disposition.is_some_and(|d| d.contains("Road trip.m3u8")),
+        "{text}"
+    );
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines[..3],
+        [
+            "#EXTM3U",
+            "#PLAYLIST:Road trip",
+            "#EXTINF:2,Unknown artist - alpha"
+        ]
+    );
+    assert_eq!(lines[3], alpha.to_string_lossy());
+    assert_eq!(lines.len(), 2 + 3 * 2, "{text}");
+    // ...and it comes back in whole: every entry a file the library has.
+    let again = dir.join("Again.m3u8");
+    std::fs::write(&again, &text).unwrap();
+    let back = client.post(
+        "/api/playlists/file",
+        json!({ "path": again.to_string_lossy() }),
+    );
+    assert_eq!(
+        (
+            back["brought"]["files"].as_u64(),
+            back["brought"]["added"].as_u64(),
+            back["brought"]["by_words"].as_u64(),
+            back["brought"]["left_out"].as_u64()
+        ),
+        (Some(3), Some(0), Some(0), Some(0)),
+        "{back}"
+    );
+    assert_eq!(
+        titles(back["brought"]["id"].as_i64().unwrap()),
+        ["alpha", "bravo", "charlie"]
+    );
+
+    // Refused, in words: not a playlist file, not there, nothing in it.
+    let refused = |path: &std::path::Path| {
+        let (status, said) = client.send(
+            "/api/playlists/file",
+            json!({ "path": path.to_string_lossy() }),
+        );
+        (
+            status,
+            said["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        )
+    };
+    let notes = dir.join("notes.txt");
+    std::fs::write(&notes, "alpha.wav\n").unwrap();
+    assert_eq!(
+        refused(&notes),
+        (400, "That is not a playlist file (.m3u or .m3u8)".into())
+    );
+    assert_eq!(
+        refused(&dir.join("gone.m3u")),
+        (400, "That playlist file was not found".into())
+    );
+    let empty = dir.join("empty.m3u");
+    std::fs::write(&empty, "#EXTM3U\n# nothing\n").unwrap();
+    assert_eq!(
+        refused(&empty),
+        (400, "That playlist file has no songs in it".into())
+    );
+    let (status, _) = client.get("/api/playlists/999999/file");
+    assert_eq!(status, 404);
+    let _ = std::fs::remove_dir_all(&dir);
+}

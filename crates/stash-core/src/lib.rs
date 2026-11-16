@@ -21,6 +21,7 @@ pub mod lyrics;
 pub mod matching;
 pub mod played;
 pub mod player;
+pub mod playlist_file;
 pub mod scan;
 pub mod scrobble;
 pub mod shuffle;

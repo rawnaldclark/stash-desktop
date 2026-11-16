@@ -1066,3 +1066,56 @@ A reviewer read sections 29 and 30 (playlist folders, the third review's fixes).
   - Rename put the keyboard in the name, with "Summer" picked.
   - Opening Work from the sidebar dropped the form.
   - The sidebar's Rename put the keyboard in its field.
+
+## 33. Playlist files
+
+Another player's playlist (.m3u or .m3u8, as foobar2000, MusicBee, VLC and most players save them) comes in as a playlist, and a playlist, or the liked songs, goes out as one (`crates/stash-core/src/playlist_file.rs`, routes in `crates/stashd/src/playlist_files.rs`).
+
+### Coming in
+
+The sidebar's "+" menu, or Settings › Your library, opens the system's own dialog for the file.
+
+- **The file is read as written:**
+  - UTF-8 (with or without a byte-order mark), else the Windows code page older players write .m3u files in.
+  - `#PLAYLIST` names the playlist, else the file's name does.
+  - Each `#EXTINF` gives its entry a length and "Artist - Title".
+  - At most 10,000 entries, and a file of at most 5 MB.
+- **Each entry becomes, in this order:**
+  - **A file the library has**, by its full path. A path written relative to the playlist file is found beside it, and `file://` addresses are read too. Paths are made whole the way a scan writes them, and on Windows any case matches.
+  - **A file on this computer the library does not have yet.** Its tags are read and it is added, as a scan would add it.
+  - **The song the entry names** (its `#EXTINF` words, else a file name like "Artist - Title"), found among the library's songs or kept as one the add-ons play.
+  - **Left out:** web addresses (radio streams), and entries that name no song.
+- **The window says what came of it** ("Made Road trip: 4 songs; 1 left out"), and opens the new playlist.
+
+### Going out
+
+A playlist's page has "Save as a playlist file", and Library › Liked has the same for the likes.
+
+- **The file** is an .m3u8: its name, then each song that is a file on this computer (its own, or saved from an add-on), by its full path, with its length, artist and title.
+- **Songs only the add-ons play are left out**, since no other player could play them, and the window says how many. A list with no such file saves nothing, and says why.
+- **The file's name is the playlist's**, without the characters Windows refuses. The counts travel as `X-Songs` and `X-Left-Out`, which the core now lets the window read.
+
+### Also fixed
+
+- **`Player::retain` stopped the engine after letting go of the player's state** when the playing track went with nothing kept after it. A start begun in between would have been stopped (the race §32 fixed for starts). It now stops under the same hold.
+- **The test of that step waited for "idle"**, which lasts only until `settle` rests the player on the last track left. It now waits for either, then for the rest on that track. It failed about one run in five with all player tests at once; it passed six runs of six after the change.
+
+### Checked
+
+- **Core tests (`playlist_file::tests`):**
+  - A file with a byte-order mark, CRLF lines, comments, a quoted comma in an `#EXTINF` attribute, a lower-case `#extinf`, a web address, a relative path and a `file://` address was read as written.
+  - An old .m3u in the Windows code page read "Beyoncé", "Déjà Vu – Live".
+  - A leading track number is no artist.
+  - Places: relative paths were made whole beside the file, `file:///C:/Music/x%20y.mp3` became `C:\Music\x y.mp3`, and `C:/Music/../Music/a.mp3` became `C:\Music\a.mp3`.
+- **stashd tests:** file names lost the characters Windows refuses, and names were encoded for `filename*`.
+- **API test (`a_playlist_file_comes_in_and_goes_out`):**
+  - Library: two files scanned, one outside the library.
+  - Import of a file with an absolute path, a relative one with forward slashes, a relative one with backslashes to the outside file, a missing file named by its `#EXTINF`, a radio address and a nameless entry: "Road trip", 4 songs (2 files the library had, 1 added, 1 by words), 2 left out, and the songs in the file's order.
+  - Export: 3 songs and 1 left out, the file name "Road trip.m3u8", and the first entry's path exact. Brought in again, every entry was a file the library had.
+  - Refusals: not a playlist file, not found, no songs in it, and no such playlist (404).
+- **On the built page** (the system's dialog stood in for by answering its route with a path):
+  - Saving "Night Drive" downloaded "Night Drive.m3u8", with 3 files in it and "One song only your add-ons play is not in it".
+  - The "+" menu offered "Import a playlist file". Importing "From MusicBee.m3u" opened the new playlist, with 4 songs in the file's order (the file from outside the library added, the missing one found by its words among the library's songs) and 1 left out.
+  - Settings had the button.
+  - Saving the likes (one song only add-ons play) saved nothing, and said why.
+  - There were no errors in the page, apart from the covers the made-up files do not have.

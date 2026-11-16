@@ -1102,7 +1102,6 @@ impl Player {
             Nothing,
             /// A start begun: its generation, and whether it waits for an add-on.
             Start(u64, bool),
-            End,
         }
         let (gone, then) = {
             let mut shared = self.ctx.shared.lock().unwrap();
@@ -1145,7 +1144,9 @@ impl Player {
                             shared.pos = None;
                             shared.starting = None;
                             shared.ahead = shared.queue.len();
-                            Then::End
+                            // Under the same hold, so a start begun just after is not stopped.
+                            let _ = self.ctx.engine.stop();
+                            Then::Nothing
                         }
                     }
                 }
@@ -1168,12 +1169,8 @@ impl Player {
             };
             (gone, then)
         };
-        match then {
-            Then::Nothing => {}
-            Then::Start(generation, waits) => self.go(generation, waits),
-            Then::End => {
-                let _ = self.ctx.engine.stop();
-            }
+        if let Then::Start(generation, waits) = then {
+            self.go(generation, waits);
         }
         gone
     }

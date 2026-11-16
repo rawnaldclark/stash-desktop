@@ -167,6 +167,26 @@ export const likeTrack = (id: number, liked: boolean) => post<Changed>('/api/tra
 /** Makes a track an add-on found a song of the library; the answer's `id` is its row. */
 export const keepFound = (addon: string, track: KeptTrack) => post<Changed>('/api/tracks/keep', { addon, track });
 export const createPlaylist = (name: string) => post<Changed>('/api/playlists', { name });
+/** What a playlist file brought in: the new playlist, and what came of its entries (files the library had, files it
+ * added, songs found by their words, and entries left out). */
+export type Brought = { id: number; name: string; songs: number; files: number; added: number; by_words: number; left_out: number };
+/** The system's own dialog, for a playlist file (.m3u, .m3u8); null when none was chosen. */
+export const pickPlaylistFile = () => post<{ path: string | null }>('/api/playlists/file/pick', {});
+export const playlistFromFile = (path: string) => post<Changed & { brought: Brought }>('/api/playlists/file', { path });
+/** A playlist (`null`: the liked songs) as an .m3u8 file: its name, and how many songs went in and were left out. */
+export async function playlistFile(id: number | null): Promise<{ blob: Blob; name: string; songs: number; leftOut: number }> {
+	const path = id === null ? '/api/liked/file' : `/api/playlists/${id}/file`;
+	const response = await fetch(at(path));
+	if (!response.ok) throw new Refused(`${path}: ${response.status}`, response.status);
+	const text = await response.text();
+	const named = /filename\*=UTF-8''([^;]+)/i.exec(response.headers.get('content-disposition') ?? '');
+	return {
+		blob: new Blob([text], { type: 'audio/x-mpegurl' }),
+		name: named ? decodeURIComponent(named[1]) : 'Playlist.m3u8',
+		songs: Number(response.headers.get('x-songs') ?? 0),
+		leftOut: Number(response.headers.get('x-left-out') ?? 0)
+	};
+}
 export const folders = () => rows<FolderRow>('/api/folders');
 /** With `playlist`, that playlist goes in the new folder. */
 export const createFolder = (name: string, playlist?: number) => post<Changed>('/api/folders', { name, playlist });

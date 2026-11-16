@@ -1,6 +1,7 @@
 <!-- Settings, in the web player's layout: Sound (the sound card for Stash alone), Add-ons, Your library (music folders, bringing a
      library in and saving one), Appearance, About. -->
 <script lang="ts">
+	import { importPlaylistFile } from '../../lib/desktop/playlist-files';
 	import { onMount } from 'svelte';
 	import { goOffline, library, player, sources } from '../../lib/app';
 	import * as core from '../../lib/core';
@@ -418,6 +419,15 @@
 					<button type="button" class="btn ghost" onclick={saveFile}>Save a library file</button>
 				</div>
 				{#if fileNotice}<p class="set-sub" class:set-trouble={fileNotice.trouble} role="status">{fileNotice.text}</p>{/if}
+			</div>
+			<div class="set-row set-col">
+				<div class="set-lab">
+					<span class="set-name">From another player</span>
+					<span class="set-sub">A playlist file (.m3u or .m3u8, as foobar2000, MusicBee, VLC and most players save them) becomes a playlist here: files you have play from where they are, and other songs are found by name. A playlist’s page saves it as one too.</span>
+				</div>
+				<div class="chips">
+					<button type="button" class="btn ghost" onclick={() => void importPlaylistFile()}>Import a playlist file…</button>
+				</div>
 			</div>
 			<div class="set-row">
 				<div class="set-lab">

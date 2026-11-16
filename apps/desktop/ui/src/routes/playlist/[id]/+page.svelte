@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { savePlaylistFile } from '../../../lib/desktop/playlist-files';
 	import { focusNow } from '../../../lib/ui/focus';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
@@ -89,6 +90,7 @@
 			{#if smart}<button type="button" class="btn ghost" onclick={() => (ui.smart = { id: pl.id })}>Edit rules</button>{/if}
 			<button type="button" class="act-ib" aria-label="Move to folder" title={folder ? `In ${folder.name}` : 'Move to folder'} aria-haspopup="menu" onclick={(e) => playlistMenu(pl, under(e.currentTarget))}><Icon name="drive_file_move" /></button>
 			<button type="button" class="act-ib" aria-label="Rename playlist" title="Rename" onclick={() => { draft = pl.name; editing = true; }}><Icon name="edit" /></button>
+			<button type="button" class="act-ib" aria-label="Save as a playlist file" title="Save as a playlist file (.m3u8)" onclick={() => void savePlaylistFile(pl.id)}><Icon name="ios_share" /></button>
 			{#if confirmDelete}
 				<button type="button" class="btn danger" onclick={remove}>Delete this playlist</button>
 				<button type="button" class="btn ghost" onclick={() => (confirmDelete = false)}>Keep it</button>

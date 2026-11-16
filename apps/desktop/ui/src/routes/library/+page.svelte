@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { savePlaylistFile } from '../../lib/desktop/playlist-files';
 	import { focusNow } from '../../lib/ui/focus';
 	import { untrack } from 'svelte';
 	import { goto } from '$app/navigation';
@@ -198,6 +199,7 @@
 				<button type="button" class="act-play" aria-label="Play your likes" disabled={!likes.length} onclick={() => play(likes)}><Icon name="play_arrow" /></button>
 				<button type="button" class="act-ib" aria-label="Shuffle your likes" title="Shuffle" disabled={!likes.length} onclick={() => { player.setShuffle(true); play(likes); }}><Icon name="shuffle" /></button>
 				<DownloadSwitch list="liked" name="Liked songs" count={L.likes.length} />
+				<button type="button" class="act-ib" aria-label="Save your likes as a playlist file" title="Save as a playlist file (.m3u8)" onclick={() => void savePlaylistFile(null)}><Icon name="ios_share" /></button>
 				<span class="lib-count">{needle ? `${likes.length} of ${songs(L.likes.length)}` : songs(L.likes.length)}</span>
 			</div>
 			<div class="trk-list">

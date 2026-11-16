@@ -2,6 +2,7 @@
  * Playlist folders in the window: the menus of a playlist and of a folder, and what they do. A folder holds playlists
  * (the sidebar folds it shut or open; Library › Playlists opens it), and deleting one keeps its playlists.
  */
+import { importPlaylistFile } from './playlist-files';
 import { goto } from '$app/navigation';
 import { library } from '../app';
 import type { Playlist, PlaylistFolder } from '../api';
@@ -79,7 +80,8 @@ export function folderMenu(f: PlaylistFolder, at: At): void {
 	});
 }
 
-/** The sidebar's "new" menu: a playlist (opened once made), a smart playlist, a folder. */
+/** The sidebar's "new" menu: a playlist (opened once made), a smart playlist, a folder, a playlist from another
+ * player's file. */
 export function newMenu(at: At): void {
 	ui.openChoices({
 		...at,
@@ -95,7 +97,8 @@ export function newMenu(at: At): void {
 				}
 			},
 			{ icon: 'queue_music', label: 'New smart playlist', run: () => (ui.smart = { id: null }) },
-			{ icon: 'create_new_folder', label: 'New folder', ask: { placeholder: 'Folder name', submit: 'Create', make: (name) => void library.createFolder(name).catch(() => {}) } }
+			{ icon: 'create_new_folder', label: 'New folder', ask: { placeholder: 'Folder name', submit: 'Create', make: (name) => void library.createFolder(name).catch(() => {}) } },
+			{ icon: 'playlist_add', label: 'Import a playlist file', run: () => void importPlaylistFile() }
 		]
 	});
 }

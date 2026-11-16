@@ -5,6 +5,7 @@ mod blocking;
 pub mod demo_addon;
 mod folders;
 mod kept;
+mod playlist_files;
 mod relay;
 mod saving;
 mod scrobbling;

@@ -554,6 +554,16 @@ async function loadLibrary(): Promise<void> {
 	]);
 }
 
+/** Brings in a playlist file from another player, asked for with the system's own dialog: a new playlist. Null when
+ * none was chosen. */
+export async function playlistFromFile(): Promise<core.Brought | null> {
+	const { path } = await core.pickPlaylistFile();
+	if (!path) return null;
+	const c = await core.playlistFromFile(path);
+	await took(c, [c.brought.id]);
+	return c.brought;
+}
+
 /** The library's row of a song; an add-on's track is made a song of the library first. */
 async function rowOf(item: LibraryItem): Promise<number> {
 	const id = libIdOf(item);

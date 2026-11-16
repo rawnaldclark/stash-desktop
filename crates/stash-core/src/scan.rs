@@ -125,7 +125,7 @@ pub fn scan_folder(
     Ok(report)
 }
 
-fn is_audio(path: &Path) -> bool {
+pub(crate) fn is_audio(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| AUDIO.iter().any(|a| a.eq_ignore_ascii_case(e)))

@@ -92,11 +92,11 @@ pub type KeysShell = Arc<dyn Fn(&[(String, String)]) -> Vec<(String, String)> + 
 
 pub(crate) type Reply = Response<std::io::Cursor<Vec<u8>>>;
 
-fn header(name: &str, value: &str) -> Header {
+pub(crate) fn header(name: &str, value: &str) -> Header {
     Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("a valid header")
 }
 
-fn reply(status: u16, content_type: &str, body: Vec<u8>) -> Reply {
+pub(crate) fn reply(status: u16, content_type: &str, body: Vec<u8>) -> Reply {
     Response::from_data(body)
         .with_status_code(status)
         .with_header(header("Content-Type", content_type))
@@ -1100,6 +1100,11 @@ fn answer(state: &State, mut request: Request) -> bool {
         response = response
             .with_header(header("Access-Control-Allow-Origin", &origin))
             .with_header(header("Access-Control-Allow-Headers", "Content-Type"))
+            // The counts a playlist file goes out with (see `playlist_files`).
+            .with_header(header(
+                "Access-Control-Expose-Headers",
+                "X-Songs, X-Left-Out",
+            ))
             .with_header(header("Vary", "Origin"));
     }
     let _ = request.respond(response);
@@ -2224,6 +2229,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((import_route(state, request)?, false));
     }
     // Before the lists' own routes, which read a request's body before passing on a path they do not answer.
+    if let Some(response) = crate::playlist_files::route(state, request, &path)? {
+        return Ok((response, false));
+    }
     if let Some(response) = crate::saving::kept_route(state, request, &path)? {
         return Ok((response, false));
     }
