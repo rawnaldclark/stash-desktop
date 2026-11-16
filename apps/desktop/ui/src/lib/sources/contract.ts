@@ -22,7 +22,8 @@ export type Track = {
 
 export type Album = { id: string; title: string; artist: string; year?: number; artwork?: Artwork[]; tracks: Track[] };
 export type ArtistAlbum = { id: string; title: string; year?: number; artwork?: Artwork[]; trackCount?: number };
-export type Artist = { id: string; name: string; artwork?: Artwork[]; topTracks: Track[]; albums: ArtistAlbum[] };
+/** `withOthers`: songs credited to the artist together with others ("A & B", "B feat. A"). */
+export type Artist = { id: string; name: string; artwork?: Artwork[]; topTracks: Track[]; albums: ArtistAlbum[]; withOthers?: Track[] };
 
 export type Descriptor = { title: string; artist: string; album?: string; durationMs?: number; isrc?: string };
 

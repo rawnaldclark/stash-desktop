@@ -38,6 +38,9 @@ use url::Url;
 const PAGE_CAP: usize = 500;
 /// The most songs one change acts on at once (as many as can be picked in a list).
 pub(crate) const PICKS_CAP: usize = 5000;
+/// The most credits one ask splits, and the longest credit split (a longer one is one name).
+const CREDITS_CAP: usize = 400;
+const CREDIT_LEN: usize = 400;
 /// The largest body the API reads.
 const BODY_CAP: u64 = 4 * 1024 * 1024;
 /// The most tracks one queue holds.
@@ -2290,11 +2293,18 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
             ));
         }
         if let Some(id) = one("/api/artists/") {
+            let library = library();
             return Ok((
-                match library().artist(id, 50)? {
+                match library.artist(id, 50)? {
+                    // `with`: their songs with others ("A & B", "B feat. A"), credited apart.
                     Some((artist, rows, albums)) => reply_json(
                         200,
-                        json!({ "artist": artist, "rows": rows, "albums": albums }),
+                        json!({
+                            "artist": artist,
+                            "rows": rows,
+                            "albums": albums,
+                            "with": library.artist_with_others(id, 50)?,
+                        }),
                     ),
                     None => refuse(404, "no such artist"),
                 },
@@ -2404,6 +2414,32 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
             200,
             json!({ "lrclib": library().setting(LRCLIB_SETTING)?.as_deref() != Some("0") }),
         ),
+        // The artists each credit names (two or more), each with their artist here when the library knows them by
+        // themselves: the window links each name to its own page. One credit names one artist: no parts.
+        (Method::Post, "/api/credits") => {
+            let body = body_json(request)?;
+            let library = library();
+            let mut known = std::collections::HashMap::new();
+            let mut answer = serde_json::Map::new();
+            let asked = body.get("credits").and_then(Value::as_array);
+            for credit in asked
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .take(CREDITS_CAP)
+            {
+                if answer.contains_key(credit) {
+                    continue;
+                }
+                let parts = if credit.len() > CREDIT_LEN {
+                    Vec::new()
+                } else {
+                    library.credit_parts_with(credit, &mut known)?
+                };
+                answer.insert(credit.to_string(), json!(parts));
+            }
+            reply_json(200, json!({ "credits": answer }))
+        }
         (Method::Post, "/api/settings/lyrics") => {
             let on = body_json(request)?
                 .get("lrclib")

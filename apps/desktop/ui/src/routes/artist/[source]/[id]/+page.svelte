@@ -45,6 +45,19 @@
 	// The artist's songs are rows of the library: each carries its row (`refs.lib`) and the library's own album and artist pages.
 	const items = $derived<LibraryItem[]>(artist ? artist.topTracks.map((t) => toLibraryItem(t, { [LIB_REF]: t.id }, Date.now(), sid)) : []);
 	const play = (i = 0) => void player.playItems(items, i, { from: artist?.name });
+	// Their songs with others ("A & B", "B feat. A"): a list of its own.
+	const withItems = $derived<LibraryItem[]>(artist ? (artist.withOthers ?? []).map((t) => toLibraryItem(t, { [LIB_REF]: t.id }, Date.now(), sid)) : []);
+	const playWith = (i: number) => void player.playItems(withItems, i, { from: artist?.name });
+	const pickWith: PickList = {
+		get scope() {
+			return `artist-with:${sid}:${id}`;
+		},
+		count: () => withItems.length,
+		between: (a, b) => withItems.slice(a, b + 1),
+		get from() {
+			return artist?.name;
+		}
+	};
 	const pick: PickList = {
 		get scope() {
 			return `artist:${sid}:${id}`;
@@ -92,7 +105,15 @@
 				</div>
 			</div>
 		{/if}
-		{#if !items.length && !artist.albums.length}
+		{#if withItems.length}
+			<h2 class="vh2">With others</h2>
+			<div class="trk-list">
+				{#each withItems as it, i (it.key + i)}
+					<TrackRow item={it} num={i + 1} pick={pickWith} at={i} onplay={() => playWith(i)} />
+				{/each}
+			</div>
+		{/if}
+		{#if !items.length && !artist.albums.length && !withItems.length}
 			<p class="s-hint">There is nothing to show for this artist yet.</p>
 		{/if}
 	{/if}

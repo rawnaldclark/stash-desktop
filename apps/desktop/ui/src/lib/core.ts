@@ -150,7 +150,13 @@ export const playlistTracksAt = (id: number, offset: number, limit: number, sign
 export const albumsAt = (offset: number, limit: number, signal?: AbortSignal) => rows<AlbumRow>(`/api/albums?offset=${offset}&limit=${limit}`, signal);
 export const album = (id: number) => get<{ album: AlbumRow; rows: TrackRow[] }>(`/api/albums/${id}`);
 export const artistsAt = (offset: number, limit: number, signal?: AbortSignal) => rows<ArtistRow>(`/api/artists?offset=${offset}&limit=${limit}`, signal);
-export const artist = (id: number) => get<{ artist: ArtistRow; rows: TrackRow[]; albums: AlbumRow[] }>(`/api/artists/${id}`);
+/** `with`: the artist's songs with others ("A & B", "B feat. A"), credited apart. */
+export const artist = (id: number) => get<{ artist: ArtistRow; rows: TrackRow[]; albums: AlbumRow[]; with?: TrackRow[] }>(`/api/artists/${id}`);
+/** One artist a credit names: `before`, `name` and `after` give the credit back as written; `id` is their artist here,
+ * when the library knows them by themselves. */
+export type CreditPart = { before: string; name: string; after?: string; id?: number };
+/** The artists each credit names (none for a credit that names one). */
+export const credits = (names: string[]) => post<{ credits: Record<string, CreditPart[]> }>('/api/credits', { credits: names });
 
 /** The core's answer to a change the listener made: the playlists and the counts as they now are. */
 /** `edits`: the core's count of changes to the likes and the playlists, this one included. */

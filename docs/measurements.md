@@ -962,3 +962,52 @@ Trouble that may be either:
     - Deleting after the question removed both files.
   - **Picking checks:** "Remove 2 from this playlist" (one change) left the right songs. "Don't play these 3 songs" dimmed 3 rows and made 3 choices; Undo took all 3 back.
   - **The "Don't play" checks** passed again.
+
+## 31. Songs by several artists
+
+A credit like "Drake & Future" or "Newcomer (feat. Drake)" names several artists. Stash shows each one as its own link, and each artist's page lists their songs with others.
+
+### How a credit is split
+
+The core splits a credit (`crates/stash-core/src/credits.rs`). The library has no table of credits for this: the split is worked out when it is asked for, from the artists the library has.
+
+- **Some words always mean several artists:** "feat.", "ft.", "featuring", ";" and " / ". The credit is always split there.
+- **Others only may:** ",", "&", "and", "x", "with" and "vs.". These split a credit only as far as the pieces are artists the library knows by themselves (some song or album is credited to that name alone).
+  - "Drake & Future" splits when Drake or Future has a song of their own here.
+  - "Earth, Wind & Fire" and "Simon & Garfunkel" stay whole, because no piece of them is known.
+  - "Tyler, The Creator & Drake" splits into two artists, not three, when "Tyler, The Creator" is known: of every way to cut a stretch between sure words, the one naming the most known artists wins, and then the one with the fewest parts.
+- **Case and a leading "The" do not matter:** names are compared as they sort.
+- **The credit itself never counts as known**, since every song's credit is an artist row of its own.
+- **The parts give the credit back as written:** the words between them and a closing ")" are kept.
+- **Limits:** a credit of more than 12 pieces, or over 400 characters, is left whole.
+
+### What the window does with it
+
+- **Song rows and Now playing:** each name with a page here is its own link.
+  - In a row, a name the library does not know stays text.
+  - In Now playing, an unknown name links to a search for it.
+  - A credit with no known name links to its own page, as before.
+- **The window asks the core about credits in batches** (`POST /api/credits`, at most 400 a time). The credits on screen at one moment go in one ask. A credit with none of the joining words is never asked about.
+  - The window keeps the answers.
+  - It lets them go when the number of artists in the library changes (someone new may now be known by themselves).
+- **The song menu offers "Go to" for each artist with a page**, up to four, in place of one "Go to artist".
+- **An artist's page lists their songs with others** under "With others", the most played first.
+  - The core reads the credits that hold the artist's name (at most 500) and keeps those whose parts name this artist.
+  - "Drakeo the Ruler" holds "Drake" but names no Drake.
+
+### Checked
+
+- **Core tests (`credits::tests`):**
+  - **Splitting:** known artists split as above. The band names stay whole. "feat." splits even when no name is known.
+  - **Writing back:** eight credits, with "(feat. …)", "(Ft. Future (UK) )", "A; B;" and mixed words, came back exactly as written from their parts.
+  - **An artist's songs with others:** Drake had three, not their own song and not "Drakeo the Ruler". Future had one, The Weeknd one, and Simon & Garfunkel none.
+- **API test:**
+  - **`/api/credits`:** it split "Drake & Future" into both artists with their ids, and "Newcomer (feat. Drake)" into Newcomer (no id) and Drake (id, closing ")"). It gave no parts for "Simon & Garfunkel" or "Drake", and passed over a number.
+  - **The artist page:** Drake's own songs were ["One"]; with others, ["Four", "Three"].
+- **On the built page, with a scratch library imported from a made-up library file:**
+  - Library › Songs asked about credits once, for the 4 credits with joining words.
+  - "Ada Vale, Ben Okoro and Cy Marsh" linked Ada Vale and Ben Okoro, and left Cy Marsh as text. "Newcomer (feat. Ada Vale)" linked Ada Vale only. "Simon & Garfunkel" kept its one link.
+  - The song menu offered "Go to Ada Vale" and "Go to Ben Okoro". The second opened Ben Okoro's page: Songs ["Low Tide"], With others ["Fireline", "Paper Planes"].
+  - A name in a row there went on to Ada Vale's page: with others ["Fireline", "Glasshouse", "Paper Planes"].
+  - The duo's page had no "With others".
+  - There were no errors in the page.

@@ -5,7 +5,8 @@
 	import { goto } from '$app/navigation';
 	import { library, notPlayed, notPlayedSongs, player, saveSongs, unsaveSongs } from '../app';
 	import { NF } from '../desktop/unfound.svelte';
-	import { LIB_REF } from '../identity';
+	import { knownParts } from '../desktop/credits.svelte';
+	import { LIB_REF, LIBRARY_SOURCE } from '../identity';
 	import { P } from './pick.svelte';
 	import { said } from '../core';
 	import { albumHref, albumLink, artistHref, artistLink } from '../identity';
@@ -26,6 +27,8 @@
 	const isGroup = $derived(!!m?.group?.length);
 	/** The group is the songs the listener picked in a list (not an album): no one artist or album to go to. */
 	const picked = $derived(isGroup && !!m?.picks);
+	/** The artists the song's credit names that have their own page here ("Drake & Future": both), at most four. */
+	const artists = $derived(m && !isGroup ? knownParts(m.item.artist).slice(0, 4) : []);
 	/** Every picked song is one the listener chose not to play (by itself). */
 	const allBlocked = $derived(picked && targets.every((t) => L.blockedOf(t) === 'song'));
 	const allLiked = $derived(targets.length > 0 && targets.every((t) => L.isLiked(t)));
@@ -203,6 +206,10 @@
 			})}
 			{#if picked}
 				<!-- Songs picked in a list: no one artist or album. -->
+			{:else if artists.length}
+				{#each artists as a, i (i)}
+					{@render entry('person', `Go to ${a.name}`, () => run(() => go(artistHref({ sourceId: LIBRARY_SOURCE, id: String(a.id) }))))}
+				{/each}
 			{:else if artistLink(m.item)}
 				{@render entry('person', 'Go to artist', () => run(() => go(artistHref(artistLink(m.item)!))))}
 			{:else}

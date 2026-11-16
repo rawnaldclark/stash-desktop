@@ -1082,6 +1082,52 @@ impl Library {
         Ok(Some((artist, tracks, albums)))
     }
 
+    /// Songs whose credit names this artist among others ("A & B", "B feat. A"; see [`crate::credits`]): the most
+    /// played first, at most `limit`. Of the credits that hold the artist's name, the first [`CREDITS_READ`] are read.
+    pub fn artist_with_others(&self, id: i64, limit: usize) -> Result<Vec<TrackRow>> {
+        use rusqlite::OptionalExtension;
+        let key: Option<String> = self
+            .conn
+            .prepare_cached("SELECT sort_key FROM artists WHERE id = ?1")?
+            .query_row([id], |r| r.get(0))
+            .optional()?;
+        let Some(key) = key.filter(|k| !k.is_empty()) else {
+            return Ok(Vec::new());
+        };
+        // Both are lower case, so the name is found in a credit whatever its case.
+        let credits = self
+            .conn
+            .prepare_cached(
+                "SELECT id, name FROM artists WHERE id != ?1 AND instr(sort_key, ?2) > 0 ORDER BY id LIMIT ?3",
+            )?
+            .query_map(params![id, key, CREDITS_READ as i64], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut known = std::collections::HashMap::new();
+        let mut ids = Vec::new();
+        for (other, credit) in credits {
+            let parts = self.credit_parts_with(&credit, &mut known)?;
+            if parts.iter().any(|p| p.id == Some(id)) {
+                ids.push(other);
+            }
+        }
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let marks = vec!["?"; ids.len()].join(",");
+        let sql = format!(
+            "SELECT {TRACK_COLUMNS} FROM tracks t {TRACK_JOINS}
+             WHERE t.artist_id IN ({marks}) ORDER BY t.play_count DESC, t.sort_key, t.id LIMIT {limit}"
+        );
+        let rows = self
+            .conn
+            .prepare(&sql)?
+            .query_map(rusqlite::params_from_iter(ids), track_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// The ids of an artist's songs from `offset` on, in the order their page shows them.
     pub fn artist_track_ids(&self, id: i64, offset: usize, limit: usize) -> Result<Vec<i64>> {
         let mut stmt = self.conn.prepare_cached(
@@ -1292,6 +1338,9 @@ impl<'t> Writer<'t> {
         Ok(())
     }
 }
+
+/// The most credits read for an artist's songs with others (an artist whose name is in many credits, like "X").
+pub const CREDITS_READ: usize = 500;
 
 /// How a name sorts: lower case, without a leading article, so "The Beatles" files under B.
 pub fn sort_key(name: &str) -> String {

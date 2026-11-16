@@ -1,8 +1,9 @@
 <!-- One song in a list: play (the row), like, and the "more" menu. Right-click, the menu key and a long press open the same menu. -->
 <script lang="ts">
 	import type { LibraryItem } from '../api';
-	import { albumHref, albumLink, artistHref, artistLink, sameCopy } from '../identity';
+	import { albumHref, albumLink, artistLink, sameCopy } from '../identity';
 	import Cover from './Cover.svelte';
+	import Credit from './Credit.svelte';
 	import Icon from './Icon.svelte';
 	import LikeButton from './LikeButton.svelte';
 	import { mmss } from './format';
@@ -99,7 +100,7 @@
 			<span class="tr-n">{#if current}<i class="eq" class:still={!playing} aria-hidden="true"><b></b><b></b><b></b></i>{:else}{num}{/if}</span>
 		{/if}
 		{#if cover}<Cover artwork={item.artwork} seed={item.title} min={80} class="cv trk-cv" />{/if}
-		<span class="tr-t"><b>{item.title}</b><i>{#if tag}<span class="fmt tr-tag">{tag}</span>{/if}{#if artistTo}<a class="nl" href={artistHref(artistTo)}>{item.artist}</a>{:else}{item.artist}{/if}</i></span>
+		<span class="tr-t"><b>{item.title}</b><i>{#if tag}<span class="fmt tr-tag">{tag}</span>{/if}<Credit credit={item.artist} to={artistTo} cls="nl" /></i></span>
 		{#if album}<span class="tr-al">{#if albumTo && item.album}<a class="nl" href={albumHref(albumTo)}>{item.album}</a>{:else}{item.album ?? ''}{/if}</span>{/if}
 		<span class="tr-d">{item.durationMs ? mmss(item.durationMs) : ''}</span>
 	</div>

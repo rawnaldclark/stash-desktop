@@ -833,6 +833,7 @@ const browse: BrowseAPI = {
 			id,
 			name: a.artist.name,
 			topTracks: a.rows.map(trackOfRow),
+			withOthers: (a.with ?? []).map(trackOfRow),
 			albums: a.albums.map((al) => ({ id: String(al.id), title: al.title, ...(al.year ? { year: al.year } : {}), ...(artOf(al.art) ? { artwork: artOf(al.art) } : {}), trackCount: al.tracks }))
 		};
 		const art = artOf(a.artist.art);

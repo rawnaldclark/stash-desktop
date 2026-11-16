@@ -1,8 +1,9 @@
 <!-- The big lyrics' left column: the cover, title, format and signal path, actions, progress and transport. The lyric column is the panel's. -->
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { albumHref, albumLink, artistHref, artistLink, LIB_REF } from '../identity';
+	import { albumHref, albumLink, artistLink, LIB_REF } from '../identity';
 	import Cover from './Cover.svelte';
+	import Credit from './Credit.svelte';
 	import Icon from './Icon.svelte';
 	import LikeButton from './LikeButton.svelte';
 	import ProgressBar from './ProgressBar.svelte';
@@ -43,7 +44,7 @@
 			<div class="fs-meta">
 				<h2 class="fs-title" dir="auto">{s.current.title}</h2>
 				<p class="fs-artist" dir="auto">
-					{#if artistTo}<a href={artistHref(artistTo)} title="Go to {s.current.artist}">{s.current.artist}</a>{:else}<a href="/search?q={encodeURIComponent(s.current.artist)}" title="Search for {s.current.artist}">{s.current.artist}</a>{/if}{#if albumTo && s.current.album}<span class="sep"> · </span><a href={albumHref(albumTo)} title="Go to {s.current.album}">{s.current.album}</a>{/if}
+					<Credit credit={s.current.artist} to={artistTo} search />{#if albumTo && s.current.album}<span class="sep"> · </span><a href={albumHref(albumTo)} title="Go to {s.current.album}">{s.current.album}</a>{/if}
 				</p>
 				{#if s.buffering}
 					<p class="fs-from" role="status">{asking ? `Asking ${asking} for the stream…` : 'Asking your add-ons for this song…'}</p>

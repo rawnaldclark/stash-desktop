@@ -4921,3 +4921,108 @@ fn songs_and_artists_chosen_not_to_be_played_are_left_out() {
     client.post("/api/player/stop", json!({}));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A song's credit as the artists it names, each linked to their own page when the library knows them by themselves;
+/// an artist's page lists their songs with others.
+#[test]
+fn a_credit_names_each_artist_and_an_artist_has_their_songs_with_others() {
+    let dir = std::env::temp_dir().join(format!("stash-api-credits-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let core = Core::bind(Options {
+        db: dir.join("library.db"),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: None,
+        mpv: None,
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    let likes: Vec<Value> = [
+        ("One", "Drake"),
+        ("Two", "Future"),
+        ("Three", "Drake & Future"),
+        ("Four", "Newcomer (feat. Drake)"),
+        ("Five", "Simon & Garfunkel"),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(n, (title, artist))| {
+        json!({ "item": { "title": title, "artist": artist }, "likedAt": 1_759_838_400_000i64 + n as i64 })
+    })
+    .collect();
+    let file = json!({ "kind": "stash-web-library", "v": 1, "likes": likes });
+    let (status, _) = client.upload("/api/import", file.to_string().as_bytes());
+    assert_eq!(status, 200);
+    let (_, artists) = client.get("/api/artists?offset=0&limit=50");
+    let id = |name: &str| -> i64 {
+        artists["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["name"] == name)
+            .unwrap_or_else(|| panic!("{name} in {artists}"))["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let (drake, future) = (id("Drake"), id("Future"));
+
+    let said = client.post(
+        "/api/credits",
+        json!({ "credits": ["Drake & Future", "Newcomer (feat. Drake)", "Simon & Garfunkel", "Drake", 7] }),
+    );
+    assert_eq!(
+        said["credits"]["Drake & Future"],
+        json!([
+            { "before": "", "name": "Drake", "id": drake },
+            { "before": " & ", "name": "Future", "id": future }
+        ])
+    );
+    assert_eq!(
+        said["credits"]["Newcomer (feat. Drake)"],
+        json!([
+            { "before": "", "name": "Newcomer" },
+            { "before": " (feat. ", "name": "Drake", "after": ")", "id": drake }
+        ])
+    );
+    // A duo's own name, and one artist: no parts. What is not a credit is passed over.
+    assert_eq!(said["credits"]["Simon & Garfunkel"], json!([]));
+    assert_eq!(said["credits"]["Drake"], json!([]));
+    assert_eq!(
+        said["credits"].as_object().map(|o| o.len()),
+        Some(4),
+        "{said}"
+    );
+
+    let (_, page) = client.get(&format!("/api/artists/{drake}"));
+    let titles = |rows: &Value| -> Vec<String> {
+        let mut out: Vec<String> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["title"].as_str().unwrap().to_string())
+            .collect();
+        out.sort();
+        out
+    };
+    assert_eq!(
+        (titles(&page["rows"]), titles(&page["with"])),
+        (
+            vec!["One".to_string()],
+            vec!["Four".to_string(), "Three".into()]
+        ),
+        "{page}"
+    );
+    let (_, duo) = client.get(&format!("/api/artists/{}", id("Simon & Garfunkel")));
+    assert_eq!(duo["with"], json!([]));
+    let _ = std::fs::remove_dir_all(&dir);
+}
