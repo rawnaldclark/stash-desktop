@@ -426,7 +426,7 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 
 ### Checked
 
-- **By the tests** (`shuffle.rs`, 300 shuffles each): a library-like mix (10 artists, 1 to 8 songs each, 35 songs) had two songs by one artist side by side **30 times** in 300 shuffles; a fair shuffle of the same songs had them **1,237 times**. Four artists with six songs each: 4 times in 300. One artist's three albums of four songs: two songs from one album side by side 10 times in 300. Every song comes exactly once and what comes before the shuffled part stays. With nine songs by the playing song's artist and one by another, the other comes first every time.
+- **By the tests** (`shuffle.rs`, 300 shuffles each): a library-like mix (10 artists, 1 to 8 songs each, 32 songs) had two songs by one artist side by side **30 times** in 300 shuffles; a fair shuffle of the same songs had them **1,237 times**. Four artists with six songs each: 4 times in 300. One artist's three albums of four songs: two songs from one album side by side 10 times in 300. Every song comes exactly once and what comes before the shuffled part stays. With nine songs by the playing song's artist and one by another, the other comes first every time.
 - **The player's own test** (`tests/player.rs`, the real player): the queue shuffled and unshuffled while it plays, as before.
 
 ### Not covered yet
