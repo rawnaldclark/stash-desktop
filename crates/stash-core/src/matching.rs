@@ -297,7 +297,7 @@ fn same_name(a: &str, b: &str) -> bool {
 }
 
 /// The artists a credit names: "A, B & C feat. D" is A, B, C and D.
-fn artists(credit: &str) -> Vec<String> {
+pub(crate) fn artists(credit: &str) -> Vec<String> {
     let lower = credit.to_lowercase();
     let mut names = vec![lower.as_str()];
     for separator in [

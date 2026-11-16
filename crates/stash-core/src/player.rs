@@ -356,23 +356,14 @@ impl Shared {
         }
     }
 
-    /// Puts `items[from..]` in a new order, by chance.
-    fn shuffle_from(items: &mut [QueueItem], from: usize) {
-        let mut seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0x9E37_79B9_7F4A_7C15)
-            | 1;
-        let mut next = move || {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            seed
-        };
-        for i in (from + 1..items.len()).rev() {
-            let j = from + (next() % (i - from + 1) as u64) as usize;
-            items.swap(i, j);
-        }
+    /// Puts `items[from..]` in a new order by chance, each artist's songs spread out (`shuffle.rs`).
+    fn shuffle_from(items: &mut Vec<QueueItem>, from: usize) {
+        crate::shuffle::spread_from(
+            items,
+            from,
+            |t| (t.artist.as_str(), t.album.as_deref()),
+            &mut crate::shuffle::Chance::from_clock(),
+        );
     }
 }
 

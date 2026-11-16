@@ -419,3 +419,16 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 ### Not covered yet
 
 - Searches are not counted (the matcher searches add-ons that cannot be asked for a song; whether a search spends an allowance is the add-on's to say). The last trouble and the last song given are kept in memory only.
+
+## 18. Shuffle that spreads artists
+
+- **Shuffle spreads each artist's songs across the queue** (`crates/stash-core/src/shuffle.rs`). A fair shuffle often puts two songs by one artist side by side, and that is heard as "not random". Each artist's songs are laid evenly across the queue from a start chosen by chance, each a tenth of a step off by chance, and the queue is read in that order (the dithering Spotify described in 2014). An artist's songs take turns between its albums the same way. The first song after the one playing is not by that song's artist when another artist can come first. A credit counts under the first artist it names, read the way the matcher reads credits ("Drake, Future" is Drake's). Turning shuffle off still puts the queue back as it was.
+
+### Checked
+
+- **By the tests** (`shuffle.rs`, 300 shuffles each): a library-like mix (10 artists, 1 to 8 songs each, 35 songs) had two songs by one artist side by side **30 times** in 300 shuffles; a fair shuffle of the same songs had them **1,237 times**. Four artists with six songs each: 4 times in 300. One artist's three albums of four songs: two songs from one album side by side 10 times in 300. Every song comes exactly once and what comes before the shuffled part stays. With nine songs by the playing song's artist and one by another, the other comes first every time.
+- **The player's own test** (`tests/player.rs`, the real player): the queue shuffled and unshuffled while it plays, as before.
+
+### Not covered yet
+
+- An artist with more than half the songs cannot be kept apart everywhere; their songs are spread as evenly as the rest allows.
