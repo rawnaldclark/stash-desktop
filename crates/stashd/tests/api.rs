@@ -2904,3 +2904,390 @@ fn a_web_page_cannot_use_the_core_and_the_window_can() {
     assert_eq!(status(&[]), 200);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// How the stand-in for ListenBrainz behaves.
+#[derive(Clone, Copy, PartialEq)]
+enum Mood {
+    Taking,
+    Away,
+    Refusing,
+}
+
+/// A stand-in for ListenBrainz: it checks a token, and what is sent, the way the service does; it keeps what it takes,
+/// and it can be away, or refuse every token.
+struct Brainz {
+    url: String,
+    mood: std::sync::Arc<std::sync::Mutex<Mood>>,
+    got: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+}
+
+impl Brainz {
+    fn start() -> Self {
+        use std::sync::{Arc, Mutex};
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://127.0.0.1:{}",
+            server.server_addr().to_ip().unwrap().port()
+        );
+        let mood = Arc::new(Mutex::new(Mood::Taking));
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let (moods, kept) = (Arc::clone(&mood), Arc::clone(&got));
+        std::thread::spawn(move || {
+            for mut request in server.incoming_requests() {
+                let token = request
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Authorization"))
+                    .map(|h| h.value.as_str().to_string())
+                    .unwrap_or_default();
+                let mut body = String::new();
+                let _ = request.as_reader().read_to_string(&mut body);
+                let refused = json!({ "code": 401, "error": "Invalid authorization token." });
+                let (status, answer) = match request.url() {
+                    "/1/validate-token" if token == "Token good" => (
+                        200,
+                        json!({ "code": 200, "message": "Token valid.", "valid": true, "user_name": "listener" }),
+                    ),
+                    "/1/validate-token" => (
+                        200,
+                        json!({ "code": 200, "message": "Token invalid.", "valid": false }),
+                    ),
+                    "/1/submit-listens" => match *moods.lock().unwrap() {
+                        _ if token != "Token good" => (401, refused),
+                        Mood::Refusing => (401, refused),
+                        Mood::Away => (503, Value::Null),
+                        Mood::Taking => match checked(&body) {
+                            Ok(taken) => {
+                                kept.lock().unwrap().push(taken);
+                                (200, json!({ "status": "ok" }))
+                            }
+                            Err(why) => (400, json!({ "code": 400, "error": why })),
+                        },
+                    },
+                    _ => (404, json!({ "code": 404, "error": "Not found" })),
+                };
+                let text = if answer.is_null() {
+                    String::new()
+                } else {
+                    answer.to_string()
+                };
+                let _ = request
+                    .respond(tiny_http::Response::from_string(text).with_status_code(status));
+            }
+        });
+        Brainz { url, mood, got }
+    }
+
+    fn be(&self, mood: Mood) {
+        *self.mood.lock().unwrap() = mood;
+    }
+
+    /// The listens taken of one kind ("single", "import", "playing_now"), in the order they came.
+    fn listens(&self, kind: &str) -> Vec<Value> {
+        self.got
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|sent| sent["listen_type"] == kind)
+            .flat_map(|sent| sent["payload"].as_array().cloned().unwrap_or_default())
+            .collect()
+    }
+
+    /// The titles of the plays taken ("single" and "import").
+    fn plays(&self) -> Vec<String> {
+        let mut plays = self.listens("single");
+        plays.extend(self.listens("import"));
+        plays
+            .iter()
+            .map(|l| {
+                l["track_metadata"]["track_name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect()
+    }
+}
+
+/// What ListenBrainz checks of what is sent to it.
+fn checked(body: &str) -> Result<Value, String> {
+    let sent: Value =
+        serde_json::from_str(body).map_err(|_| "Cannot parse JSON document".to_string())?;
+    let kind = sent["listen_type"]
+        .as_str()
+        .ok_or("JSON document must contain listen_type")?;
+    let payload = sent["payload"]
+        .as_array()
+        .ok_or("JSON document must contain payload")?;
+    match kind {
+        "single" | "playing_now" if payload.len() != 1 => {
+            return Err(format!(
+                "JSON document should contain exactly one listen for {kind}"
+            ));
+        }
+        "import" if payload.is_empty() => {
+            return Err("JSON document should not contain an empty payload".into());
+        }
+        "single" | "playing_now" | "import" => {}
+        _ => return Err("listen_type must be one of 'single', 'import' or 'playing_now'".into()),
+    }
+    for listen in payload {
+        for key in ["artist_name", "track_name"] {
+            if !listen["track_metadata"][key]
+                .as_str()
+                .is_some_and(|s| !s.is_empty())
+            {
+                return Err(format!(
+                    "JSON document does not contain required track_metadata.{key}"
+                ));
+            }
+        }
+        match (kind, listen.get("listened_at")) {
+            ("playing_now", Some(_)) => {
+                return Err(
+                    "JSON document must not contain listened_at while submitting playing_now"
+                        .into(),
+                );
+            }
+            ("single" | "import", None) => {
+                return Err("JSON document must contain listened_at".into());
+            }
+            ("single" | "import", Some(at)) if !at.as_i64().is_some_and(|t| t > 1_033_430_400) => {
+                return Err("Value for key listened_at is too low".into());
+            }
+            _ => {}
+        }
+    }
+    Ok(sent)
+}
+
+/// Waits up to 10 s for `done`.
+fn until(what: &str, done: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(Instant::now() < deadline, "waited 10 s for: {what}");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[test]
+fn plays_go_to_listenbrainz_and_wait_while_it_is_away() {
+    let Some(engine) = engine() else {
+        eprintln!("SKIPPED scrobbling: no libmpv found");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("stash-api-scrobble-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (music, catalogue) = (dir.join("Music"), dir.join("Catalogue"));
+    std::fs::create_dir_all(&music).unwrap();
+    std::fs::create_dir_all(&catalogue).unwrap();
+    silence(&music.join("untagged.wav"));
+    for name in ["alpha", "bravo", "charlie"] {
+        silence(&catalogue.join(format!("{name}.wav")));
+    }
+    let db = dir.join("library.db");
+    {
+        let mut library = Library::open(&db).unwrap();
+        assert_eq!(scan_folder(&mut library, &music, |_| {}).unwrap().added, 1);
+    }
+    let brainz = Brainz::start();
+    let core = Core::bind(Options {
+        db,
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: Some(Output::Silent),
+        mpv: Some(engine),
+        // The rule's floor of 30 s would leave nothing to count in 2 s of silence: here half the track decides.
+        play_counts_between_seconds: Some((0.2, 240.0)),
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    let demo = DemoAddon::bind(&catalogue, 0, Duration::from_millis(20)).unwrap();
+    let link = demo.link();
+    std::thread::spawn(move || demo.run());
+    client.post("/api/addons", json!({ "link": link }));
+    let target = || client.get("/api/scrobbling").1["targets"][0].clone();
+    let play = |id: &str, title: &str, artist: &str| {
+        client.post(
+            "/api/player/play",
+            json!({ "addon": "demo.folder", "tracks": [{ "id": id, "title": title, "artist": artist, "album": "Night Drive" }] }),
+        );
+    };
+
+    // No service yet. A token the service does not take, no token, and an address that is not one are refused in words.
+    assert_eq!(client.get("/api/scrobbling").1, json!({ "targets": [] }));
+    let refused = |body: Value| {
+        let (status, answer) = client.send("/api/scrobbling", body);
+        (
+            status,
+            answer["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        )
+    };
+    assert_eq!(
+        refused(json!({ "token": "wrong", "url": brainz.url })),
+        (400, "That server did not take that token".to_string())
+    );
+    assert_eq!(
+        refused(json!({ "token": " ", "url": brainz.url })),
+        (400, "A token is needed".to_string())
+    );
+    assert_eq!(
+        refused(json!({ "token": "good", "url": "ftp://example.org" })).0,
+        400
+    );
+    assert_eq!(
+        refused(json!({ "token": "good", "url": format!("{}/elsewhere", brainz.url) })),
+        (
+            400,
+            "Nothing at that address answers as ListenBrainz does".to_string()
+        )
+    );
+
+    // The right token, at the address of one of the service's own paths: the service is kept at its root, under the
+    // name it knows the listener by, and the token is never given back.
+    let added = client.post(
+        "/api/scrobbling",
+        json!({ "token": "good", "url": format!("{}/1/submit-listens", brainz.url) }),
+    );
+    let id = added["id"].as_i64().unwrap();
+    assert!(
+        !added.to_string().contains("good"),
+        "the token is not given back: {added}"
+    );
+    let kept = &added["targets"][0];
+    assert_eq!(
+        (
+            kept["url"].as_str(),
+            kept["user"].as_str(),
+            kept["enabled"].as_bool(),
+            kept["waiting"].as_i64()
+        ),
+        (
+            Some(brainz.url.as_str()),
+            Some("listener"),
+            Some(true),
+            Some(0)
+        )
+    );
+
+    // A file without tags plays and counts, and is not sent: "Unknown artist" names no one.
+    client.post("/api/player/play", json!({ "offset": 0 }));
+    until("the untagged file's play to count", || {
+        client.get("/api/history?offset=0&limit=5").1["rows"]
+            .as_array()
+            .is_some_and(|r| r.len() == 1)
+    });
+
+    // A song from an add-on: shown as playing now, then sent once its play counts.
+    let before = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 1) as i64;
+    play("1", "Paper Boats", "The Lanterns");
+    until("the play to be taken", || brainz.plays() == ["Paper Boats"]);
+    let now = brainz.listens("playing_now");
+    assert_eq!(now[0]["track_metadata"]["track_name"], "Paper Boats");
+    assert!(
+        now.iter()
+            .all(|l| l["track_metadata"]["track_name"] != "untagged")
+    );
+    let single = &brainz.listens("single")[0];
+    let at = single["listened_at"].as_i64().unwrap();
+    assert!(
+        at >= before && at <= before + 10,
+        "listened_at {at} is when it began"
+    );
+    let song = &single["track_metadata"];
+    assert_eq!(
+        (
+            song["artist_name"].as_str(),
+            song["release_name"].as_str(),
+            song["additional_info"]["media_player"].as_str()
+        ),
+        (Some("The Lanterns"), Some("Night Drive"), Some("Stash"))
+    );
+    until("the service to show it sent", || target()["sent"] == 1);
+    assert_eq!(
+        (target()["waiting"].as_i64(), target()["trouble"].is_null()),
+        (Some(0), true)
+    );
+
+    // The service is away: the play waits, with why in words, and goes when the service is asked again.
+    brainz.be(Mood::Away);
+    play("2", "Afterglow", "Mira Sol");
+    until("the play to wait", || {
+        target()["waiting"] == 1 && target()["trouble"]["message"] == "it answered 503"
+    });
+    brainz.be(Mood::Taking);
+    client.post(&format!("/api/scrobbling/{id}/again"), json!({}));
+    until("the waiting play to be taken", || target()["sent"] == 2);
+    assert_eq!(brainz.plays(), ["Paper Boats", "Afterglow"]);
+    assert_eq!(
+        (target()["waiting"].as_i64(), target()["trouble"].is_null()),
+        (Some(0), true)
+    );
+
+    // The token is refused: plays wait and nothing is sent, until the token is given again.
+    brainz.be(Mood::Refusing);
+    play("3", "Cinder Hands", "Oda Lune");
+    until("the token to be refused", || {
+        target()["refused"] == true && target()["waiting"] == 1
+    });
+    assert_eq!(target()["trouble"]["message"], "it refused the token");
+    brainz.be(Mood::Taking);
+    client.post(
+        "/api/scrobbling",
+        json!({ "token": "good", "url": brainz.url }),
+    );
+    until("the play to go once the token is given again", || {
+        target()["sent"] == 3
+    });
+    assert_eq!(brainz.plays(), ["Paper Boats", "Afterglow", "Cinder Hands"]);
+    assert_eq!(target()["refused"], false);
+
+    // Off: plays are not kept for it.
+    let off = client.post(
+        &format!("/api/scrobbling/{id}/enabled"),
+        json!({ "enabled": false }),
+    );
+    assert_eq!(off["targets"][0]["enabled"], false);
+    play("1", "Paper Boats", "The Lanterns");
+    // Past the point its play counts (1 s of 2 s), then to its end: the play counted, and was not kept for the service.
+    client.player_until("the song past the point its play counts", |s| {
+        s["track"]["title"] == "Paper Boats"
+            && s["status"] == "playing"
+            && s["position_ms"].as_u64().is_some_and(|p| p >= 1100)
+    });
+    let ended = client.player_until("the song to end", |s| s["resting"] == true);
+    assert!(ended["error"].is_null(), "it played through: {ended}");
+    assert_eq!(
+        (target()["waiting"].as_i64(), target()["sent"].as_i64()),
+        (Some(0), Some(3))
+    );
+    assert_eq!(brainz.plays().len(), 3);
+
+    // Removed; a service that is not there is said to be so.
+    assert_eq!(
+        client.post(&format!("/api/scrobbling/{id}/remove"), json!({})),
+        json!({ "targets": [] })
+    );
+    assert_eq!(
+        client
+            .send(&format!("/api/scrobbling/{id}/again"), json!({}))
+            .0,
+        404
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

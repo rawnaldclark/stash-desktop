@@ -5,5 +5,6 @@ pub mod demo_addon;
 mod kept;
 mod relay;
 mod saving;
+mod scrobbling;
 pub mod serve;
 mod unfound;

@@ -656,6 +656,8 @@ pub(crate) struct State {
     pub(crate) saving: crate::saving::Saving,
     /// Add-on streams the engine reads through the core, and the copies kept of them.
     pub(crate) relays: Arc<crate::relay::Relays>,
+    /// Plays on their way to the listener's scrobbling services.
+    pub(crate) scrobbling: Arc<crate::scrobbling::Scrobbling>,
     /// The windows' owner, when the core runs inside one.
     window: Option<WindowShell>,
 }
@@ -751,6 +753,7 @@ impl Core {
         ));
         let library = Arc::new(Mutex::new(library));
         let lacks = Arc::new(Lacks::default());
+        let scrobbling = Arc::new(crate::scrobbling::Scrobbling::default());
         let player = match &options.audio {
             None => Err("this core runs without a player".to_string()),
             Some(output) => match options.mpv.clone().or_else(find_library) {
@@ -764,7 +767,22 @@ impl Core {
                             Arc::clone(&relays),
                             port,
                         )),
-                        on_play: Some(keep_plays(Arc::clone(&library))),
+                        // A play that counts is kept, and waits for the listener's scrobbling services.
+                        on_play: Some({
+                            let keep = keep_plays(Arc::clone(&library));
+                            let send = crate::scrobbling::on_play(
+                                Arc::clone(&library),
+                                Arc::clone(&scrobbling),
+                            );
+                            Arc::new(move |item: &QueueItem, started_at_ms: i64| {
+                                keep(item, started_at_ms);
+                                send(item, started_at_ms);
+                            })
+                        }),
+                        on_start: Some(crate::scrobbling::on_start(
+                            Arc::clone(&library),
+                            Arc::clone(&scrobbling),
+                        )),
                         // A copy the engine cannot play is let go; the song comes from an add-on again.
                         on_failed: Some({
                             let (relays, library) = (Arc::clone(&relays), Arc::clone(&library));
@@ -817,6 +835,7 @@ impl Core {
                 lacks,
                 saving: crate::saving::Saving::default(),
                 relays,
+                scrobbling,
                 window: None,
             },
         })
@@ -866,6 +885,11 @@ impl Core {
             {
                 let (state, stop) = (&state, &stop);
                 scope.spawn(move || crate::saving::run(state, stop));
+            }
+            // Plays on their way to the listener's scrobbling services.
+            {
+                let (state, stop) = (&state, &stop);
+                scope.spawn(move || crate::scrobbling::run(state, stop));
             }
             for _ in 0..WORKERS {
                 scope.spawn(|| {
@@ -1884,6 +1908,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::relay::route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::scrobbling::route(state, request, &path)? {
         return Ok((response, false));
     }
     // One album or one artist: /api/albums/{id}, /api/artists/{id}; the picture of a file: /api/art/track/{id}

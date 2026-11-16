@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 13;
+pub const SCHEMA_VERSION: i64 = 14;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
@@ -279,6 +279,34 @@ const V13: &str = "
     ALTER TABLE playlists ADD COLUMN rules TEXT;
 ";
 
+/// Version 14: the services the listener's plays go to (ListenBrainz, or a server that speaks its language), and the
+/// plays waiting for each (`scrobble.rs`). A service's token is kept here, as an add-on's link is.
+const V14: &str = "
+    CREATE TABLE scrobble_targets(
+        id            INTEGER PRIMARY KEY,
+        kind          TEXT NOT NULL,
+        url           TEXT NOT NULL,
+        token         TEXT NOT NULL,
+        user          TEXT,
+        enabled       INTEGER NOT NULL DEFAULT 1,
+        refused       INTEGER NOT NULL DEFAULT 0,
+        added_at_ms   INTEGER NOT NULL,
+        sent          INTEGER NOT NULL DEFAULT 0,
+        sent_at_ms    INTEGER,
+        dropped       INTEGER NOT NULL DEFAULT 0,
+        trouble       TEXT,
+        trouble_at_ms INTEGER,
+        UNIQUE(kind, url)
+    );
+    CREATE TABLE scrobbles(
+        id          INTEGER PRIMARY KEY,
+        target      INTEGER NOT NULL REFERENCES scrobble_targets(id) ON DELETE CASCADE,
+        listened_at INTEGER NOT NULL,
+        song        TEXT NOT NULL,
+        UNIQUE(target, listened_at, song)
+    );
+";
+
 /// Opens (or creates) the library at `path` and migrates it to [`SCHEMA_VERSION`].
 pub fn open(path: &std::path::Path) -> Result<Connection> {
     prepare(Connection::open(path)?)
@@ -407,6 +435,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V13)?;
         tx.pragma_update(None, "user_version", 13)?;
+        tx.commit()?;
+    }
+    if found < 14 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V14)?;
+        tx.pragma_update(None, "user_version", 14)?;
         tx.commit()?;
     }
     Ok(())

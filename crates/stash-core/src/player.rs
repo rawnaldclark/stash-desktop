@@ -105,6 +105,8 @@ pub struct Settings {
     pub ask_ahead_seconds: f64,
     /// Told when a play counts.
     pub on_play: Option<OnPlay>,
+    /// Told when a track begins to be heard (the engine really plays it), with when it began: once for each play.
+    pub on_start: Option<OnPlay>,
     /// Told when the engine could not play a track.
     pub on_failed: Option<OnFailed>,
     /// A play counts once half the track was really played, but never before the first of these seconds and always
@@ -118,6 +120,7 @@ impl Default for Settings {
             resolver: None,
             ask_ahead_seconds: 30.0,
             on_play: None,
+            on_start: None,
             on_failed: None,
             counts_between_seconds: (30.0, 240.0),
         }
@@ -232,6 +235,8 @@ struct Heard {
     started_at_ms: i64,
     /// Seconds really played: not paused, not waiting for data.
     listened: f64,
+    /// It was heard (and told of as begun).
+    told: bool,
     counted: bool,
 }
 
@@ -394,20 +399,21 @@ struct Ctx {
     resolver: Option<Resolver>,
     ask_ahead_seconds: f64,
     on_play: Option<OnPlay>,
+    on_start: Option<OnPlay>,
     on_failed: Option<OnFailed>,
     counts_between_seconds: (f64, f64),
 }
 
 impl Ctx {
     /// Called a few times a second: adds the time since `last` to the listening of the current track when the engine
-    /// really played through it, and tells of the play once it counts.
+    /// really played through it, tells of the track once it is heard, and of the play once it counts.
     fn listen(&self, last: &mut Instant) {
         let now = Instant::now();
         let passed = now.duration_since(*last).as_secs_f64().min(1.0);
         *last = now;
-        let Some(on_play) = &self.on_play else {
+        if self.on_play.is_none() && self.on_start.is_none() {
             return;
-        };
+        }
         {
             let mut shared = self.shared.lock().unwrap();
             let Some(pos) = shared.pos.filter(|p| *p < shared.slots.len()) else {
@@ -429,6 +435,7 @@ impl Ctx {
                     generation,
                     started_at_ms,
                     listened: 0.0,
+                    told: false,
                     counted: false,
                 });
                 return;
@@ -446,25 +453,38 @@ impl Ctx {
             Some(length) if length > 0.0 => (length / 2.0).clamp(least, most),
             _ => most,
         };
-        let counted = {
+        let (began, counted, started_at_ms) = {
             let mut shared = self.shared.lock().unwrap();
             let Some(heard) = shared.heard.as_mut() else {
                 return;
             };
             heard.listened += passed;
-            if heard.listened < needed {
+            let began = !heard.told;
+            heard.told = true;
+            let counts = heard.listened >= needed;
+            heard.counted = counts;
+            if !began && !counts {
                 return;
             }
-            heard.counted = true;
             let (pos, started_at_ms) = (heard.pos, heard.started_at_ms);
-            shared
+            let Some(item) = shared
                 .slots
                 .get(pos)
                 .and_then(|slot| shared.queue.get(slot.queue))
                 .cloned()
-                .map(|item| (item, started_at_ms))
+            else {
+                return;
+            };
+            (
+                began.then(|| item.clone()),
+                counts.then_some(item),
+                started_at_ms,
+            )
         };
-        if let Some((item, started_at_ms)) = counted {
+        if let (Some(on_start), Some(item)) = (&self.on_start, began) {
+            on_start(&item, started_at_ms);
+        }
+        if let (Some(on_play), Some(item)) = (&self.on_play, counted) {
             on_play(&item, started_at_ms);
         }
     }
@@ -766,6 +786,7 @@ impl Player {
             resolver: settings.resolver,
             ask_ahead_seconds: settings.ask_ahead_seconds,
             on_play: settings.on_play,
+            on_start: settings.on_start,
             on_failed: settings.on_failed,
             counts_between_seconds: settings.counts_between_seconds,
         };
