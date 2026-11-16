@@ -811,7 +811,13 @@ const sources: SourcesAPI = {
 	add: async (link) => addonStore.set(await core.addAddon(link)),
 	remove: async (id) => addonStore.set(await core.removeAddon(id)),
 	setEnabled: async (id, on) => addonStore.set(await core.setAddonEnabled(id, on)),
-	order: async (ids) => addonStore.set(await core.orderAddons(ids))
+	order: async (ids) => addonStore.set(await core.orderAddons(ids)),
+	check: async (id) => {
+		const checked = await core.checkAddon(id);
+		addonStore.set(checked.addons);
+		return { changes: checked.changes, version: checked.version };
+	},
+	update: async (id) => addonStore.set(await core.updateAddon(id))
 };
 
 // ------------------------------------------------------------------------------------------------ search

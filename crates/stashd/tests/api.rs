@@ -5354,3 +5354,118 @@ fn an_add_on_out_of_reach_while_another_says_no_is_not_the_connection_down() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn an_add_on_s_new_version_is_shown_and_taken_only_when_the_listener_says_so() {
+    let dir = std::env::temp_dir().join(format!(
+        "stash-api-addon-version-test-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let served = dir.join("Served");
+    std::fs::create_dir_all(&served).unwrap();
+    let demo = DemoAddon::bind(&served, 0, Duration::ZERO).unwrap();
+    let link = demo.link();
+    std::thread::spawn(move || demo.run());
+    // As it was when it was added: an older version that could only search, then on the internet.
+    let db = dir.join("library.db");
+    Library::open(&db)
+        .unwrap()
+        .save_addon(
+            "demo.folder",
+            &link,
+            r#"{"stash":1,"id":"demo.folder","name":"Demo folder","version":"0.0.0-before","kind":"server","description":"A folder of your own files, served as an add-on on this computer.","resources":["search"],"reach":"internet"}"#,
+        )
+        .unwrap();
+    let core = Core::bind(Options {
+        db,
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: None,
+        mpv: None,
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+
+    // Noted on the internet, it cannot be reached on this computer.
+    let (_, found) = client.get("/api/addons/search?q=a");
+    assert_eq!(
+        found["groups"][0]["error"]["code"].as_str(),
+        Some("refused"),
+        "{found}"
+    );
+
+    // Nothing offered yet: nothing to take.
+    let (status, _) = client.send("/api/addons/update", json!({ "id": "demo.folder" }));
+    assert_eq!(status, 409);
+
+    // Checked: what changed is said, what gives it more is marked, and nothing is taken yet.
+    let checked = client.post("/api/addons/check", json!({ "id": "demo.folder" }));
+    let said: Vec<(String, bool)> = checked["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["words"].as_str().unwrap().to_string(),
+                c["more"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    let version = env!("CARGO_PKG_VERSION");
+    assert_eq!(
+        said,
+        [
+            (format!("Version {version} (was 0.0.0-before)."), false),
+            (
+                "It can now be asked for finding your library's songs, playing songs, lyrics and saving songs."
+                    .to_string(),
+                true
+            ),
+            (
+                "It is on this computer now (was on the internet): it may send Stash to other programs on this computer."
+                    .to_string(),
+                true
+            ),
+        ],
+        "{checked}"
+    );
+    assert_eq!(checked["version"].as_str(), Some(version));
+    assert_eq!(
+        checked["addons"][0]["version"].as_str(),
+        Some("0.0.0-before")
+    );
+    assert_eq!(checked["addons"][0]["reach"].as_str(), Some("internet"));
+
+    // Taken: as it was shown.
+    let updated = client.post("/api/addons/update", json!({ "id": "demo.folder" }));
+    let listed = &updated["addons"][0];
+    assert_eq!(
+        (listed["version"].as_str(), listed["reach"].as_str()),
+        (Some(version), Some("here")),
+        "{updated}"
+    );
+    assert_eq!(listed["resources"].as_array().unwrap().len(), 5);
+    let (_, found) = client.get("/api/addons/search?q=a");
+    assert!(found["groups"][0]["error"].is_null(), "{found}");
+
+    // Taken once; checked again, it is as it is.
+    let (status, _) = client.send("/api/addons/update", json!({ "id": "demo.folder" }));
+    assert_eq!(status, 409);
+    let again = client.post("/api/addons/check", json!({ "id": "demo.folder" }));
+    assert_eq!(again["changes"], json!([]), "{again}");
+
+    // One that is not there.
+    let (status, _) = client.send("/api/addons/check", json!({ "id": "nobody" }));
+    assert_eq!(status, 404);
+    let _ = std::fs::remove_dir_all(&dir);
+}

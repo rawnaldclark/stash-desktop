@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
-use stash_core::addons::{Addon, AddonError, Code, Delivery, StreamRequest, Track};
+use stash_core::addons::{Addon, AddonError, Change, Code, Delivery, StreamRequest, Track};
 use stash_core::audio::{Output, find_library};
 use stash_core::blocks::BlockKind;
 use stash_core::import::ImportError;
@@ -209,6 +209,19 @@ impl Loaded {
             "problem": self.addon.as_ref().err(),
         })
     }
+}
+
+/// An add-on's link that could not be read as an add-on: why, as the window shows it.
+fn unread(e: &AddonError) -> Reply {
+    let status = match e.code {
+        Code::BadRequest | Code::InvalidResponse | Code::Refused => 400,
+        _ => 502,
+    };
+    let mut error = addon_error(e);
+    if e.code == Code::NotFound {
+        error["message"] = json!("there is no add-on at that address");
+    }
+    reply_json(status, json!({ "error": error }))
 }
 
 /// The listener's add-ons, in the listener's order.
@@ -864,7 +877,21 @@ pub(crate) struct State {
     pub(crate) radio: crate::radio::Radio,
     /// Opens a link in the browser, when the core runs inside a window.
     pub(crate) opener: Option<OpenShell>,
+    /// New versions of add-ons, offered to the listener and not yet taken (see `/api/addons/check`).
+    offered: Mutex<HashMap<String, Offered>>,
 }
+
+/// An add-on as its link gave it when it was checked, waiting for the listener to say yes. What is taken is what they
+/// were shown: the link is not asked again.
+struct Offered {
+    /// The link it came from: an add-on added again since, from another link, is not replaced by it.
+    link: String,
+    addon: Addon,
+    at: Instant,
+}
+
+/// How long a new version that was offered may be taken.
+const OFFER_FOR: Duration = Duration::from_secs(15 * 60);
 
 impl State {
     /// Notes that the likes or the playlists changed. A list kept on this computer may have new songs to save.
@@ -922,6 +949,10 @@ impl State {
     }
 
     fn addons_reply(&self) -> Reply {
+        reply_json(200, self.addons_value())
+    }
+
+    fn addons_value(&self) -> Value {
         let listed: Vec<Value> = self
             .addons
             .read()
@@ -929,7 +960,7 @@ impl State {
             .iter()
             .map(|a| a.listed())
             .collect();
-        reply_json(200, json!({ "addons": listed }))
+        json!({ "addons": listed })
     }
 }
 
@@ -1073,6 +1104,7 @@ impl Core {
                 shortcuts: crate::shortcuts::Shortcuts::default(),
                 edits: AtomicU64::new(0),
                 radio: crate::radio::Radio::new(None),
+                offered: Mutex::new(HashMap::new()),
                 opener: None,
             },
         })
@@ -2037,18 +2069,9 @@ fn addons_route(
             // The add-on is asked for its manifest here, with nothing else waiting on it.
             let addon = match Addon::from_link(link) {
                 Ok(addon) => addon,
-                Err(e) => {
-                    let status = match e.code {
-                        Code::BadRequest | Code::InvalidResponse | Code::Refused => 400,
-                        _ => 502,
-                    };
-                    let mut error = addon_error(&e);
-                    if e.code == Code::NotFound {
-                        error["message"] = json!("there is no add-on at that address");
-                    }
-                    return Ok(Some(reply_json(status, json!({ "error": error }))));
-                }
+                Err(e) => return Ok(Some(unread(&e))),
             };
+            state.offered.lock().unwrap().remove(&addon.manifest.id);
             state.library.lock().unwrap().save_addon(
                 &addon.manifest.id,
                 addon.link(),
@@ -2060,6 +2083,93 @@ fn addons_route(
         }
         "/api/addons/remove" => {
             state.library.lock().unwrap().remove_addon(id)?;
+            state.offered.lock().unwrap().remove(id);
+        }
+        // Asks the add-on's link for the add-on as it is now, and says what changed. Nothing the listener would care
+        // about changes until they say so (`/api/addons/update`); anything else is taken in at once.
+        "/api/addons/check" => {
+            if offline(state) {
+                return Ok(Some(refuse(
+                    409,
+                    "Stash is offline: a new version is asked of the add-on's link",
+                )));
+            }
+            let loaded = state
+                .addons
+                .read()
+                .unwrap()
+                .iter()
+                .find(|a| a.stored.id == id)
+                .cloned();
+            let Some(loaded) = loaded else {
+                return Ok(Some(refuse(404, "there is no such add-on")));
+            };
+            let offered = match Addon::from_link(&loaded.stored.link) {
+                Ok(addon) => addon,
+                Err(e) => return Ok(Some(unread(&e))),
+            };
+            let changes = match &loaded.addon {
+                Ok(kept) => offered.changes_from(kept),
+                Err(problem) => Ok(vec![Change {
+                    words: format!(
+                        "What was kept of it could not be used ({problem}): all of it is read again from its link."
+                    ),
+                    more: true,
+                }]),
+            };
+            let changes = match changes {
+                Ok(changes) => changes,
+                Err(e) => return Ok(Some(unread(&e))),
+            };
+            let version = capped(&offered.manifest.version);
+            if changes.is_empty() {
+                state.offered.lock().unwrap().remove(id);
+                state.library.lock().unwrap().save_addon(
+                    id,
+                    offered.link(),
+                    &offered.manifest_json(),
+                )?;
+                state.reload_addons()?;
+            } else {
+                state.offered.lock().unwrap().insert(
+                    id.to_string(),
+                    Offered {
+                        link: loaded.stored.link.clone(),
+                        addon: offered,
+                        at: Instant::now(),
+                    },
+                );
+            }
+            let mut reply = state.addons_value();
+            reply["changes"] = json!(changes);
+            reply["version"] = json!(version);
+            return Ok(Some(reply_json(200, reply)));
+        }
+        // Takes the new version the listener was shown, as it was shown.
+        "/api/addons/update" => {
+            let offered = state.offered.lock().unwrap().remove(id);
+            let link = state
+                .addons
+                .read()
+                .unwrap()
+                .iter()
+                .find(|a| a.stored.id == id)
+                .map(|a| a.stored.link.clone());
+            let Some(offered) = offered
+                .filter(|o| o.at.elapsed() < OFFER_FOR && link.as_deref() == Some(o.link.as_str()))
+            else {
+                return Ok(Some(refuse(
+                    409,
+                    "there is no new version of it at hand: check for one again",
+                )));
+            };
+            state.library.lock().unwrap().save_addon(
+                id,
+                offered.addon.link(),
+                &offered.addon.manifest_json(),
+            )?;
+            state.lacks.forget_addon(id);
+            wake = true;
         }
         "/api/addons/enabled" => {
             let enabled = body.get("enabled").and_then(Value::as_bool).unwrap_or(true);

@@ -7,7 +7,7 @@ import type { Readable } from 'svelte/store';
 import type { SearchResult } from './sources/search';
 import type { Album, Artist, Artwork, Descriptor, Lyrics, LyricLine, LyricWord, Track } from './sources/contract';
 import type { LibraryItem } from './identity';
-import { NO_EQ, type AddonInfo, type CoreEq, type Counts, type EqPatch, type Replaygain, type Signal, type SmartRules, type Station, type Tier } from './core';
+import { NO_EQ, type AddonChange, type AddonInfo, type CoreEq, type Counts, type EqPatch, type Replaygain, type Signal, type SmartRules, type Station, type Tier } from './core';
 
 export type { Readable, SearchResult, Counts, Album, Artist, Artwork, Descriptor, Lyrics, LyricLine, LyricWord, Track, LibraryItem, Signal, Station, Tier, CoreEq, EqPatch };
 
@@ -219,6 +219,10 @@ export interface SourcesAPI {
 	setEnabled(id: string, on: boolean): Promise<void>;
 	/** The add-ons' ids in the order they are asked. */
 	order(ids: string[]): Promise<void>;
+	/** Asks the add-on's link for a new version: what changed (none: it is up to date) and the version it gives. */
+	check(id: string): Promise<{ changes: AddonChange[]; version: string }>;
+	/** Takes the new version `check` offered. */
+	update(id: string): Promise<void>;
 }
 
 export interface AppAPI {

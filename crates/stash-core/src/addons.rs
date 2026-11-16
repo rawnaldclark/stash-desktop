@@ -426,6 +426,113 @@ impl Addon {
     }
 
     /// The manifest as JSON, for keeping.
+    /// What changed from `kept` (the add-on as it was added) to this, the add-on as its link gives it now, in the
+    /// listener's words: nothing when nothing they would care about changed. Refused when the link now holds another
+    /// add-on (another id): that one is added as a new one, never in this one's place.
+    pub fn changes_from(&self, kept: &Addon) -> Result<Vec<Change>> {
+        let (was, now) = (&kept.manifest, &self.manifest);
+        if was.id != now.id {
+            return Err(AddonError::host(
+                Code::Refused,
+                format!(
+                    "its link now holds another add-on ({}): add that one as a new add-on",
+                    short(&now.id)
+                ),
+            ));
+        }
+        let mut changes = Vec::new();
+        let mut said = |words: String, more: bool| changes.push(Change { words, more });
+        if was.name != now.name {
+            said(
+                format!(
+                    "It is called {} now (was {}).",
+                    short(&now.name),
+                    short(&was.name)
+                ),
+                false,
+            );
+        }
+        if was.version != now.version {
+            said(
+                format!(
+                    "Version {} (was {}).",
+                    short(&now.version),
+                    short(&was.version)
+                ),
+                false,
+            );
+        }
+        if was.description != now.description {
+            said("Its description changed.".into(), false);
+        }
+        let (before, after) = (kept.abilities(), self.abilities());
+        let gained: Vec<&str> = after
+            .iter()
+            .filter(|a| !before.contains(a))
+            .map(String::as_str)
+            .collect();
+        let lost: Vec<&str> = before
+            .iter()
+            .filter(|a| !after.contains(a))
+            .map(String::as_str)
+            .collect();
+        if !gained.is_empty() {
+            said(
+                format!("It can now be asked for {}.", listed(&gained)),
+                true,
+            );
+        }
+        if !lost.is_empty() {
+            said(
+                format!("It can no longer be asked for {}.", listed(&lost)),
+                false,
+            );
+        }
+        if self.reach != kept.reach {
+            let nearer = self.reach > kept.reach;
+            let may = match self.reach {
+                Reach::Here => ": it may send Stash to other programs on this computer",
+                Reach::Home => ": it may send Stash to other devices on your network",
+                Reach::Internet => "",
+            };
+            said(
+                format!(
+                    "It is {} now (was {}){}.",
+                    self.reach.words(),
+                    kept.reach.words(),
+                    if nearer { may } else { "" }
+                ),
+                nearer,
+            );
+        }
+        if was.dialect != now.dialect {
+            said(
+                match now.dialect {
+                    Dialect::Eclipse => "It speaks Eclipse's add-on protocol now.",
+                    _ => "It speaks Stash's own add-on contract now.",
+                }
+                .into(),
+                false,
+            );
+        }
+        Ok(changes)
+    }
+
+    /// What it may be asked for, in the listener's words.
+    fn abilities(&self) -> Vec<String> {
+        let mut abilities: Vec<String> = self
+            .manifest
+            .resources
+            .iter()
+            .filter(|r| r.as_str() != "download")
+            .map(|r| ability(r))
+            .collect();
+        if self.offers_download() {
+            abilities.push(ability("download"));
+        }
+        abilities
+    }
+
     pub fn manifest_json(&self) -> String {
         serde_json::to_string(&self.manifest).unwrap_or_else(|_| "{}".into())
     }
@@ -777,6 +884,46 @@ fn base_of(link: &str) -> Result<(Url, String)> {
             "an add-on link ends in /manifest.json",
         )),
     }
+}
+
+/// One way an add-on as its link gives it now differs from the add-on as it was added (see [`Addon::changes_from`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Change {
+    /// The change, in a sentence.
+    pub words: String,
+    /// It gives the add-on more than the listener agreed to when they added it: something new it may be asked for,
+    /// or a place nearer than before that it may send Stash.
+    pub more: bool,
+}
+
+/// A resource an add-on lists, in the listener's words.
+fn ability(resource: &str) -> String {
+    match resource {
+        "search" => "search".into(),
+        "stream" => "playing songs".into(),
+        "resolve" => "finding your library's songs".into(),
+        "download" => "saving songs".into(),
+        "lyrics" => "lyrics".into(),
+        other => format!("\u{201c}{}\u{201d}", short(other)),
+    }
+}
+
+/// "a", "a and b", "a, b and c".
+fn listed(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// What an add-on says, cut short for a sentence of the host's.
+fn short(text: &str) -> String {
+    let text = text.trim();
+    if text.chars().count() <= 40 {
+        return text.to_string();
+    }
+    text.chars().take(40).collect::<String>() + "\u{2026}"
 }
 
 /// The agent for an add-on of `reach`: every connection it makes is held to that (see [`crate::reach::Guarded`]).
@@ -1314,5 +1461,78 @@ mod tests {
         let named =
             Addon::from_stored("https://addon.example.org/manifest.json", &kept(None)).unwrap();
         assert_eq!(named.reach(), Reach::Internet);
+    }
+
+    #[test]
+    fn what_changed_in_an_add_on_is_said_and_what_gives_it_more_is_marked() {
+        let made = |reach: &str, resources: &str, extra: &str| {
+            Addon::from_stored(
+                "https://addon.example.org/manifest.json",
+                &format!(
+                    r#"{{"stash":1,"id":"example-lossless","name":"Example","version":"1.0.0","kind":"server","resources":{resources},"reach":"{reach}"{extra}}}"#
+                ),
+            )
+            .unwrap()
+        };
+        let kept = made("internet", r#"["search","stream"]"#, "");
+        assert_eq!(
+            made("internet", r#"["search","stream"]"#, "")
+                .changes_from(&kept)
+                .unwrap(),
+            []
+        );
+
+        let changed = made(
+            "home",
+            r#"["search","stream","download","lyrics","x-new"]"#,
+            r#","description":"Now with lyrics""#,
+        );
+        let said: Vec<(String, bool)> = changed
+            .changes_from(&kept)
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.words, c.more))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                ("Its description changed.".to_string(), false),
+                (
+                    "It can now be asked for lyrics, \u{201c}x-new\u{201d} and saving songs.".to_string(),
+                    true
+                ),
+                (
+                    "It is on your network now (was on the internet): it may send Stash to other devices on your network."
+                        .to_string(),
+                    true
+                ),
+            ]
+        );
+        // Back again: less is never marked.
+        let back: Vec<bool> = kept
+            .changes_from(&changed)
+            .unwrap()
+            .iter()
+            .map(|c| c.more)
+            .collect();
+        assert_eq!(back, [false, false, false]);
+        assert_eq!(
+            kept.changes_from(&changed).unwrap()[1].words,
+            "It can no longer be asked for lyrics, \u{201c}x-new\u{201d} and saving songs."
+        );
+
+        // Another add-on at the same link is not taken in this one's place.
+        let other = Addon::from_stored(
+            "https://addon.example.org/manifest.json",
+            r#"{"stash":1,"id":"someone-else","name":"Example","version":"1.0.0","kind":"server","resources":["search"]}"#,
+        )
+        .unwrap();
+        let refused = other.changes_from(&kept).unwrap_err();
+        assert_eq!(refused.code, Code::Refused);
+        assert!(
+            refused.in_words().contains("someone-else"),
+            "{}",
+            refused.in_words()
+        );
     }
 }

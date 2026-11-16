@@ -374,6 +374,15 @@ export const removeAddon = (id: string) => post<Listed>('/api/addons/remove', { 
 export const setAddonEnabled = (id: string, enabled: boolean) => post<Listed>('/api/addons/enabled', { id, enabled }).then((r) => r.addons);
 export const orderAddons = (ids: string[]) => post<Listed>('/api/addons/order', { ids }).then((r) => r.addons);
 
+/** One way an add-on's new version differs from the one added. `more`: it gives the add-on more than was agreed to. */
+export type AddonChange = { words: string; more: boolean };
+/** An add-on's link asked for a new version: what changed (nothing: it is up to date), and the version it gives. */
+export type AddonCheck = { addons: AddonInfo[]; changes: AddonChange[]; version: string };
+/** Asks the add-on's link for a new version. Nothing the listener would care about is taken until `updateAddon`. */
+export const checkAddon = (id: string) => post<AddonCheck>('/api/addons/check', { id });
+/** Takes the new version that was offered, as it was shown. */
+export const updateAddon = (id: string) => post<Listed>('/api/addons/update', { id }).then((r) => r.addons);
+
 /** What an add-on gave since a time (streams and downloads), when it last gave a song, and its last trouble. */
 export type AddonUse = { streams: number; downloads: number; found_at_ms: number | null; trouble: { at_ms: number; message: string } | null };
 /** Each add-on's use since `since` (ms; the window's own midnight for "today"). */
