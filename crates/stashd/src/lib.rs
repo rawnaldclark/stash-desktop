@@ -2,6 +2,7 @@
 
 mod autoplay;
 mod blocking;
+pub mod check_addon;
 pub mod demo_addon;
 mod equalizer;
 mod folders;

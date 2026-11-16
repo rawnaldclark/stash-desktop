@@ -127,6 +127,16 @@ enum Command {
         #[arg(long)]
         no_resolve: bool,
     },
+    /// Ask an add-on what Stash would ask it, once each (a search, "do you have this song", one stream and one
+    /// download from the start, lyrics), and say whether each answer keeps the contract. For add-on makers. The
+    /// stream and the download may count against an allowance the add-on keeps. The link is never printed.
+    CheckAddon {
+        /// The add-on's link: the address of its manifest.
+        link: String,
+        /// What to search for; the first song found is the one the rest is asked about.
+        #[arg(long, default_value = "love")]
+        query: String,
+    },
     /// Measure opening, searching and paging a library, as a list or grid would use it.
     Bench {
         #[arg(long)]
@@ -135,6 +145,34 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+}
+
+fn check_addon(link: &str, query: &str) -> Result<()> {
+    use stashd::check_addon::Verdict;
+    let lines = stashd::check_addon::check(link, query);
+    for line in &lines {
+        let verdict = match line.verdict {
+            Verdict::Ok => "ok",
+            Verdict::Warn => "warn",
+            Verdict::Fail => "FAIL",
+            Verdict::Skipped => "-",
+        };
+        println!("{verdict:<5} {:<9} {}", line.what, line.words);
+    }
+    let count = |v: Verdict| lines.iter().filter(|l| l.verdict == v).count();
+    let (failed, warned) = (count(Verdict::Fail), count(Verdict::Warn));
+    if failed > 0 {
+        bail!("{failed} of the checks failed: Stash cannot use those parts of the add-on");
+    }
+    println!(
+        "Stash can use it{}.",
+        match warned {
+            0 => String::new(),
+            1 => " (one warning)".into(),
+            n => format!(" ({n} warnings)"),
+        }
+    );
+    Ok(())
 }
 
 fn import(db: &Path, file: &Path) -> Result<()> {
@@ -189,6 +227,7 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Synth { db, tracks, seed } => synth_library(&db, tracks, seed),
         Command::Bench { db, json } => bench(&db, json),
+        Command::CheckAddon { link, query } => check_addon(&link, &query),
         Command::Import { db, file } => import(&db, &file),
         Command::Export { db, file } => {
             let now_ms = std::time::SystemTime::now()

@@ -1454,3 +1454,51 @@ Settings › Sound › Equalizer, right after Play through. Each output keeps it
 - A filter that fails while it runs (the engine then passes the music by it): not seen, so not tested.
 - A format change in the middle of a file (the engine builds its graph again from the list as written): not a seam yet; the curve as written plays until the next song or seek.
 - Bass and Treble's amounts are to be tuned by ear before release.
+
+## 38. Add-ons: no nearer than where they are, new versions on the listener's say, a checker for makers
+
+An add-on is a server someone else runs. What it answers is held to the place its link is: one on the internet cannot make Stash reach the listener's router, printer or another program on this computer, whether by an address it names, a name that leads there, or a redirect.
+
+### Where an add-on is
+
+- **Three places**: the internet; the listener's network (10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, fc00::/7, fe80::/10, and names of one word or under .local, .lan, .home, .internal or .home.arpa); this computer (127/8, ::1, localhost). An unspecified, multicast, broadcast or reserved address is no place: nothing connects to it. An IPv4 address written as IPv6 counts as itself.
+- **Noted when it is added, by the fetch of its manifest itself**: the farthest place of the addresses that fetch was given. A name looked up apart from the fetch could answer one place to the look and another to the fetch. The note is the host's, kept with the manifest; an add-on that writes its own is overwritten.
+- **An add-on added before this** is placed by its link as written (an address, or a name's form); any other name is on the internet. One on the listener's network known by a plain name is refused until it is checked for a new version (or added again), which notes where it is.
+- Settings shows "on your network" or "on this computer" beside the host. On the internet, nothing is added.
+
+### What is held to it
+
+- **Every connection the core makes for an add-on**: its own requests (no redirects followed), the streams the relay fetches (every redirect looked up again), downloads, and the covers saved into files. The resolver keeps only the addresses the add-on may reach. With none left, nothing is sent, and the words say why: "192.168.1.1 is on your network, and an add-on on the internet may not send Stash there".
+- **Every plain stream goes through the relay now**, a song found by an add-on's search too. That one is relayed and never kept: a copy is kept only of a library song's. Before, a library song's stream went through the relay only while copies were kept, and an add-on's own track went straight to the engine.
+- **Playlists of pieces (HLS, DASH) and encrypted streams**, which the engine fetches by itself: the address is looked up first, and every address it gives must be in reach. The relay's answer to a stream that turns out to be a playlist is checked the same way.
+- **Covers in search and resolve answers**: one whose address is written as a place nearer than the add-on may reach is dropped (the window loads covers by itself).
+- Measured: an add-on noted on the internet whose address now leads to this computer is refused in words, and nothing connects (the test listens: nothing came).
+
+### A new version, on the listener's say
+
+- Settings › Add-ons › **Check**: the link is asked for the add-on as it is now, and what changed is said, a sentence each: name, version, description, what it can be asked for (gained or lost), where it is, which protocol it speaks. What gives it more than the listener agreed to when they added it (something new it can be asked for, or a place nearer) is in red, with "Updating gives it more than when you added it."
+- **Nothing the listener would care about changes until Update**, and what is taken is what they were shown: the link is not asked again. An offer lasts 15 minutes; an add-on added again from another link meanwhile is not replaced by it. When nothing they would care about changed (a host's note, an Eclipse add-on's quality words), it is taken at once and the window says it is up to date.
+- **A link that now holds another add-on** (another id) is refused: that one is added as a new add-on, never in this one's place.
+- Adding an add-on's link again still reads it again at once: the listener gave the link.
+- Checked only when the listener asks: an add-on that keeps an allowance is never asked on a timer.
+
+### A checker for add-on makers
+
+- `stashd check-addon <link> [--query love]`: one search, "do you have this song" for the first song it found, one stream and one download read from the start of the file (what kind of file, ranges answered or not), and lyrics. One line each: ok, warn, FAIL, or - (not asked). It ends with an error when a check failed. The link is never printed: a link can carry a key. The stream and the download may count against an allowance the add-on keeps.
+- Measured on the demo add-on, in its own contract and made for Eclipse: every check ok.
+
+### Checked
+
+- **Unit tests in `reach.rs`** (5): every kind of address and name, the order of the places, what an add-on names held to its place, the guard through ureq's own resolver, and the manifest's fetch noting where it went.
+- **Unit tests in `addons.rs`** (2): a kept add-on noted on the internet at an address on this computer (refused in words, nothing connected; its streams and covers held to it; one from before placed by its link); what changed said and marked, and another id refused.
+- **API tests**:
+  - the demo add-on is listed "here";
+  - a track from an add-on's own search plays through the relay, and no copy is kept of it;
+  - a library holding an older manifest noted on the internet: its search is refused; Update with nothing offered is refused; Check says three changes, two of them marked; Update takes them, and search works; checked again, it is up to date; an unknown add-on is not found.
+- **`crates/stashd/tests/check_addon.rs`**: both demo add-ons pass, each asked one search, and the link is never printed; a link that is not an add-on fails at its manifest.
+
+### Not covered yet
+
+- A real add-on on the listener's network, and a name that answers differently between two looks: tested with addresses as written and a test listener only.
+- The pieces an HLS or DASH playlist names, and an encrypted stream, are fetched by the engine: only the first address is checked, and the engine looks it up again itself.
+- A cover whose address is a name that leads nearer is not caught when the window loads it (it is when a song is saved).
