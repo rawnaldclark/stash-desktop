@@ -2905,6 +2905,81 @@ fn a_web_page_cannot_use_the_core_and_the_window_can() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn a_page_at_the_windows_address_needs_the_windows_key() {
+    let dir = std::env::temp_dir().join(format!("stash-api-key-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let core = Core::bind(Options {
+        db: dir.join("library.db"),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: None,
+        mpv: None,
+        play_counts_between_seconds: None,
+    })
+    .unwrap()
+    .with_key("a-key-for-this-run".into());
+    let port = core.port();
+    let base = format!("http://127.0.0.1:{port}");
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let status = |path: &str, headers: &[(&str, &str)]| {
+        let mut asked = agent.get(format!("{base}{path}"));
+        for (name, value) in headers {
+            asked = asked.header(*name, *value);
+        }
+        asked.call().unwrap().status().as_u16()
+    };
+    let other = ("Sec-Fetch-Site", "cross-site");
+    let window = ("Origin", "http://tauri.localhost");
+    // A page at tauri.localhost in a browser names the window's origin, but has no key, or not this run's.
+    assert_eq!(status("/api/counts", &[other, window]), 403);
+    assert_eq!(status("/api/counts?k=a-guess", &[other, window]), 403);
+    assert_eq!(
+        status(
+            "/api/counts",
+            &[other, ("Referer", "http://tauri.localhost/library")]
+        ),
+        403
+    );
+    // The window has it: its requests, and its pictures.
+    assert_eq!(
+        status("/api/counts?k=a-key-for-this-run", &[other, window]),
+        200
+    );
+    assert_eq!(
+        status(
+            "/api/tracks?offset=0&limit=5&k=a-key-for-this-run",
+            &[other, ("Origin", "tauri://localhost")]
+        ),
+        200
+    );
+    assert_eq!(
+        status(
+            "/api/counts?k=a-key-for-this-run",
+            &[other, ("Referer", "http://tauri.localhost/library")]
+        ),
+        200
+    );
+    // The page the core serves itself, and programs that are not browsers, need no key.
+    let own = format!("http://127.0.0.1:{port}");
+    assert_eq!(
+        status(
+            "/api/counts",
+            &[("Sec-Fetch-Site", "same-origin"), ("Origin", own.as_str())]
+        ),
+        200
+    );
+    assert_eq!(status("/api/counts", &[]), 200);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// How the stand-in for ListenBrainz behaves.
 #[derive(Clone, Copy, PartialEq)]
 enum Mood {

@@ -7,12 +7,19 @@
  * music folders, import and export) read their pages from here directly.
  */
 
-type Shell = { __STASH_CORE__?: string; __STASH_BENCH__?: boolean };
+type Shell = { __STASH_CORE__?: string; __STASH_BENCH__?: boolean; __STASH_KEY__?: string };
 const shell: Shell = typeof window === 'undefined' ? {} : (window as unknown as Shell);
 const params = new URLSearchParams(typeof location === 'undefined' ? '' : location.search);
 
 /** The core's address ('' when the core serves this page). */
 export const coreUrl = shell.__STASH_CORE__ ?? params.get('core') ?? '';
+/** The key the desktop window was given for this run: from the window's origin, the core answers only with it. */
+const KEY = shell.__STASH_KEY__ ?? '';
+/** The address of `path` on the core, with this run's key when the window has one. */
+export function at(path: string): string {
+	const url = `${coreUrl}${path}`;
+	return KEY ? `${url}${url.includes('?') ? '&' : '?'}k=${encodeURIComponent(KEY)}` : url;
+}
 
 /** The page was asked to measure itself: `?bench`, or the shell said so. */
 export const measuring = shell.__STASH_BENCH__ === true || params.has('bench');
@@ -38,16 +45,16 @@ async function answer<T>(path: string, response: Response): Promise<T> {
 }
 
 async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
-	return answer<T>(path, await fetch(`${coreUrl}${path}`, { signal }));
+	return answer<T>(path, await fetch(at(path), { signal }));
 }
 
 async function post<T>(path: string, body: unknown): Promise<T> {
 	const sent = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
-	return answer<T>(path, await fetch(`${coreUrl}${path}`, sent));
+	return answer<T>(path, await fetch(at(path), sent));
 }
 
 /** A picture the core names (`art`): an address of its own (`/api/…`) is asked of the core; anything else is used as it is. */
-export const artUrl = (art: string | null | undefined): string | undefined => (!art ? undefined : art.startsWith('/') ? `${coreUrl}${art}` : art);
+export const artUrl = (art: string | null | undefined): string | undefined => (!art ? undefined : art.startsWith('/') ? at(art) : art);
 
 // ---- The library
 
@@ -210,12 +217,12 @@ export type Imported = {
 /** Hands the core a library file from the Android app or the web player. The file goes as it is: the core reads it. */
 export async function importLibrary(file: Blob): Promise<Imported> {
 	const sent = { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file };
-	return answer<Imported>('/api/import', await fetch(`${coreUrl}/api/import`, sent));
+	return answer<Imported>('/api/import', await fetch(at('/api/import'), sent));
 }
 
 /** The library as the file the Android app and the web player import, and how much is in it. */
 export async function exportLibrary(): Promise<{ blob: Blob; likes: number; lists: number; plays: number }> {
-	const response = await fetch(`${coreUrl}/api/export`);
+	const response = await fetch(at('/api/export'));
 	if (!response.ok) throw new Refused(`/api/export: ${response.status}`, response.status);
 	const text = await response.text();
 	const file = JSON.parse(text) as { likes?: unknown[]; playlists?: unknown[]; history?: unknown[] };
@@ -518,5 +525,5 @@ export const scan = (folder?: string) => post<Scanning>('/api/scan', folder ? { 
 export const scriptStartedMs = Math.round(performance.now());
 
 export async function postMeasurement(result: unknown): Promise<void> {
-	await fetch(`${coreUrl}/api/bench-result`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(result) });
+	await fetch(at('/api/bench-result'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(result) });
 }

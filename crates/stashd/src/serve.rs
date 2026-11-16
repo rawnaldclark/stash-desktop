@@ -129,9 +129,25 @@ fn find<'a>(request: &'a Request, name: &'static str) -> Option<&'a str> {
 fn allowed_origin(origin: &str, port: u16) -> bool {
     origin == format!("http://127.0.0.1:{port}")
         || origin == format!("http://localhost:{port}")
-        || origin == "http://tauri.localhost"
-        || origin == "https://tauri.localhost"
-        || origin == "tauri://localhost"
+        || window_origin(origin)
+}
+
+/// The desktop window's origins. A browser gives the first two to any page at tauri.localhost too, which another
+/// program on this computer may serve: from them, a request also needs the window's key (see [`Core::with_key`]).
+fn window_origin(origin: &str) -> bool {
+    matches!(
+        origin,
+        "http://tauri.localhost" | "https://tauri.localhost" | "tauri://localhost"
+    )
+}
+
+/// The key a request carries (`?k=`).
+fn key_of(url: &str) -> Option<String> {
+    Url::parse(&format!("http://local{url}"))
+        .ok()?
+        .query_pairs()
+        .find(|(name, _)| name == "k")
+        .map(|(_, key)| key.into_owned())
 }
 
 /// The origin of an address (its scheme, host and port), as a browser names it; `tauri://localhost` too, which the
@@ -676,6 +692,8 @@ pub(crate) struct State {
     pub(crate) offline: Arc<AtomicBool>,
     /// The windows' owner, when the core runs inside one.
     pub(crate) window: Option<WindowShell>,
+    /// The key the window was given for this run, when there is a window (see [`Core::with_key`]).
+    key: Option<String>,
     /// The shortcuts that work in any app.
     pub(crate) shortcuts: crate::shortcuts::Shortcuts,
     /// Goes up with each change to the likes and the playlists, so every window (the mini player too) can tell when
@@ -869,6 +887,7 @@ impl Core {
                 scrobbling,
                 offline,
                 window: None,
+                key: None,
                 shortcuts: crate::shortcuts::Shortcuts::default(),
                 edits: AtomicU64::new(0),
             },
@@ -882,6 +901,14 @@ impl Core {
     /// Lets the page ask `shell` for the full window or the mini player.
     pub fn with_window(mut self, shell: WindowShell) -> Self {
         self.state.window = Some(shell);
+        self
+    }
+
+    /// Answers the desktop window's origins only with `key`, which the shell gives the window for this run. A browser
+    /// names a page at tauri.localhost the way it names the window, and any program on this computer may serve one
+    /// there; without the key such a page is refused, as any other site's.
+    pub fn with_key(mut self, key: String) -> Self {
+        self.state.key = Some(key);
         self
     }
 
@@ -981,12 +1008,24 @@ fn answer(state: &State, mut request: Request) -> bool {
     // Programs that are not browsers (the engine, a script) say nothing of where they come from.
     let elsewhere =
         find(&request, "Sec-Fetch-Site").is_some_and(|s| !matches!(s, "same-origin" | "none"));
+    let referer = || {
+        find(&request, "Referer")
+            .and_then(|r| Url::parse(r).ok())
+            .map(|r| origin_of(&r))
+    };
     let origin_ok = match origin.as_deref() {
         Some(o) => allowed_origin(o, port),
-        None if elsewhere => find(&request, "Referer")
-            .and_then(|r| Url::parse(r).ok())
-            .is_some_and(|r| allowed_origin(&origin_of(&r), port)),
+        None if elsewhere => referer().is_some_and(|r| allowed_origin(&r, port)),
         None => true,
+    };
+    // From the window's origin, the window's key too.
+    let from_window = match origin.as_deref() {
+        Some(o) => window_origin(o),
+        None => elsewhere && referer().is_some_and(|r| window_origin(&r)),
+    };
+    let keyed = match &state.key {
+        Some(key) if from_window => key_of(request.url()).as_deref() == Some(key.as_str()),
+        _ => true,
     };
 
     // The engine reading a stream the core relays: answered on a thread of its own, as long as the song plays.
@@ -997,7 +1036,7 @@ fn answer(state: &State, mut request: Request) -> bool {
     let mut done = false;
     let mut response = if !host_ok {
         refuse(403, "this server answers only as 127.0.0.1 or localhost")
-    } else if !origin_ok {
+    } else if !origin_ok || !keyed {
         refuse(403, "this page may not use the Stash core")
     } else if *request.method() == Method::Options {
         reply(204, "text/plain", Vec::new())

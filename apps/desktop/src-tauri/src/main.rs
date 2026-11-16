@@ -17,6 +17,14 @@ use anyhow::{Context, Result};
 use stashd::serve::{Core, Options};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
+/// A key for this run, given to the window and to no one else: the core answers the window's origin only with it, as
+/// a browser gives that origin to any page at tauri.localhost.
+fn run_key() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("no random numbers: {e}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 /// The library to open: the one `STASH_DB` names, else `library.db` in this user's Stash data folder.
 fn library_path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("STASH_DB") {
@@ -78,6 +86,8 @@ fn main() -> Result<()> {
                 play_counts_between_seconds: None,
             })?;
             let port = core.port();
+            let key = run_key()?;
+            let core = core.with_key(key.clone());
             // The page may ask for the mini player (a measurement keeps the one window it measures).
             let core = if measuring {
                 core
@@ -94,7 +104,7 @@ fn main() -> Result<()> {
                     }
                 })?;
             // Set before any of the page's own script runs.
-            let script = format!("window.__STASH_CORE__ = 'http://127.0.0.1:{port}'; window.__STASH_BENCH__ = {measuring};");
+            let script = format!("window.__STASH_CORE__ = 'http://127.0.0.1:{port}'; window.__STASH_KEY__ = '{key}'; window.__STASH_BENCH__ = {measuring};");
             let window = WebviewWindowBuilder::new(app, windows::MAIN, WebviewUrl::App("index.html".into()))
                 .title("Stash")
                 .inner_size(1400.0, 900.0)

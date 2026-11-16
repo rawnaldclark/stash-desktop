@@ -455,6 +455,10 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 
 - **The core's API is for the window.** It listens on 127.0.0.1, answers only when it is asked for as 127.0.0.1 or localhost on its port (a name that leads there through DNS is refused), and lets only the window's own origins read its answers (the shell's `tauri.localhost`, or the page the core serves itself).
 - **A page elsewhere is not answered at all.** A browser says where a request comes from (Sec-Fetch-Site). A request from another site must name the window: by its Origin, or, for a picture, by the window's page as its Referer. Otherwise the core answers 403. Before, a page anywhere could put the core's addresses in a picture or a no-cors request. It could not read the answer, but asking was enough: a search, or a song's candidates in Not found, makes the core ask an add-on, and that spends the add-on's daily allowance. The window now asks for the core's own covers by CORS, so they carry its Origin. Programs that are not browsers (the engine, scripts) send none of these headers and are answered as before; the relay answers only the engine (section 16).
+- **A page at tauri.localhost needs the window's key.** Browsers send every `*.localhost` name to this computer. A page that another program serves on port 80 or 443, opened as `tauri.localhost`, would therefore carry the window's own origin.
+  - The shell now gives the window a new key on every run: 128 random bits, set in the page's starting script next to the core's address.
+  - From the window's origins, the core answers only requests that carry this key, whether the request names the origin or a page there as its Referer.
+  - Programs that are not browsers, and the page the core serves itself, need no key.
 - **What the browser does first:** current Edge already stops a public site's requests to this computer (Local Network Access). Pages served from this computer, and browsers without that protection, reach the core, and it now refuses them.
 
 ### Checked
@@ -462,6 +466,15 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 - **By the tests:** `crates/stashd/tests/api.rs` (`a_web_page_cannot_use_the_core_and_the_window_can`): from another site, a request with no Origin, with another page as its Referer, or with another Origin is refused; with the window's Origin, or with the window's page as its Referer (`http://tauri.localhost/…`, `tauri://localhost/`), it is answered. So are same-origin requests, typed addresses and programs.
 - **In the real shell**, on a new scratch library of two files with their own covers: the window (on `http://tauri.localhost`) showed both covers, asked for with its Origin (200). The same picture asked for the way a page's own picture is (no CORS, no Referer) got 403. No errors in the page.
 - **In Edge**, a page served by another server on this computer (`127.0.0.1:47999`, then `localhost:47999`) asked for a cover, a search and the song counts. Each reached the core (Sec-Fetch-Site same-site or cross-site, no Origin, that page as its Referer) and got 403. A page on a public name never reached the core (Edge's Local Network Access).
+
+- **After the review, by the tests:** `a_page_at_the_windows_address_needs_the_windows_key`.
+  - With the window's origin, a request with no key or a guessed key was refused, and so was a picture whose Referer was the window's page.
+  - With the key, each was answered, for both of the window's origins.
+  - The core's own page and a program needed no key.
+- **After the review, in the real shell:**
+  - Both covers carried the key and loaded (200).
+  - From the window, a request with no key was refused (403), so was one with a guessed key (403), and one with its own key was answered (200).
+  - The mini player read the core and its cover with the key, with no errors.
 
 ### Not covered yet
 
