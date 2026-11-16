@@ -81,6 +81,11 @@ pub(crate) fn folder(library: &Library) -> PathBuf {
 pub(crate) fn run(state: &State, stop: &AtomicBool) {
     let _ = state.library.lock().unwrap().requeue_downloads();
     while !stop.load(Ordering::Relaxed) {
+        // Offline, nothing is fetched: what was asked for waits.
+        if crate::serve::offline(state) {
+            state.saving.wait(Duration::from_secs(2));
+            continue;
+        }
         let next = state.library.lock().unwrap().next_download().ok().flatten();
         match next {
             Some(id) => save(state, id, stop),

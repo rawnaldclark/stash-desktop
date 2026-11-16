@@ -53,6 +53,9 @@ pub(crate) fn route(
         let Ok(id) = id.parse::<i64>() else {
             return Ok(Some(refuse(404, "no such song in the library")));
         };
+        if crate::serve::offline(state) {
+            return Ok(Some(refuse(409, "Stash is offline: add-ons are not asked")));
+        }
         let Some(described) = state.library.lock().unwrap().describe(id)? else {
             return Ok(Some(refuse(404, "no such song in the library")));
         };

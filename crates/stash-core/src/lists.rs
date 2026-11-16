@@ -12,6 +12,9 @@ use crate::import::Song;
 use crate::library::Library;
 use crate::{Error, Result};
 
+/// Where a query's own columns start, after a track's.
+const AFTER: usize = crate::library::TRACK_COLUMN_COUNT;
+
 /// The file's own limits, kept by this writer too.
 const MAX_LIKES: usize = 50_000;
 const MAX_PLAYLIST_ITEMS: usize = 10_000;
@@ -443,12 +446,12 @@ impl Library {
             .query_map(params![limit as i64, offset as i64], |r| {
                 Ok(DownloadRow {
                     track: crate::library::track_row_for_lists(r)?,
-                    state: r.get(17)?,
-                    error: r.get(18)?,
-                    bytes: r.get::<_, Option<i64>>(19)?.map(|b| b as u64),
-                    tier: r.get(20)?,
-                    addon: r.get(21)?,
-                    saved_at_ms: r.get(22)?,
+                    state: r.get(AFTER)?,
+                    error: r.get(AFTER + 1)?,
+                    bytes: r.get::<_, Option<i64>>(AFTER + 2)?.map(|b| b as u64),
+                    tier: r.get(AFTER + 3)?,
+                    addon: r.get(AFTER + 4)?,
+                    saved_at_ms: r.get(AFTER + 5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -549,8 +552,8 @@ impl Library {
             .query_map(params![limit as i64, offset as i64], |r| {
                 Ok(UnfoundRow {
                     track: crate::library::track_row_for_lists(r)?,
-                    first_at_ms: r.get(17)?,
-                    last_at_ms: r.get(18)?,
+                    first_at_ms: r.get(AFTER)?,
+                    last_at_ms: r.get(AFTER + 1)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

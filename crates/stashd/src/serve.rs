@@ -489,6 +489,7 @@ fn resolver(
     library: Arc<Mutex<Library>>,
     lacks: Arc<Lacks>,
     relays: Arc<crate::relay::Relays>,
+    offline: Arc<AtomicBool>,
     port: u16,
 ) -> Resolver {
     Arc::new(move |item: &QueueItem| {
@@ -496,7 +497,12 @@ fn resolver(
             message: why.to_string(),
             miss: true,
         };
+        // Offline, no add-on is asked: a song plays only from a copy kept here. What cannot play is passed over.
+        let offline = offline.load(Ordering::Relaxed);
         if let Some(wanted) = &item.addon {
+            if offline {
+                return Err(gone("Stash is offline"));
+            }
             let loaded = registry
                 .read()
                 .unwrap()
@@ -535,6 +541,9 @@ fn resolver(
         };
         if let Some(located) = relays.copy_of(&library, id) {
             return Ok(located);
+        }
+        if offline {
+            return Err(gone("it is not on this computer, and Stash is offline"));
         }
         relays.not_handed(id);
         let keeping = library.lock().unwrap().played_cap_bytes().unwrap_or(0) > 0;
@@ -658,6 +667,8 @@ pub(crate) struct State {
     pub(crate) relays: Arc<crate::relay::Relays>,
     /// Plays on their way to the listener's scrobbling services.
     pub(crate) scrobbling: Arc<crate::scrobbling::Scrobbling>,
+    /// Stash is offline (see [`offline`]).
+    pub(crate) offline: Arc<AtomicBool>,
     /// The windows' owner, when the core runs inside one.
     window: Option<WindowShell>,
 }
@@ -754,6 +765,10 @@ impl Core {
         let library = Arc::new(Mutex::new(library));
         let lacks = Arc::new(Lacks::default());
         let scrobbling = Arc::new(crate::scrobbling::Scrobbling::default());
+        // Offline holds from one run to the next.
+        let offline = Arc::new(AtomicBool::new(
+            library.lock().unwrap().setting(OFFLINE_SETTING)?.as_deref() == Some("1"),
+        ));
         let player = match &options.audio {
             None => Err("this core runs without a player".to_string()),
             Some(output) => match options.mpv.clone().or_else(find_library) {
@@ -765,6 +780,7 @@ impl Core {
                             Arc::clone(&library),
                             Arc::clone(&lacks),
                             Arc::clone(&relays),
+                            Arc::clone(&offline),
                             port,
                         )),
                         // A play that counts is kept, and waits for the listener's scrobbling services.
@@ -836,6 +852,7 @@ impl Core {
                 saving: crate::saving::Saving::default(),
                 relays,
                 scrobbling,
+                offline,
                 window: None,
             },
         })
@@ -859,7 +876,8 @@ impl Core {
             // The queue is written down as it changes, so the next run opens on it (the program may be closed, or
             // lose power, at any moment: there is no "on the way out" to rely on).
             if let Ok(player) = &state.player {
-                let (library, stop, addons) = (&state.library, &stop, &state.addons);
+                let (library, stop, addons, offline) =
+                    (&state.library, &stop, &state.addons, &state.offline);
                 scope.spawn(move || {
                     let mut keeper = crate::kept::Keeper::default();
                     let mut autoplay = crate::autoplay::Autoplay::default();
@@ -867,10 +885,11 @@ impl Core {
                     while !stop.load(Ordering::Relaxed) {
                         keeper.look(library, player);
                         // The last song of the queue started: songs like the last ones are added after it.
-                        let can_ask = addons.read().unwrap().iter().any(|a| {
-                            a.usable()
-                                .is_some_and(|addon| addon.offers_resource("stream"))
-                        });
+                        let can_ask = !offline.load(Ordering::Relaxed)
+                            && addons.read().unwrap().iter().any(|a| {
+                                a.usable()
+                                    .is_some_and(|addon| addon.offers_resource("stream"))
+                            });
                         autoplay.look(library, player, can_ask);
                         // Every few seconds: the output chosen and unplugged is taken back once it is connected.
                         if looks.is_multiple_of(5) {
@@ -1078,6 +1097,63 @@ fn listed_items(
     Ok((items, begins))
 }
 
+/// Offline, a queue keeps only the songs that play with no connection, the song at `start` in its place. `None`: the
+/// song at `start` is not one of them.
+fn offline_queue(
+    state: &State,
+    items: Vec<QueueItem>,
+    start: usize,
+) -> Result<Option<(Vec<QueueItem>, usize)>> {
+    if !offline(state) {
+        return Ok(Some((items, start)));
+    }
+    let ids: Vec<i64> = items.iter().filter_map(|i| i.id).collect();
+    let here = state.library.lock().unwrap().here_of(&ids)?;
+    let plays =
+        |item: &QueueItem| item.addon.is_none() && item.id.is_some_and(|id| here.contains(&id));
+    if items.get(start).is_some_and(|item| !plays(item)) {
+        return Ok(None);
+    }
+    let mut kept = Vec::with_capacity(items.len());
+    let mut begins = 0;
+    for (place, item) in items.into_iter().enumerate() {
+        if place == start {
+            begins = kept.len();
+        }
+        if plays(&item) {
+            kept.push(item);
+        }
+    }
+    Ok(Some((kept, begins)))
+}
+
+/// /api/offline: whether Stash is offline; POST {offline} says so, and it holds next time.
+fn offline_route(state: &State, request: &mut Request, path: &str) -> Result<Option<Reply>> {
+    if path != "/api/offline" {
+        return Ok(None);
+    }
+    if *request.method() == Method::Post {
+        let on = body_json(request)?
+            .get("offline")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        state
+            .library
+            .lock()
+            .unwrap()
+            .set_setting(OFFLINE_SETTING, if on { "1" } else { "0" })?;
+        state.offline.store(on, Ordering::Relaxed);
+        // Back online: what waited goes.
+        if !on {
+            state.scrobbling.ring(None);
+            state.saving.ring();
+        }
+    } else if *request.method() != Method::Get {
+        return Ok(None);
+    }
+    Ok(Some(reply_json(200, json!({ "offline": offline(state) }))))
+}
+
 /// One of the player's routes. `None`: the path is not one of them.
 fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Option<Reply>> {
     let player = &state.player;
@@ -1170,6 +1246,9 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
                 };
                 (library.queue_items(&ids)?, 0)
             };
+            let Some((items, start)) = offline_queue(state, items, start)? else {
+                return Ok(Some(refuse(409, NOT_HERE_OFFLINE)));
+            };
             playing.play_from(items, start, from)?;
         }
         // Adds tracks (as in `items` above) right after the playing one (`"next": true`) or at the end.
@@ -1180,6 +1259,10 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
                 .cloned()
                 .unwrap_or_default();
             let (items, _) = listed_items(&state.library.lock().unwrap(), &list, 0)?;
+            let items = match offline_queue(state, items, usize::MAX)? {
+                Some((items, _)) if !items.is_empty() => items,
+                _ => return Ok(Some(refuse(409, NOT_HERE_OFFLINE))),
+            };
             playing.enqueue(
                 items,
                 body.get("next").and_then(Value::as_bool).unwrap_or(false),
@@ -1285,6 +1368,15 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
 /// Where lyrics are looked up when no add-on has them.
 const LRCLIB: &str = "https://lrclib.net";
 const LRCLIB_SETTING: &str = "lyrics.lrclib";
+/// The setting that keeps Stash offline ("1").
+const OFFLINE_SETTING: &str = "offline";
+/// A song asked for while offline that does not play with no connection.
+const NOT_HERE_OFFLINE: &str = "Stash is offline, and that song is not on this computer";
+
+/// Stash is offline: nothing is asked of the network for music (no add-on, no LRCLIB, no scrobbling service).
+pub(crate) fn offline(state: &State) -> bool {
+    state.offline.load(Ordering::Relaxed)
+}
 /// How long lyrics found on the network are kept, and how long "none there" is believed.
 const LYRICS_KEPT_SECONDS: i64 = 30 * 24 * 3600;
 const NO_LYRICS_KEPT_SECONDS: i64 = 24 * 3600;
@@ -1351,9 +1443,12 @@ fn lyrics_for(state: &State, param: &dyn Fn(&str) -> Option<String>) -> Result<V
         } else {
             NO_LYRICS_KEPT_SECONDS
         };
-        if now - at < keep {
+        if now - at < keep || (offline(state) && found.is_some()) {
             return Ok(json!({ "lyrics": found, "via": via }));
         }
+    }
+    if offline(state) {
+        return Ok(json!({ "lyrics": null, "via": null }));
     }
 
     // The listener's add-ons that offer lyrics, in the listener's order; the one that serves the song is asked by
@@ -1540,6 +1635,12 @@ fn addons_route(
             }
             // `q`, and optionally `addon` (ask only that one) and `limit`.
             "/api/addons/search" => {
+                if offline(state) {
+                    return Ok(Some(refuse(
+                        409,
+                        "Stash is offline: only your library is searched",
+                    )));
+                }
                 let query = param("q").unwrap_or_default();
                 let only = param("addon");
                 let limit = param("limit")
@@ -1576,6 +1677,12 @@ fn addons_route(
     match path {
         // Adds the add-on at `link` (the address of its manifest); one that is there already is read again.
         "/api/addons" => {
+            if offline(state) {
+                return Ok(Some(refuse(
+                    409,
+                    "Stash is offline: an add-on is read from its link when it is added",
+                )));
+            }
             let link = body
                 .get("link")
                 .and_then(Value::as_str)
@@ -1911,6 +2018,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::scrobbling::route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = offline_route(state, request, &path)? {
         return Ok((response, false));
     }
     // One album or one artist: /api/albums/{id}, /api/artists/{id}; the picture of a file: /api/art/track/{id}

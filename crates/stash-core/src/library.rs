@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 use crate::{Result, db};
@@ -86,6 +86,9 @@ pub struct TrackRow {
     /// When it was liked: set in the liked list.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub liked_at_ms: Option<i64>,
+    /// It plays with no connection: a file that is here (the listener's own, or a song saved), or a song kept as it
+    /// was played.
+    pub here: bool,
     /// When this play started: set in the history.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub played_at_ms: Option<i64>,
@@ -198,6 +201,14 @@ macro_rules! art {
     };
 }
 
+/// Whether a track plays with no connection: a file that is here (one of the listener's own, or a song saved), or a
+/// song kept as it was played (`played.rs`).
+macro_rules! here {
+    () => {
+        "((t.origin = 'file' AND t.missing_since IS NULL) OR EXISTS (SELECT 1 FROM played_copies pc WHERE pc.track_id = t.id))"
+    };
+}
+
 /// The most songs a search for albums or artists looks through. A query broad enough to pass it ("a") is answered
 /// from the first that many matches, which is still more albums and artists than a row of results shows.
 const FOUND_CAP: usize = 20_000;
@@ -205,8 +216,11 @@ const FOUND_CAP: usize = 20_000;
 const TRACK_COLUMNS: &str = concat!(
     "t.id, t.title, a.name, al.title, t.duration_ms, t.codec, t.sample_rate, t.bit_depth, t.origin, t.sort_key, t.liked_at_ms IS NOT NULL, ",
     art!(),
-    ", t.album_id, t.artist_id, t.added_at * 1000, t.isrc, t.liked_at_ms"
+    ", t.album_id, t.artist_id, t.added_at * 1000, t.isrc, t.liked_at_ms, ",
+    here!()
 );
+/// How many columns [`TRACK_COLUMNS`] has: a column a query adds after them is read from this place on.
+pub(crate) const TRACK_COLUMN_COUNT: usize = 18;
 const ALBUM_COLUMNS: &str = concat!(
     "al.id, al.title, a.name, al.artist_id, al.year,
     (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id),
@@ -277,6 +291,7 @@ fn track_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackRow> {
         added_at_ms: r.get(14)?,
         isrc: r.get(15)?,
         liked_at_ms: r.get(16)?,
+        here: r.get(17)?,
         played_at_ms: None,
     })
 }
@@ -521,6 +536,27 @@ impl Library {
     /// The tracks with these ids as a queue plays them, in the order asked. Ids the library does not have, tracks
     /// whose file is marked missing, and tracks that are not files (add-on tracks need their add-on asked first) are
     /// left out.
+    /// Which of these songs play with no connection: files that are here (the listener's own, or songs saved), and
+    /// songs kept as they were played.
+    pub fn here_of(&self, ids: &[i64]) -> Result<std::collections::HashSet<i64>> {
+        let mut stmt = self.conn.prepare_cached(concat!(
+            "SELECT ",
+            here!(),
+            " FROM tracks t WHERE t.id = ?1"
+        ))?;
+        let mut here = std::collections::HashSet::new();
+        for id in ids {
+            if stmt
+                .query_row([id], |r| r.get::<_, bool>(0))
+                .optional()?
+                .unwrap_or(false)
+            {
+                here.insert(*id);
+            }
+        }
+        Ok(here)
+    }
+
     pub fn queue_items(&self, ids: &[i64]) -> Result<Vec<crate::player::QueueItem>> {
         let mut stmt = self.conn.prepare_cached(
             concat!(
@@ -986,7 +1022,7 @@ impl Library {
         let rows = stmt
             .query_map(params![limit as i64, offset as i64], |r| {
                 let mut row = track_row(r)?;
-                row.played_at_ms = Some(r.get(17)?);
+                row.played_at_ms = Some(r.get(TRACK_COLUMN_COUNT)?);
                 Ok(row)
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

@@ -3291,3 +3291,206 @@ fn plays_go_to_listenbrainz_and_wait_while_it_is_away() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn offline_plays_only_what_is_here_and_asks_no_add_on() {
+    let Some(engine) = engine() else {
+        eprintln!("SKIPPED offline: no libmpv found");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("stash-api-offline-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (music, catalogue) = (dir.join("Music"), dir.join("Catalogue"));
+    std::fs::create_dir_all(&music).unwrap();
+    std::fs::create_dir_all(&catalogue).unwrap();
+    for name in ["first", "second"] {
+        silence(&music.join(format!("{name}.wav")));
+    }
+    for name in ["alpha", "bravo", "charlie"] {
+        silence(&catalogue.join(format!("{name}.wav")));
+    }
+    let db = dir.join("library.db");
+    {
+        let mut library = Library::open(&db).unwrap();
+        assert_eq!(scan_folder(&mut library, &music, |_| {}).unwrap().added, 2);
+    }
+    let core = Core::bind(Options {
+        db: db.clone(),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: Some(Output::Silent),
+        mpv: Some(engine),
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    let demo = DemoAddon::bind(&catalogue, 0, Duration::from_millis(20)).unwrap();
+    let link = demo.link();
+    std::thread::spawn(move || demo.run());
+    client.post("/api/addons", json!({ "link": link.clone() }));
+
+    // Two of the add-on's songs, kept in the library: they play from the add-on.
+    let (_, found) = client.get("/api/addons/search?q=a&limit=10");
+    let keep = |title: &str| {
+        let track = found["groups"][0]["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["title"] == title)
+            .unwrap()
+            .clone();
+        client.post(
+            "/api/tracks/keep",
+            json!({ "addon": "demo.folder", "track": track }),
+        )["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let (alpha, bravo) = (keep("alpha"), keep("bravo"));
+    let (_, files) = client.get("/api/tracks?offset=0&limit=10");
+    let file = |title: &str| {
+        files["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["title"] == title)
+            .unwrap()["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let (first, second) = (file("first"), file("second"));
+    // "alpha" has a copy kept as it was played (as the relay keeps one).
+    {
+        let played = dir.join("Played");
+        std::fs::create_dir_all(&played).unwrap();
+        let name = format!("{alpha}.wav");
+        silence(&played.join(&name));
+        let bytes = std::fs::metadata(played.join(&name)).unwrap().len();
+        let mut library = Library::open(&db).unwrap();
+        let (kept, _) = library
+            .keep_played_copy(
+                alpha,
+                &name,
+                bytes,
+                Some("lossless"),
+                Some("demo.folder"),
+                1,
+            )
+            .unwrap();
+        assert!(kept);
+    }
+    let mix = client.post("/api/playlists", json!({ "name": "Mixed" }))["id"]
+        .as_i64()
+        .unwrap();
+    client.post(
+        &format!("/api/playlists/{mix}/add"),
+        json!({ "ids": [bravo, first, alpha, second] }),
+    );
+
+    // Each row says whether it plays with no connection: a file here, or a song with a copy kept.
+    let (_, rows) = client.get(&format!("/api/playlists/{mix}/tracks?offset=0&limit=10"));
+    let here: Vec<(&str, bool)> = rows["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["title"].as_str().unwrap(), r["here"].as_bool().unwrap()))
+        .collect();
+    assert_eq!(
+        here,
+        [
+            ("bravo", false),
+            ("first", true),
+            ("alpha", true),
+            ("second", true)
+        ]
+    );
+
+    // Offline, and it holds from one run to the next.
+    assert_eq!(client.get("/api/offline").1, json!({ "offline": false }));
+    assert_eq!(
+        client.post("/api/offline", json!({ "offline": true })),
+        json!({ "offline": true })
+    );
+    assert_eq!(
+        Library::open(&db)
+            .unwrap()
+            .setting("offline")
+            .unwrap()
+            .as_deref(),
+        Some("1")
+    );
+
+    // A song that is not here is refused in words.
+    let (status, refused) =
+        client.send("/api/player/play", json!({ "playlist": mix, "offset": 0 }));
+    assert_eq!(
+        (status, refused["error"]["message"].as_str()),
+        (
+            409,
+            Some("Stash is offline, and that song is not on this computer")
+        )
+    );
+    // From the next one on, the queue holds only what is here; the kept copy plays and no add-on is asked.
+    client.post("/api/player/play", json!({ "playlist": mix, "offset": 1 }));
+    let (_, queue) = client.get("/api/player/queue");
+    let titles: Vec<&str> = queue["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, ["first", "alpha", "second"]);
+    let copy = client.player_until("alpha from its copy", |s| {
+        s["track"]["title"] == "alpha" && s["status"] == "playing"
+    });
+    assert_eq!(
+        (copy["tier"].as_str(), copy["served_by"].as_str()),
+        (Some("lossless"), None)
+    );
+    let (_, used) = client.get("/api/addons/use?since=0");
+    assert_eq!(
+        used["addons"]["demo.folder"]["streams"], 0,
+        "no add-on was asked: {used}"
+    );
+
+    // Nothing else asks an add-on: a search, adding one, a song's candidates.
+    assert_eq!(client.get("/api/addons/search?q=a").0, 409);
+    assert_eq!(client.send("/api/addons", json!({ "link": link })).0, 409);
+    assert_eq!(
+        client.get(&format!("/api/unfound/{bravo}/candidates")).0,
+        409
+    );
+    // A song that is not here is not added to the queue; one that is, is.
+    assert_eq!(
+        client
+            .send("/api/player/enqueue", json!({ "items": [{ "id": bravo }] }))
+            .0,
+        409
+    );
+    assert_eq!(
+        client
+            .send("/api/player/enqueue", json!({ "items": [{ "id": first }] }))
+            .0,
+        200
+    );
+
+    // Back online, the add-on's songs play again.
+    assert_eq!(
+        client.post("/api/offline", json!({ "offline": false })),
+        json!({ "offline": false })
+    );
+    client.post("/api/player/play", json!({ "playlist": mix, "offset": 0 }));
+    let online = client.player_until("bravo from the add-on", |s| {
+        s["track"]["title"] == "bravo" && s["status"] == "playing"
+    });
+    assert_eq!(online["served_by"].as_str(), Some("demo.folder"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

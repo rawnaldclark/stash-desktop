@@ -158,6 +158,10 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
             }
             playing
         };
+        // Offline, nothing is sent: plays wait, and go once Stash is back online.
+        if crate::serve::offline(state) {
+            continue;
+        }
         looked = Some(Instant::now());
         let targets = state
             .library
