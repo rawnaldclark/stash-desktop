@@ -390,19 +390,19 @@ function pollSoon(): void {
 	pollTimer = setTimeout(() => void poll(), 150);
 }
 
-/** Commands reach the core in the order the listener gave them ("shuffle, then play"). */
+/** Commands reach the core in the order the listener gave them ("shuffle, then play"). A refusal is said here, unless `own`:
+ * then the caller says it, and the promise rejects with it. */
 let chain: Promise<void> = Promise.resolve();
-function command(call: () => Promise<core.CorePlayer>): Promise<void> {
+function command(call: () => Promise<core.CorePlayer>, own = false): Promise<void> {
 	barrier = sent;
-	chain = chain
-		.then(() => {
-			barrier = sent;
-			return hear(call);
-		})
-		.then(pollSoon, (e) => {
-			if (e instanceof Refused) report(e);
-		});
-	return chain;
+	const run = chain.then(() => {
+		barrier = sent;
+		return hear(call);
+	});
+	chain = run.then(pollSoon, (e) => {
+		if (!own && e instanceof Refused) report(e);
+	});
+	return own ? run : chain;
 }
 
 const entriesOf = (items: LibraryItem[]) => items.map(entryOf).filter((e): e is core.PlayEntry => e !== null);
@@ -475,7 +475,13 @@ const player: PlayerAPI = {
 		command(async () => {
 			await core.stopRadio();
 			return core.player();
-		}),
+		}, true).then(
+			() => true,
+			(e) => {
+				if (e instanceof Refused) report(e);
+				return false;
+			}
+		),
 	async openLastfm() {
 		try {
 			const said = await core.openLastfm();

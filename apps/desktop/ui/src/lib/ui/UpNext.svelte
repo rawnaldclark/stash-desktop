@@ -10,7 +10,7 @@
 	import Cover from './Cover.svelte';
 	import Icon from './Icon.svelte';
 	import { mmss, songs } from './format';
-	import { findingWords, stationLine } from './radio';
+	import { findingWords, nothingWords, stationLine } from './radio';
 	import { reorder } from './reorder';
 	import { openSongMenu, songMenu } from './song-menu';
 	import { S, ui } from './state.svelte';
@@ -25,7 +25,7 @@
 	const lineAt = $derived(s.station?.from_qid != null ? `q${s.station.from_qid}` : null);
 	function stopStation() {
 		const words = line?.stopped ?? 'Stopped';
-		void player.stopRadio().then(() => ui.toast(words));
+		void player.stopRadio().then((stopped) => stopped && ui.toast(words));
 	}
 	let saving = $state(false);
 	let busy = $state(false);
@@ -114,6 +114,8 @@
 		{:else}
 			{#if s.station?.finding}
 				<p class="q-empty" role="status">{findingWords(s.station)}</p>
+			{:else if s.station && !s.station.added}
+				<p class="q-empty" role="status">{nothingWords(s.station)}</p>
 			{:else}
 				<p class="q-empty">Nothing after this one. Add songs from any list with the “more” menu.</p>
 			{/if}

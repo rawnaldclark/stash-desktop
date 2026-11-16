@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Station } from '../core';
-import { findingWords, stationLine } from './radio';
+import { findingWords, nothingWords, stationLine } from './radio';
 
 const station = (over: Partial<Station> = {}): Station => ({
 	kind: 'radio',
@@ -9,6 +9,7 @@ const station = (over: Partial<Station> = {}): Station => ({
 	via: 'lastfm',
 	why: null,
 	finding: false,
+	added: 3,
 	from_qid: 12,
 	...over
 });
@@ -38,5 +39,12 @@ describe('stationLine (the line above a station’s songs in Up next)', () => {
 	it('what it says while it finds its first songs', () => {
 		expect(findingWords(station())).toBe('Finding songs like Teardrop…');
 		expect(findingWords(station({ seed: { artist: 'Massive Attack' }, label: 'Massive Attack radio' }))).toBe('Finding songs for Massive Attack radio…');
+	});
+
+	it('what it says when it found nothing, and why', () => {
+		expect(nothingWords(station({ via: 'library', why: 'Last.fm could not be reached', from_qid: null }))).toBe(
+			'No songs like Teardrop were found (Last.fm could not be reached).'
+		);
+		expect(nothingWords(station({ seed: { artist: 'Massive Attack' }, from_qid: null }))).toBe('No songs like Massive Attack were found.');
 	});
 });

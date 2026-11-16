@@ -50,7 +50,7 @@
 				group: 'Commands',
 				icon: 'close',
 				label: autoplay ? 'Stop autoplay' : 'Stop radio',
-				run: () => void player.stopRadio().then(() => ui.toast(autoplay ? 'Autoplay stopped' : 'Radio stopped'))
+				run: () => void player.stopRadio().then((stopped) => stopped && ui.toast(autoplay ? 'Autoplay stopped' : 'Radio stopped'))
 			});
 		}
 		list.push({ id: 'shuffle', group: 'Commands', icon: 'shuffle', label: s.shuffle ? 'Shuffle off' : 'Shuffle on', run: () => player.setShuffle(!s.shuffle) });

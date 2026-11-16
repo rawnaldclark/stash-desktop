@@ -356,6 +356,8 @@ impl Radio {
                     "via": if l.lastfm { "lastfm" } else { "library" },
                     "why": l.why,
                     "finding": l.finding && !l.spent,
+                    // How many songs it added: none, and nothing follows, means it found none.
+                    "added": l.added.len(),
                 }),
                 l.added.clone(),
             )

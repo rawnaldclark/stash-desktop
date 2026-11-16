@@ -469,6 +469,8 @@ export type Station = {
 	why: string | null;
 	/** Its first songs are still being found. */
 	finding: boolean;
+	/** How many songs it added: none, with nothing after the song playing and no more being found, means it found none. */
+	added: number;
 	/** The core's id of the first of its songs still to come (Up next draws its line there). */
 	from_qid: number | null;
 };

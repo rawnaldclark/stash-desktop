@@ -1299,12 +1299,12 @@ A radio is a queue that grows by itself with songs like the one it starts from: 
   - Headers: `User-Agent: Stash-desktop/<version>` and `X-Stash-Version: desktop/<version>`. Redirects are not followed, and an answer over 1 MB is not read.
 - **Nothing else.** Nothing about the library, what is played or any account. The proxy sees this computer's internet address, as any server does.
 - **What is asked about is cleaned first:** the first artist a credit names, and the title without the words video sites add ("(Official Audio)", "- Topic"). A song whose words say too little ("Unknown artist", a phone's recording, a file name) is never asked about.
-- **The address never shows.** No answer, message or log line carries it; a test reads every answer the window sees for it, and `crates/stashd/tests/no_private_addresses.rs` fails if an address of that kind or a key is put in the repository.
+- **The address never shows.** No answer, message or log line carries it; a test reads every answer the window sees for it, and `crates/stashd/tests/no_private_addresses.rs` fails if an address of that kind or a key is put in any file a commit could take (what git tracks, and new files it does not ignore), in UTF-8 or UTF-16, however a settings file writes the key (`api_key=…`, `"apiKey": "…"`, or a key's 32 hex digits beside its name).
 
 ### How often
 
 - At most 2 questions in a station's life: the song's, then the artist's when the song named fewer than 4 other artists, or when its artists are used up.
-- Each answer is kept in the library (schema 20, `similar_cache`) and is fresh for 14 days, so each question is asked once in that time. Answers older than 60 days, and the oldest past 5,000, go when the core starts. "Not found" is kept too.
+- Each answer is kept in the library (schema 20, `similar_cache`) and is fresh for 14 days, so each question is asked once in that time. Answers older than 60 days, and the oldest past 5,000, go when the core starts and once a day while it runs. "Not found" is kept too.
 - At most 100 questions a day; past that, stations pick from the library until the next day.
 - After trouble, Last.fm is left alone: as long as a 429 asks (else a minute), or a minute doubling to an hour while it cannot be reached. Meanwhile a kept answer of any age is used. A question that failed twice is not asked again in that run.
 - Never offline. Offline, kept answers are used, and only songs on this computer are picked.
@@ -1324,7 +1324,9 @@ A radio is a queue that grows by itself with songs like the one it starts from: 
   - songs heard in the last 3 hours;
   - anything already in the queue or added by a station earlier in the run.
 - **It grows** when 3 or fewer songs are left after the one playing, while repeat is off.
-- **It ends** when another queue starts, when Stop is pressed (its songs still to come are taken out, songs added by hand stay, and autoplay does not act on the song playing), or when it has nothing more. A batch found for a queue that was replaced meanwhile is dropped.
+- **By artist, the library takes the artist Last.fm named:** songs credited to exactly that name first (so "Earth" is not "Earth, Wind & Fire"), else songs whose first credit is that artist. One copy of a song: a remaster and the original are the same song.
+- **It ends** when another queue starts, when Stop is pressed (its songs still to come are taken out, songs added by hand stay, and autoplay does not act on the song playing), or when it has nothing more. A batch found for a queue that was replaced meanwhile is dropped, and so is one found for a station that was stopped (or similar music switched off) while it was being found: nothing of it is added or kept.
+- **A song Last.fm does not know** goes on to its artist at once. Offline mid-station, only songs on this computer are added. Songs found after the queue ran out play on from where it ended, and a radio started from the song the queue ended on starts from that song.
 - **When Last.fm cannot help** with a station's first songs (not reached, busy, offline, nothing like it, or asked enough today), the library picks them as autoplay always did, from the seed and its artist. Up next says so: "Songs like Teardrop from your library", with why on hover.
 
 ### The window
@@ -1332,7 +1334,8 @@ A radio is a queue that grows by itself with songs like the one it starts from: 
 - **Start radio in a song's menu**: for the song playing, it plays on and what follows is replaced; any other song plays now. Also **a radio button on the artist page**, and **Ctrl+K** ("Start radio from the song playing", "Stop radio").
 - **Up next keeps "Playing from Teardrop radio"** and draws one line above the station's songs still to come: "Similar to Teardrop · from Last.fm · Stop" (autoplay: "Autoplay · like Teardrop · from Last.fm · Stop"; from the library: "Autoplay · from your library · Stop").
   - "Last.fm" opens the seed's page on Last.fm. The core builds the link from the seed, never from the request, and the shell opens only `https://www.last.fm/` links. The window is granted nothing of the opener.
-  - While its first songs are found: "Finding songs like Teardrop…".
+  - While its first songs are found: "Finding songs like Teardrop…". When it found none: "No songs like Teardrop were found", with why when the core knows.
+  - "Radio stopped" is said only once the core stopped it.
 - **Settings › Sound › Similar music from Last.fm** (on by default; shown only in a build that has it) says what is sent. Off, nothing is sent, there is no radio, autoplay keeps to the library, and what was kept is deleted. The Autoplay and Offline lines say what changes.
 
 ### Checked
@@ -1343,7 +1346,7 @@ A radio is a queue that grows by itself with songs like the one it starts from: 
   - the library's picks by artist and the kept answers ageing out (`tests/lists.rs`);
   - `apart`;
   - a radio from the song playing keeps it playing as the first of a new queue, and songs are added only to the queue they were found for (`tests/player.rs`).
-- **API tests** (`crates/stashd/tests/radio.rs`, 10, against a stand-in for the proxy and the demo add-on):
+- **API tests** (`crates/stashd/tests/radio.rs`, 14, against a stand-in for the proxy and the demo add-on):
   - one question for a song radio, as the phones ask it;
   - library songs as library rows, the add-on's for artists the library lacks, one search per artist;
   - growing to at most 2 questions;
@@ -1356,8 +1359,13 @@ A radio is a queue that grows by itself with songs like the one it starts from: 
   - a new queue drops a batch that came late;
   - switched off, the kept answers are deleted;
   - without the proxy there is no radio;
-  - an artist radio.
-  - Ran 4 times in a row with no failure.
+  - an artist radio;
+  - Stop, and switching similar music off, while songs are being found: nothing is added or kept;
+  - a song Last.fm does not know goes on to its artist;
+  - songs found after the queue ran out play on;
+  - going offline mid-station adds only songs here.
+  - Ran 4 times in a row with no failure (the first 10; the last 4 came with the review's fixes).
+- **A review of the radio** (five areas, each finding checked by a second reader) found 27 things; all are fixed. Settings now says how long answers are used and kept. The library's picks by artist have two more tests in `tests/lists.rs`: the artist named and one copy of a song, and offline or with nothing to stream, only songs here.
 - **On the built page served by the core** (debug stashd, silent, volume 0), light and dark, against the stand-in:
   - Start radio on Teardrop played it as "Playing from Teardrop radio" with 10 songs after it: Glory Box first, Massive Attack between the others, Zero 7 and Morcheeba from the add-on.
   - The line read "Similar to Teardrop · from Last.fm · Stop". Last.fm opened `https://www.last.fm/music/Massive+Attack/_/Teardrop`, refused in the browser for the check. Stop said "Radio stopped" and left nothing after the song.

@@ -107,8 +107,9 @@ export interface PlayerAPI {
 	startRadio(from: LibraryItem | { artist: string }): Promise<void>;
 	/** Whether a radio can start from the song (a library row or an add-on's track). */
 	canRadio(item: LibraryItem): boolean;
-	/** Stops the station growing the queue: its songs still to come are taken out. */
-	stopRadio(): Promise<void>;
+	/** Stops the station growing the queue: its songs still to come are taken out. True once stopped; a refusal is said,
+	 * and answers false. */
+	stopRadio(): Promise<boolean>;
 	/** Opens the station's seed on Last.fm. */
 	openLastfm(): Promise<void>;
 }

@@ -344,7 +344,7 @@
 					<div class="set-row" id="similar">
 						<div class="set-lab">
 							<span class="set-name" id="lfm-l">Similar music from Last.fm</span>
-							<span class="set-sub">For radio and autoplay, Stash asks Last.fm which artists and songs are like the one you start from. Only that song’s title and artist, or the artist’s name, are sent, through Stash’s own server (which sees this computer’s internet address, as any server does) and on to Last.fm; nothing about your library, what you play or your accounts. Answers are kept on this computer for two weeks, so each is asked once. Off, nothing is sent, there is no radio, autoplay keeps to your library, and what was kept is deleted.</span>
+							<span class="set-sub">For radio and autoplay, Stash asks Last.fm which artists and songs are like the one you start from. Only that song’s title and artist, or the artist’s name, are sent, through Stash’s own server (which sees this computer’s internet address, as any server does) and on to Last.fm; nothing about your library, what you play or your accounts. An answer is used for two weeks, so the same question is not asked again in that time, and is kept on this computer for up to two months (an older one is used while Last.fm cannot be reached). Off, nothing is sent, there is no radio, autoplay keeps to your library, and what was kept is deleted.</span>
 						</div>
 						<button type="button" class="sw" role="switch" aria-checked={R.on} aria-labelledby="lfm-l" disabled={similarBusy} onclick={() => void setSimilar(!R.on)}><i></i></button>
 					</div>
