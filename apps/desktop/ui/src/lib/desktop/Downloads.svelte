@@ -6,6 +6,7 @@
 	import * as core from '../core';
 	import Icon from '../ui/Icon.svelte';
 	import TrackRow from '../ui/TrackRow.svelte';
+	import type { PickList } from '../ui/pick.svelte';
 	import { songs } from '../ui/format';
 	import { ui } from '../ui/state.svelte';
 	import { trouble } from './folders.svelte';
@@ -94,6 +95,14 @@
 		}
 	}
 	const extra = (r: core.DownloadRow) => ({ download: r.state === 'saved' ? ('saved' as const) : ('waiting' as const) });
+	/** Songs picked here can be taken off this computer (or off the list waiting) together. */
+	const pick: PickList = {
+		scope: 'downloads',
+		count: () => items.length,
+		between: (a, b) => items.slice(a, b + 1),
+		from: 'Downloads',
+		extra: (places) => (rows[places[0]] ? extra(rows[places[0]]) : {})
+	};
 </script>
 
 {#if d}
@@ -114,7 +123,7 @@
 		{/if}
 		<div class="trk-list">
 			{#each rows as r, i (r.id)}
-				<TrackRow item={items[i]} num={i + 1} album tag={status(r)} onplay={() => play(i)} extra={extra(r)} />
+				<TrackRow item={items[i]} num={i + 1} album tag={status(r)} {pick} at={i} onplay={() => play(i)} extra={extra(r)} />
 			{/each}
 		</div>
 		{#if total > rows.length && rows.length >= shown}

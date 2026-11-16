@@ -9,6 +9,7 @@
 	import Cover from '../../../../lib/ui/Cover.svelte';
 	import Icon from '../../../../lib/ui/Icon.svelte';
 	import TrackRow from '../../../../lib/ui/TrackRow.svelte';
+	import type { PickList } from '../../../../lib/ui/pick.svelte';
 	import { songs, totalLength } from '../../../../lib/ui/format';
 	import { ui } from '../../../../lib/ui/state.svelte';
 
@@ -49,6 +50,16 @@
 		return links.length > 0 && links.every((l) => l && l === links[0]) ? artistLink(items[0]!) : null;
 	});
 	const play = (i = 0) => void player.playItems(items, i, { from: album?.title });
+	const pick: PickList = {
+		get scope() {
+			return `album:${sid}:${id}`;
+		},
+		count: () => items.length,
+		between: (a, b) => items.slice(a, b + 1),
+		get from() {
+			return album?.title;
+		}
+	};
 	const upNext = () => {
 		if (!items.length) return;
 		player.enqueue(items);
@@ -98,7 +109,7 @@
 		{#if items.length}
 			<div class="trk-list">
 				{#each items as it, i (it.key + i)}
-					<TrackRow item={it} num={i + 1} cover={false} onplay={() => play(i)} />
+					<TrackRow item={it} num={i + 1} cover={false} {pick} at={i} onplay={() => play(i)} />
 				{/each}
 			</div>
 		{:else}

@@ -10,6 +10,7 @@
 	import Cover from '../../../../lib/ui/Cover.svelte';
 	import Icon from '../../../../lib/ui/Icon.svelte';
 	import TrackRow from '../../../../lib/ui/TrackRow.svelte';
+	import type { PickList } from '../../../../lib/ui/pick.svelte';
 	import { songs } from '../../../../lib/ui/format';
 
 	const sid = $derived(page.params.source ?? '');
@@ -44,6 +45,16 @@
 	// The artist's songs are rows of the library: each carries its row (`refs.lib`) and the library's own album and artist pages.
 	const items = $derived<LibraryItem[]>(artist ? artist.topTracks.map((t) => toLibraryItem(t, { [LIB_REF]: t.id }, Date.now(), sid)) : []);
 	const play = (i = 0) => void player.playItems(items, i, { from: artist?.name });
+	const pick: PickList = {
+		get scope() {
+			return `artist:${sid}:${id}`;
+		},
+		count: () => items.length,
+		between: (a, b) => items.slice(a, b + 1),
+		get from() {
+			return artist?.name;
+		}
+	};
 	const albumSub = (a: Artist['albums'][number]) => [a.year, a.trackCount !== undefined ? songs(a.trackCount) : ''].filter(Boolean).join(' · ');
 </script>
 
@@ -67,7 +78,7 @@
 			<h2 class="vh2">Songs</h2>
 			<div class="trk-list">
 				{#each items as it, i (it.key + i)}
-					<TrackRow item={it} num={i + 1} onplay={() => play(i)} />
+					<TrackRow item={it} num={i + 1} {pick} at={i} onplay={() => play(i)} />
 				{/each}
 			</div>
 		{/if}

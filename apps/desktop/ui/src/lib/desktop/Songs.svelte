@@ -4,7 +4,9 @@
      no connection ("On this computer"), and says how many there are in `hereTotal`.
      This is also the list the window measures itself on (`?bench`, see bench.ts). -->
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
+	import type { LibraryItem } from '../api';
+	import { P, type PickList } from '../ui/pick.svelte';
 	import { itemOfRow, player } from '../app';
 	import { measure, type Drawn } from '../bench';
 	import * as core from '../core';
@@ -45,12 +47,45 @@
 	});
 	let failure = $state<string | null>(null);
 
+	/** Songs picked in the list are read from the core, page by page, so a pick can run past the rows on screen. */
+	const pick: PickList = {
+		get scope() {
+			return here ? 'songs:here' : 'songs';
+		},
+		count: () => count ?? 0,
+		from: FROM,
+		async between(a, b) {
+			const out: LibraryItem[] = [];
+			for (let at = a; at <= b; at += 500) {
+				const want = Math.min(500, b - at + 1);
+				const rows = await (here ? core.tracksHereAt(at, want) : core.tracksAt(at, want));
+				out.push(...rows.map(itemOfRow));
+				if (rows.length < want) break;
+			}
+			return out;
+		}
+	};
+	// Another list shows (on this computer, or all): the songs picked in the other are let go.
+	$effect(() => {
+		void here;
+		untrack(() => {
+			P.forget('songs');
+			P.forget('songs:here');
+		});
+	});
+
 	// ---- the filter: what the core finds for the text, in place of the list
 
 	let results = $state.raw<core.TrackRow[]>([]);
 	/** The query whose results are on screen (null: the whole library shows). */
 	let resultsFor = $state<string | null>(null);
 	const resultItems = $derived(results.map(itemOfRow));
+	const findPick: PickList = { scope: 'songs:find', count: () => resultItems.length, between: (a, b) => resultItems.slice(a, b + 1), from: FROM };
+	// New results: the songs picked in the old ones are let go.
+	$effect(() => {
+		void resultItems;
+		untrack(() => P.forget('songs:find'));
+	});
 	$effect(() => {
 		const text = query;
 		if (text.trim() === '') {
@@ -111,7 +146,7 @@
 
 {#snippet songRow(track: core.TrackRow | undefined, index: number)}
 	{#if track}
-		<TrackRow item={itemOfRow(track)} album onplay={() => void player.playLibrary(index, { from: FROM, here })} />
+		<TrackRow item={itemOfRow(track)} album {pick} at={index} onplay={() => void player.playLibrary(index, { from: FROM, here })} />
 	{:else}
 		<div class="trk-row has-cv has-al" aria-hidden="true"><div class="trk-main"><span class="cv trk-cv"></span><span class="tr-t"><b class="ph"></b></span></div></div>
 	{/if}
@@ -126,7 +161,7 @@
 		{:else}
 			<div class="trk-list">
 				{#each resultItems as it, i (it.refs.lib)}
-					<TrackRow item={it} album onplay={() => void player.playItems(resultItems, i, { from: FROM })} />
+					<TrackRow item={it} album pick={findPick} at={i} onplay={() => void player.playItems(resultItems, i, { from: FROM })} />
 				{/each}
 			</div>
 		{/if}

@@ -1,11 +1,12 @@
 <!-- The song menu: Play next, Add to Up next, Add to playlist, Go to artist / album (a song of the library), Like. A real menu (arrow keys, Escape, focus returns).
-     For a group (a Home album card) the queue, playlist and like entries act on every song in it. -->
+     For a group (a Home album card, or the songs picked in a list) the queue, playlist and like entries act on every song in it. -->
 <script lang="ts">
 	import { tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { library, notPlayed, player, saveSongs, unsaveSongs } from '../app';
 	import { NF } from '../desktop/unfound.svelte';
-	import { LIB_REF } from '../identity';
+	import { LIB_REF, sameCopy } from '../identity';
+	import { P } from './pick.svelte';
 	import { albumHref, albumLink, artistHref, artistLink } from '../identity';
 	import Icon from './Icon.svelte';
 	import type { IconName } from './icons';
@@ -21,6 +22,10 @@
 	/** What the queue, playlist and like entries act on: the group's songs, else the one song. */
 	const targets = $derived(m ? (m.group?.length ? m.group : [m.item]) : []);
 	const isGroup = $derived(!!m?.group?.length);
+	/** The group is the songs the listener picked in a list (not an album): no one artist or album to go to. */
+	const picked = $derived(isGroup && !!m?.picks);
+	/** Every picked song is one the listener chose not to play (by itself). */
+	const allBlocked = $derived(picked && targets.every((t) => L.blockedOf(t) === 'song'));
 	const allLiked = $derived(targets.length > 0 && targets.every((t) => L.isLiked(t)));
 	/** A song no add-on could find: to Library › Not found, opened on it (back on the list if it was set aside). */
 	function findIt(row: string) {
@@ -34,17 +39,29 @@
 
 	$effect(() => {
 		if (!m) return;
-		view = 'main';
+		view = m.view ?? 'main';
 		naming = false;
 		name = '';
 		pos = { x: m.x, y: m.y };
+		const up = !!m.up;
 		tick().then(() => {
 			if (!el) return;
 			const r = el.getBoundingClientRect();
 			const x = Math.max(8, Math.min(pos.x, window.innerWidth - r.width - 8));
-			const y = Math.max(8, Math.min(pos.y, window.innerHeight - r.height - 8));
+			const y = Math.max(8, Math.min(up ? pos.y - r.height : pos.y, window.innerHeight - r.height - 8));
 			pos = { x, y };
 			el.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+		});
+	});
+
+	// The other view (the playlists, or back) can be taller: it stays inside the window.
+	$effect(() => {
+		void view;
+		void naming;
+		tick().then(() => {
+			if (!el) return;
+			const h = el.getBoundingClientRect().height;
+			if (pos.y + h > window.innerHeight - 8) pos = { ...pos, y: Math.max(8, window.innerHeight - h - 8) };
 		});
 	});
 
@@ -117,6 +134,43 @@
 		close();
 	}
 
+	/** Chooses not to play each picked song (by its words), or to play them again; said with a way back. Songs chosen
+	 * not to be played before are left as they were. */
+	function dontPlayPicked(on: boolean) {
+		const songs = on ? targets.filter((t) => !L.blockedOf(t)) : targets;
+		const each = async (to: boolean) => {
+			for (const t of songs) await notPlayed('song', t, to);
+		};
+		void each(on).then(
+			() =>
+				on
+					? ui.toast(`Stash won’t play ${songs.length === 1 ? 'that song' : `these ${songs.length} songs`} on its own`, { label: 'Undo', run: () => void each(false) })
+					: ui.toast(`${songs.length === 1 ? 'That song plays' : `These ${songs.length} songs play`} again`),
+			() => {}
+		);
+		close();
+	}
+
+	/** Takes the picked songs out of the playlist, the last first so the places before stay where they are. Only while the
+	 * playlist still has them at those places: it may have changed since they were picked. */
+	function removePicked() {
+		if (!m?.playlistId || !m.picks) return;
+		const id = m.playlistId;
+		const picks = m.picks;
+		const songs = targets;
+		const now = L.playlists.find((p) => p.id === id)?.items ?? [];
+		P.clear();
+		if (!picks.every((place, i) => now[place] && songs[i] && sameCopy(now[place], songs[i]))) {
+			ui.toast('That playlist changed after the songs were picked. Pick them again.');
+			close();
+			return;
+		}
+		const last = [...picks].sort((a, b) => b - a);
+		change(async () => {
+			for (const place of last) await library.removeFromPlaylist(id, place);
+		}, `Removed ${picks.length} songs from this playlist`);
+	}
+
 	function createAndAdd() {
 		if (!m) return;
 		const songs = targets;
@@ -136,7 +190,7 @@
 
 {#if m}
 	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-	<div class="menu" role="menu" aria-label={isGroup ? 'Album options' : 'Song options'} tabindex="-1" bind:this={el} style="left:{pos.x}px;top:{pos.y}px" onkeydown={onkey}>
+	<div class="menu" role="menu" aria-label={picked ? `Options for ${targets.length} songs` : isGroup ? 'Album options' : 'Song options'} tabindex="-1" bind:this={el} style="left:{pos.x}px;top:{pos.y}px" onkeydown={onkey}>
 		{#if view === 'main'}
 			{@render entry('queue_play_next', 'Play next', () => run(() => player.enqueue(targets, { next: true }), 'Playing next'))}
 			{@render entry('queue_music', 'Add to Up next', () => run(() => player.enqueue(targets), 'Added to Up next'))}
@@ -144,12 +198,14 @@
 				view = 'playlists';
 				tick().then(() => el?.querySelector<HTMLElement>('[role="menuitem"]')?.focus());
 			})}
-			{#if artistLink(m.item)}
+			{#if picked}
+				<!-- Songs picked in a list: no one artist or album. -->
+			{:else if artistLink(m.item)}
 				{@render entry('person', 'Go to artist', () => run(() => go(artistHref(artistLink(m.item)!))))}
 			{:else}
 				{@render entry('search', `More from ${m.item.artist}`, () => run(() => go(`/search?q=${encodeURIComponent(m.item.artist)}`)))}
 			{/if}
-			{#if albumLink(m.item) && m.item.album}
+			{#if !picked && albumLink(m.item) && m.item.album}
 				{@render entry('album', 'Go to album', () => run(() => go(albumHref(albumLink(m.item)!))))}
 			{/if}
 			{#if isGroup}
@@ -158,14 +214,30 @@
 				{@render entry(L.isLiked(m.item) ? 'favorite' : 'favorite_border', L.isLiked(m.item) ? 'Remove from Likes' : 'Like', () => run(() => L.toggleLike(m.item)))}
 			{/if}
 			{#if m.download === 'saved'}
-				{@render entry('delete', 'Remove from this computer', () => change(() => unsaveSongs(targets), 'Removed from this computer'))}
+				{@render entry('delete', 'Remove from this computer', () => {
+					if (picked) P.clear();
+					change(() => unsaveSongs(targets), 'Removed from this computer');
+				})}
 			{:else if m.download === 'waiting'}
-				{@render entry('close', 'Don’t save', () => change(() => unsaveSongs(targets), 'Taken off Downloads'))}
+				{@render entry('close', 'Don’t save', () => {
+					if (picked) P.clear();
+					change(() => unsaveSongs(targets), 'Taken off Downloads');
+				})}
 			{:else}
 				{@render entry('download', isGroup ? `Download all ${targets.length}` : 'Download', () => {
 					void saveSongs(targets).then((said) => ui.toast(said), () => {});
 					close();
 				})}
+			{/if}
+			{#if picked}
+				{#if allBlocked}
+					{@render entry('block', 'Play these songs again', () => dontPlayPicked(false))}
+				{:else}
+					{@render entry('block', `Don’t play these ${targets.length} songs`, () => dontPlayPicked(true))}
+				{/if}
+				{#if m.playlistId !== undefined}
+					{@render entry('delete', `Remove ${targets.length} from this playlist`, removePicked)}
+				{/if}
 			{/if}
 			{#if !isGroup}
 				{@const how = L.blockedOf(m.item)}

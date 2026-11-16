@@ -715,3 +715,42 @@ Checked:
 - An add-on's track found in a search is not marked until it is played or kept (its words are checked when it would be queued).
 - Smart playlists still list blocked songs (dimmed); playing them leaves those out.
 - The way back out (the library file the phone and web player read) does not carry the blocks yet.
+
+## 27. Picking songs
+
+- **Ctrl+click** (Cmd+click on a Mac) picks a song in a list, or lets it go.
+- **Shift+click** picks every song from the last one Ctrl picked; Ctrl+Shift+click adds them to the songs picked already.
+- **Ctrl+A** picks the whole list: the one with the focus, the one songs are picked in, or the page's first.
+- **Ctrl+Space and Shift+Space** on a row's button do the same from the keyboard.
+- **Escape lets them go**, and so does going to another page. A list whose songs change (a playlist edited, the liked songs, History, the filter's results) lets its picks go, since their places changed too.
+- **A plain click still plays the song**, as before, and lets the picks go.
+- **Every song list can pick:** Library › Songs, Liked, History and Downloads, playlists, albums, an artist's songs, and search's songs.
+  - Library › Songs reads picked songs from the core page by page, so Shift+click and Ctrl+A run past the rows drawn on screen.
+  - A pick is at most 5,000 songs.
+- **While songs are picked**, a bar above the player says how many, with Play, Add to playlist, the menu for all of them, and Clear. Toasts rise above it.
+- **The menu of a picked song acts on all of them:**
+  - Play next, Add to Up next, Add to playlist;
+  - Like all, Download all (or Remove from this computer on Library › Downloads);
+  - "Don't play these songs", or "Play these songs again" when every one is chosen out already.
+  - In the listener's own playlist, "Remove N from this playlist" takes them out together. It does so only while the playlist still has those songs at those places; otherwise it says the playlist changed.
+- Menus opened from the bar open upward. A menu that changes size stays inside the window, and menus sit above toasts.
+
+### Checked
+
+On the built page served by the core: a new scratch library of 12 made-up files, scanned. Volume 0 before anything played.
+
+- **Picking in Library › Songs:**
+  - Ctrl+click on row 0 gave "1 selected".
+  - Shift+click on row 3 picked rows 0–3.
+  - Ctrl+click on row 2 let it go, leaving 0, 1 and 3.
+  - Ctrl+Shift+click on row 6 added 2–6, giving 7.
+  - Nothing played.
+- **The menu of a picked row** was "Options for 7 songs": Play next, Add to Up next, Add to playlist, Like all 7, Download all 7, Don't play these 7 songs. There was no Go to artist or album.
+  - Add to playlist › New playlist "Picked" made the playlist with those 7 songs in the list's order.
+- **Escape** took the bar away.
+- **Ctrl+A** picked all 12 (read from the core). The bar's Play queued 12.
+- **A plain click on row 5** with 11 picked took the bar away and played row 5.
+- **In the playlist:** two Ctrl+clicked rows offered "Remove 2 from this playlist". It left the other 5 in order, and said "Removed 2 songs from this playlist".
+- **The bar's Add to playlist** opened on the playlists, above the bar.
+- **Going to Settings** let the picks go.
+- No errors in the page, light and dark.

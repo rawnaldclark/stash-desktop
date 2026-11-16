@@ -8,6 +8,7 @@
 	import Icon from '../../lib/ui/Icon.svelte';
 	import Cover from '../../lib/ui/Cover.svelte';
 	import TrackRow from '../../lib/ui/TrackRow.svelte';
+	import type { PickList } from '../../lib/ui/pick.svelte';
 	import { shelf } from '../../lib/ui/shelf';
 	import { openSongMenu, songMenu } from '../../lib/ui/song-menu';
 	import { clearRecent, loadRecent, recentId, removeRecent, saveRecent, saveRecentSong, L, ui, type RecentEntry } from '../../lib/ui/state.svelte';
@@ -77,6 +78,18 @@
 		saveRecentSong(it);
 		void player.playItems([it], 0, { from: 'Search' });
 	};
+	/** Songs can be picked among the top songs, and among each add-on's. */
+	const topPick: PickList = { scope: 'search:top', count: () => topRest.length, between: (a, b) => topRest.slice(a, b + 1), from: 'Search' };
+	const sectionPicks = new Map<string, PickList>();
+	function sectionPick(sourceId: string): PickList {
+		let list = sectionPicks.get(sourceId);
+		if (!list) {
+			const items = () => sections.find((s) => s.sourceId === sourceId)?.items ?? [];
+			list = { scope: `search:${sourceId}`, count: () => items().length, between: (a, b) => items().slice(a, b + 1), from: 'Search' };
+			sectionPicks.set(sourceId, list);
+		}
+		return list;
+	}
 	const playRecent = (e: Extract<RecentEntry, { kind: 'song' }>) => void player.playItems([e.item], 0, { from: 'Search' });
 	const forget = (e: RecentEntry) => {
 		removeRecent(e);
@@ -166,7 +179,7 @@
 							<h2 class="vh2">Songs</h2>
 							<div class="sr-songs">
 								{#each topRest as it, i (it.key)}
-									<TrackRow item={it} onplay={() => play(topItems, i + songStart)} />
+									<TrackRow item={it} pick={topPick} at={i} onplay={() => play(topItems, i + songStart)} />
 								{/each}
 							</div>
 						</div>
@@ -198,7 +211,7 @@
 					<h2 class="vh2 sec-h">{sec.name}</h2>
 					<div class="sec-list">
 						{#each open[sec.sourceId] ? sec.items : sec.items.slice(0, SHOW) as it, i (it.key + i)}
-							<TrackRow item={it} album tag={sec.tags?.[it.refs[sec.sourceId] ?? '']} onplay={() => play(sec.items, i)} />
+							<TrackRow item={it} album tag={sec.tags?.[it.refs[sec.sourceId] ?? '']} pick={sectionPick(sec.sourceId)} at={i} onplay={() => play(sec.items, i)} />
 						{/each}
 					</div>
 					{#if sec.items.length > SHOW}

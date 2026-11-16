@@ -1,5 +1,7 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { P, type PickList } from '../../lib/ui/pick.svelte';
 	import { page } from '$app/state';
 	import { library, player } from '../../lib/app';
 	import DownloadSwitch from '../../lib/desktop/DownloadSwitch.svelte';
@@ -95,6 +97,18 @@
 	});
 	const historyItems = $derived(history.map((h) => h.item));
 
+	/** Songs can be picked in the liked songs and in History; when a list changes, so do the places, and its picks go. */
+	const likesPick: PickList = { scope: 'liked', count: () => likes.length, between: (a, b) => likes.slice(a, b + 1), from: 'Your likes' };
+	const historyPick: PickList = { scope: 'history', count: () => historyItems.length, between: (a, b) => historyItems.slice(a, b + 1), from: 'History' };
+	$effect(() => {
+		void likes;
+		untrack(() => P.forget('liked'));
+	});
+	$effect(() => {
+		void historyItems;
+		untrack(() => P.forget('history'));
+	});
+
 	const play = (items: LibraryItem[], i = 0, from = 'Your likes') => void player.playItems(items, i, { from });
 	async function create() {
 		try {
@@ -152,7 +166,7 @@
 			</div>
 			<div class="trk-list">
 				{#each likes as it, i (it.refs.lib ?? it.key)}
-					<TrackRow item={it} num={i + 1} album onplay={() => play(likes, i)} />
+					<TrackRow item={it} num={i + 1} album pick={likesPick} at={i} onplay={() => play(likes, i)} />
 				{/each}
 			</div>
 			{#if !likes.length}<p class="s-hint">Nothing in your likes matches “{q.trim()}”.</p>{/if}
@@ -191,7 +205,7 @@
 			<p class="caps hist-day">{g.day}</p>
 			<div class="trk-list">
 				{#each g.entries as h, i (h.playedAt + h.item.key + i)}
-					<TrackRow item={h.item} album onplay={() => play(historyItems, historyItems.indexOf(h.item), 'History')} />
+					<TrackRow item={h.item} album pick={historyPick} at={historyItems.indexOf(h.item)} onplay={() => play(historyItems, historyItems.indexOf(h.item), 'History')} />
 				{/each}
 			</div>
 		{/each}

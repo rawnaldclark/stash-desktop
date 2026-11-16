@@ -7,6 +7,8 @@
 	import Icon from '../../../lib/ui/Icon.svelte';
 	import Tile from '../../../lib/ui/Tile.svelte';
 	import TrackRow from '../../../lib/ui/TrackRow.svelte';
+	import { untrack } from 'svelte';
+	import { P, type PickList } from '../../../lib/ui/pick.svelte';
 	import { reorder } from '../../../lib/ui/reorder';
 	import { L, ui } from '../../../lib/ui/state.svelte';
 	import { songs, totalLength } from '../../../lib/ui/format';
@@ -22,6 +24,27 @@
 	let confirmDelete = $state(false);
 
 	const play = (items: LibraryItem[], i = 0) => void player.playItems(items, i, { from: pl?.name });
+
+	/** Songs picked in the playlist; the listener's own can then be taken out of it together. */
+	const pick: PickList = {
+		get scope() {
+			return `playlist:${pl?.id ?? ''}`;
+		},
+		count: () => pl?.items.length ?? 0,
+		between: (a, b) => (pl?.items ?? []).slice(a, b + 1),
+		get from() {
+			return pl?.name;
+		},
+		extra: (places) =>
+			pl && !followed && !smart ? { playlistId: pl.id, playlistLength: pl.items.length, ...(places.length === 1 ? { playlistIndex: places[0] } : {}) } : {}
+	};
+	// The playlist's songs changed (one added, taken out, moved): the places did too, and the picks go. A rename or the
+	// keep switch leaves them.
+	const songsNow = $derived(pl?.items);
+	$effect(() => {
+		void songsNow;
+		untrack(() => P.forget(pick.scope));
+	});
 	async function rename() {
 		if (pl && draft.trim()) await library.renamePlaylist(pl.id, draft);
 		editing = false;
@@ -73,13 +96,13 @@
 			{#if followed || smart}
 				<div class="trk-list">
 					{#each pl.items as it, i (it.key + i)}
-						<TrackRow item={it} num={i + 1} album onplay={() => play(pl.items, i)} />
+						<TrackRow item={it} num={i + 1} album {pick} at={i} onplay={() => play(pl.items, i)} />
 					{/each}
 				</div>
 			{:else}
 				<div class="trk-list" use:reorder={{ row: '.trk-row', handle: '.rd-h', onmove: (a, b) => void library.moveInPlaylist(pl.id, a, b) }}>
 					{#each pl.items as it, i (it.key + i)}
-						<TrackRow item={it} num={i + 1} album handle onplay={() => play(pl.items, i)} extra={{ playlistId: pl.id, playlistIndex: i, playlistLength: pl.items.length }} />
+						<TrackRow item={it} num={i + 1} album handle {pick} at={i} onplay={() => play(pl.items, i)} extra={{ playlistId: pl.id, playlistIndex: i, playlistLength: pl.items.length }} />
 					{/each}
 				</div>
 			{/if}
