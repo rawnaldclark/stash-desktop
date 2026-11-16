@@ -14,6 +14,7 @@
 	import Panel from '../lib/ui/Panel.svelte';
 	import PlayerBar from '../lib/ui/PlayerBar.svelte';
 	import Sidebar from '../lib/ui/Sidebar.svelte';
+	import CommandPalette from '../lib/ui/CommandPalette.svelte';
 	import Toast from '../lib/ui/Toast.svelte';
 	import Wash from '../lib/ui/Wash.svelte';
 	import { coverOf } from '../lib/ui/format';
@@ -159,6 +160,12 @@
 	}
 
 	function onkey(e: KeyboardEvent) {
+		// Ctrl+K (Cmd+K on a Mac): the command palette, from anywhere.
+		if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'k' && !mini) {
+			e.preventDefault();
+			ui.palette = !ui.palette;
+			return;
+		}
 		if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
 		if (e.key === '/' && !typing(e.target)) {
 			e.preventDefault();
@@ -205,5 +212,6 @@
 	</div>
 	{#if ContextMenu}<ContextMenu />{/if}
 	<Toast />
+	{#if ui.palette}<CommandPalette />{/if}
 </div>
 {/if}

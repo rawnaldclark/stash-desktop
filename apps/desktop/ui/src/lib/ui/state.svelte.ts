@@ -116,6 +116,8 @@ class UIState {
 	w = $state(typeof window === 'undefined' ? 1200 : window.innerWidth);
 	h = $state(typeof window === 'undefined' ? 800 : window.innerHeight);
 	panelOpen = $state(true);
+	/** The command palette (Ctrl+K) is open. */
+	palette = $state(false);
 	/** The desktop has no lyrics yet, so the panel opens on Up next unless the listener chose Lyrics. */
 	panelTab = $state<'lyrics' | 'next'>(LS.get('stash.panelTab') === 'lyrics' ? 'lyrics' : 'next');
 	/** On the Now playing route (the big lyrics). */
