@@ -37,13 +37,10 @@ export function eqStatus(eq: CoreEq): string | null {
 	return eq.softer_db >= 0.05 ? `Stash plays it ${eq.softer_db.toFixed(1)} dB softer to leave room for the boosts. ${changed}` : changed;
 }
 
-/** Why the equalizer was turned off by itself, in a sentence. A correction that could not be read again is said whole by the
- * core ("Your correction “…” could not be read again: …"); anything else is the bare reason the engine could not use it,
- * which never starts with "Your" (`CoreEq.trouble`). */
+/** Why the equalizer was turned off by itself: the core's own sentence (`CoreEq.trouble`), ended with a full stop. */
 export function eqTrouble(trouble: string | null): string | null {
 	if (!trouble) return null;
-	if (trouble.startsWith('Your ')) return trouble;
-	return `Your equalizer could not be used and was turned off: ${/[.!?]$/.test(trouble) ? trouble : `${trouble}.`}`;
+	return /[.!?]$/.test(trouble) ? trouble : `${trouble}.`;
 }
 
 /** The command palette's entry: the switch, offered only when the output in use has something set. `on` is what a choice

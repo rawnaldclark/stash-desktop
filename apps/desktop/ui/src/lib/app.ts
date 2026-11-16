@@ -452,6 +452,7 @@ const player: PlayerAPI = {
 	},
 	setExclusive: (on) => void command(() => core.setExclusive(on)),
 	setReplaygain: (mode) => void command(() => core.setReplaygain(mode)),
+	refresh: () => void poll(),
 	setEq: (patch) => void command(() => core.setEq(patch)),
 	async eqFromFile() {
 		// The dialog is asked for outside the commands' order: while it is open, play and pause still go through.

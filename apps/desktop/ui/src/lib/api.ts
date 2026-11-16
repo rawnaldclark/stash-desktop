@@ -102,6 +102,8 @@ export interface PlayerAPI {
 	/** Takes the sound card for Stash alone, or gives it back. */
 	setExclusive(on: boolean): void;
 	setReplaygain(mode: Replaygain): void;
+	/** Reads the player's state again now (after something changed it outside these commands). */
+	refresh(): void;
 	/** Changes the equalizer of the output in use: one request for each tap. */
 	setEq(patch: EqPatch): void;
 	/** Asks for an equalizer file (the system's own dialog) and puts its correction on the output in use, switched on. False

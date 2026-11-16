@@ -84,9 +84,11 @@ describe('eqStatus (what the equalizer does to the sound)', () => {
 });
 
 describe('eqTrouble', () => {
-	it('why the engine could not use it', () => {
+	it('why the engine could not use it, as the core says it', () => {
 		expect(eqTrouble(null)).toBeNull();
-		expect(eqTrouble('the audio filter could not be set up')).toBe('Your equalizer could not be used and was turned off: the audio filter could not be set up.');
+		const said = 'Your equalizer could not be used and was turned off: Audio filter initialized failed!';
+		expect(eqTrouble(said)).toBe(said);
+		expect(eqTrouble('Your equalizer could not be used and was turned off: no such filter')).toBe('Your equalizer could not be used and was turned off: no such filter.');
 	});
 	it('a correction that could not be read again is said as the core says it', () => {
 		const said = 'Your correction “Test Phones” could not be read again: Line 4: no frequency (Fc … Hz).';

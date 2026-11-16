@@ -422,9 +422,8 @@ export type CoreEq = {
 	describe: string | null;
 	/** It was turned off while the sound card is open at its format: the card is opened again at the song's own at the next pause. */
 	reopen_at_pause: boolean;
-	/** Why it was turned off by itself, when it was. A kept correction that could not be read again is the core's whole sentence,
-	 * "Your correction “{name}” could not be read again: {reason}"; when the engine could not use it, it is the reason alone,
-	 * which never starts with "Your", and the window puts it in its own sentence. */
+	/** Why it was turned off by itself, when it was, in the core's whole sentence: "Your correction “{name}” could not be read
+	 * again: {reason}", or "Your equalizer could not be used and was turned off: {the engine's reason}". */
 	trouble: string | null;
 };
 

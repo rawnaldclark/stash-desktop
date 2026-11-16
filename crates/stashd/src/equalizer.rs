@@ -7,7 +7,9 @@
 //! "ParametricEQ.txt" files are that kind) and puts it on the output in use, switched on. Each answers the player's
 //! state. What each output keeps is kept in the library (`eq`), one write a change.
 
+use std::io::Read;
 use std::path::Path;
+use std::sync::Mutex;
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -19,6 +21,10 @@ use crate::serve::{Reply, State, body_json, player_reply, refuse, reply_json};
 
 /// Where what each output keeps is kept.
 pub(crate) const SETTING: &str = "eq";
+
+/// One change at a time: each reads the equalizer, changes it and keeps it, and two at once (the window and the mini
+/// player) would lose one.
+static CHANGING: Mutex<()> = Mutex::new(());
 
 pub(crate) fn route(state: &State, request: &mut Request, path: &str) -> Result<Option<Reply>> {
     if *request.method() != Method::Post {
@@ -95,6 +101,7 @@ fn change(state: &State, player: &Player, request: &mut Request) -> Result<Reply
     if on.is_none() && bass.is_none() && treble.is_none() && !remove {
         return Ok(refuse(400, "say on, bass, treble or correction"));
     }
+    let _one = CHANGING.lock().unwrap_or_else(|e| e.into_inner());
     let mut eq = player.eq();
     if let Some(bass) = bass {
         eq.bass = bass;
@@ -135,9 +142,14 @@ fn from_file(state: &State, player: &Player, request: &mut Request) -> Result<Re
     if meta.len() > eq::FILE_MOST {
         return Ok(refuse(400, "That file is too big to be an equalizer file"));
     }
-    let Ok(bytes) = std::fs::read(file) else {
+    // No more is read than an equalizer file may hold, whatever the file says of its size (a file still growing, or
+    // one of a kind that says 0).
+    let mut bytes = Vec::new();
+    let read = std::fs::File::open(file)
+        .and_then(|opened| opened.take(eq::FILE_MOST + 1).read_to_end(&mut bytes));
+    if read.is_err() {
         return Ok(refuse(400, "That file could not be read"));
-    };
+    }
     let name = file
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -147,6 +159,7 @@ fn from_file(state: &State, player: &Player, request: &mut Request) -> Result<Re
         Err(stash_core::Error::Refused(words)) => return Ok(refuse(400, &words)),
         Err(e) => return Err(e.into()),
     };
+    let _one = CHANGING.lock().unwrap_or_else(|e| e.into_inner());
     let mut eq = player.eq();
     eq.correction = Some(correction);
     eq.on = true;

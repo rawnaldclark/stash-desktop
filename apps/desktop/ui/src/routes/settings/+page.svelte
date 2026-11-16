@@ -39,6 +39,8 @@
 		outTrouble = null;
 		try {
 			outs = await core.setDevice(name);
+			// The equalizer shown is the new output's at once, not at the next look.
+			player.refresh();
 		} catch (e) {
 			outTrouble = trouble(e);
 			void readOuts();
@@ -60,16 +62,16 @@
 	/** A file that was not brought in, in the reader's words. */
 	let eqRefused = $state<string | null>(null);
 	let eqPicking = $state(false);
+	/** This page was left (a file's refusal is then said in a toast). */
+	let left = false;
 	/** One request for each tap. */
 	function setEq(patch: core.EqPatch) {
 		eqRefused = null;
 		player.setEq(patch);
 	}
-	/** A tone chosen while the switch is off turns it on. */
+	/** A tone. The core turns the switch on for Less or More; As is leaves the switch as it is. */
 	function tone(which: 'bass' | 'treble', t: core.Tilt) {
-		const patch: core.EqPatch = which === 'bass' ? { bass: t } : { treble: t };
-		if (!eq.on) patch.on = true;
-		setEq(patch);
+		setEq(which === 'bass' ? { bass: t } : { treble: t });
 	}
 	/** "Choose a file…": the system's own dialog, then the file is read and its correction put on. */
 	async function chooseEqFile() {
@@ -79,7 +81,9 @@
 		try {
 			await player.eqFromFile();
 		} catch (e) {
-			eqRefused = trouble(e);
+			// Said on this page; when the listener left it while the dialog was open, said where they are.
+			if (left) ui.toast(trouble(e));
+			else eqRefused = trouble(e);
 		} finally {
 			eqPicking = false;
 		}
@@ -311,6 +315,7 @@
 		};
 		window.addEventListener('focus', back);
 		return () => {
+			left = true;
 			window.removeEventListener('focus', back);
 			clearInterval(useTimer);
 		};
@@ -368,7 +373,7 @@
 				</div>
 				<div class="set-row set-col">
 					<div class="set-lab">
-						<span class="set-name">Correction</span>
+						<span class="set-name" id="corr-l">Correction</span>
 						{#if eq.correction}
 							<span class="set-sub eq-name">{correctionLine(eq.correction)}</span>
 							<span class="set-sub">{eq.correction.summary}</span>
@@ -376,7 +381,7 @@
 							<span class="set-sub">A file made for your headphones or speakers, in Equalizer APO’s format. For headphones: find yours on autoeq.app and download it for Equalizer APO.</span>
 						{/if}
 					</div>
-					<div class="chips">
+					<div class="chips" role="group" aria-labelledby="corr-l">
 						{#if eq.correction}
 							<button type="button" class="btn ghost" disabled={eqPicking} onclick={chooseEqFile}>Choose another…</button>
 							<button type="button" class="btn ghost" onclick={() => setEq({ correction: null })}>Remove</button>

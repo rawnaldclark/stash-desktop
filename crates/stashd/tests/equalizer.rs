@@ -245,6 +245,8 @@ fn what_is_refused_is_said_and_changes_nothing() {
             "A correction comes from a file; here it can only be removed (null)",
         ),
         (json!({}), "say on, bass, treble or correction"),
+        (json!([true]), "say on, bass, treble or correction"),
+        (json!("on"), "say on, bass, treble or correction"),
         (
             json!({ "loud": true }),
             "say on, bass, treble or correction",
@@ -274,6 +276,10 @@ fn what_is_refused_is_said_and_changes_nothing() {
     for (path, words) in [
         (String::new(), "Choose an equalizer file".to_string()),
         (gone, "That file was not found".to_string()),
+        (
+            dir.to_string_lossy().into_owned(),
+            "That file was not found".to_string(),
+        ),
         (
             graphic,
             "This file is a graphic EQ (GraphicEQ). Stash reads the parametric kind: on autoeq.app, download it for Equalizer APO as ParametricEQ.".to_string(),
