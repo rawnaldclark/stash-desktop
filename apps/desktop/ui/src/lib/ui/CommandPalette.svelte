@@ -8,6 +8,7 @@
 	import * as core from '../core';
 	import Icon from './Icon.svelte';
 	import { R } from '../desktop/radio.svelte';
+	import { eqEntry } from './equalizer';
 	import type { IconName } from './icons';
 	import { L, S, ui } from './state.svelte';
 
@@ -56,6 +57,8 @@
 		list.push({ id: 'shuffle', group: 'Commands', icon: 'shuffle', label: s.shuffle ? 'Shuffle off' : 'Shuffle on', run: () => player.setShuffle(!s.shuffle) });
 		const repeat = s.repeat === 'off' ? 'all' : s.repeat === 'all' ? 'one' : 'off';
 		list.push({ id: 'repeat', group: 'Commands', icon: repeat === 'one' ? 'repeat_one' : 'repeat', label: repeat === 'off' ? 'Repeat off' : repeat === 'all' ? 'Repeat the queue' : 'Repeat the song', run: () => player.setRepeat(repeat) });
+		const eq = eqEntry(s.eq);
+		if (eq) list.push({ id: 'eq', group: 'Commands', icon: 'equalizer', label: eq.label, sub: eq.sub, run: () => player.setEq({ on: eq.on }) });
 		if (canMini) list.push({ id: 'mini', group: 'Commands', icon: 'picture_in_picture_alt', label: 'Mini player', run: () => void core.showView('mini').catch(() => {}) });
 		list.push({ id: 'upnext', group: 'Commands', icon: 'queue_music', label: 'Up next', run: () => ui.setTab('next') });
 		list.push({ id: 'smart', group: 'Commands', icon: 'add', label: 'New smart playlist', run: () => (ui.smart = { id: null }) });

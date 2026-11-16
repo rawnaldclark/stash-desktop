@@ -11,6 +11,7 @@ const sig = (over: Partial<Signal> & { decoded?: Signal['decoded'] } = {}): Sign
 	resampled: false,
 	converted: false,
 	scaled: false,
+	equalized: false,
 	...over
 });
 
@@ -58,6 +59,17 @@ describe('verdict', () => {
 	it('nothing when there is no signal', () => {
 		expect(verdict(null)).toBeNull();
 	});
+	it('Lossless + your EQ: the equalizer changes the samples, so never Bit-perfect', () => {
+		expect(verdict(sig({ mode: 'exclusive', equalized: true }))).toEqual({ word: 'Lossless + your EQ', color: '#C4B5FD' });
+		expect(verdict(sig({ equalized: true }))?.word).toBe('Lossless + your EQ');
+		expect(verdict(sig({ mode: 'exclusive', scaled: true, equalized: true }))?.word).toBe('Lossless + your EQ');
+	});
+	it('the equalizer does not hide a lossy codec or a resampled track', () => {
+		expect(verdict(sig({ codec: 'mp3', equalized: true }))?.word).toBe('Lossy');
+		expect(verdict(sig({ codec: 'mp3', mode: 'exclusive', equalized: true }))?.word).toBe('Lossy');
+		expect(verdict(sig({ resampled: true, equalized: true }))?.word).toBe('Resampled');
+		expect(verdict(sig({ mode: 'exclusive', resampled: true, equalized: true }))?.word).toBe('Resampled');
+	});
 });
 
 describe('origin (an add-on’s stream)', () => {
@@ -80,5 +92,13 @@ describe('outputSentence', () => {
 			'Right now the sound card is open at 48 kHz, shared with other programs. The track is being changed on the way (44.1 kHz in).'
 		);
 		expect(outputSentence(null)).toBeNull();
+	});
+	it('names the equalizer when it is the only change', () => {
+		expect(outputSentence(sig({ mode: 'exclusive', equalized: true }))).toBe(
+			'Right now the sound card is open at 44.1 kHz, for Stash alone. The track is being changed on the way by your equalizer (44.1 kHz in).'
+		);
+		expect(outputSentence(sig({ scaled: true, equalized: true }))).toBe(
+			'Right now the sound card is open at 44.1 kHz, shared with other programs. The track is being changed on the way (44.1 kHz in).'
+		);
 	});
 });

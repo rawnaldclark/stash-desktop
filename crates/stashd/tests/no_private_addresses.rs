@@ -22,7 +22,13 @@ const SKIPPED: &[&str] = &[
 fn files(root: &Path) -> Vec<PathBuf> {
     let listed = Command::new("git")
         .current_dir(root)
-        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
         .output();
     let mut found = Vec::new();
     match listed {
@@ -92,7 +98,10 @@ fn giveaways(text: &str) -> Vec<String> {
     }
     for (n, line) in lower.lines().enumerate() {
         if (line.contains("key") || line.contains("secret")) && has_hex_run(line, 32) {
-            found.push(format!("32 hex digits beside a key's name (line {})", n + 1));
+            found.push(format!(
+                "32 hex digits beside a key's name (line {})",
+                n + 1
+            ));
         }
     }
     found
@@ -175,11 +184,19 @@ fn a_key_is_found_however_a_settings_file_writes_it() {
         format!("fn ask({}: &str)", api("_key")),
         format!("assert!(!key.contains(\"{}\"))", api("_key")),
         format!("q.contains_key(\"{}\")", api("_key")),
-        "checksum = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"".to_string(),
+        "checksum = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\""
+            .to_string(),
     ] {
-        assert!(giveaways(&code).is_empty(), "{code}: {:?}", giveaways(&code));
+        assert!(
+            giveaways(&code).is_empty(),
+            "{code}: {:?}",
+            giveaways(&code)
+        );
     }
-    assert!(!giveaways(&format!("lastfm key: {value}")).is_empty(), "a bare key beside its name");
+    assert!(
+        !giveaways(&format!("lastfm key: {value}")).is_empty(),
+        "a bare key beside its name"
+    );
     assert!(!giveaways(&format!("https://x.y.{}{}/", "workers", ".dev")).is_empty());
 }
 

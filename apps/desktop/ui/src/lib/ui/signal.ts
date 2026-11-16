@@ -49,26 +49,29 @@ export function formatLabel(signal: Signal | null | undefined, sourceBitDepth?: 
 	return detail ? `${codec} · ${detail}` : codec;
 }
 
-export type Verdict = { word: 'Bit-perfect' | 'Lossless' | 'Resampled' | 'Lossy'; color: string };
+export type Verdict = { word: 'Bit-perfect' | 'Lossless' | 'Lossless + your EQ' | 'Resampled' | 'Lossy'; color: string };
 
 export const VERDICTS = {
 	bitPerfect: { word: 'Bit-perfect', color: '#6EE7B7' },
 	lossless: { word: 'Lossless', color: '#93C5FD' },
+	equalized: { word: 'Lossless + your EQ', color: '#C4B5FD' },
 	resampled: { word: 'Resampled', color: '#FCD34D' },
 	lossy: { word: 'Lossy', color: '#9CA3AF' }
 } as const satisfies Record<string, Verdict>;
 
 /**
  * The verdict beside the badge. A lossy codec is Lossy whatever happens after it. Otherwise: Resampled when the engine changes the
- * sample rate; Bit-perfect when Stash has the sound card alone and the samples go out untouched (same format, volume at 100, no
- * ReplayGain); Lossless for a lossless codec that is not bit-perfect (the system's mixer is in the way, the sample format was
- * changed, or the samples were made louder or softer). Null when the codec is not known.
+ * sample rate; Lossless + your EQ for a lossless codec that Stash's equalizer changes on the way; Bit-perfect when Stash has the
+ * sound card alone and the samples go out untouched (same format, volume at 100, no ReplayGain, the equalizer off); Lossless for a
+ * lossless codec that is not bit-perfect (the system's mixer is in the way, the sample format was changed, or the samples were made
+ * louder or softer). The equalizer always rules out Bit-perfect: it changes the samples. Null when the codec is not known.
  */
 export function verdict(signal: Signal | null | undefined): Verdict | null {
 	if (!signal) return null;
 	if (isLossy(signal.codec)) return VERDICTS.lossy;
 	if (signal.resampled) return VERDICTS.resampled;
-	if (signal.mode === 'exclusive' && !signal.converted && !signal.scaled) return VERDICTS.bitPerfect;
+	if (signal.equalized && isLossless(signal.codec)) return VERDICTS.equalized;
+	if (signal.mode === 'exclusive' && !signal.converted && !signal.scaled && !signal.equalized) return VERDICTS.bitPerfect;
 	if (isLossless(signal.codec)) return VERDICTS.lossless;
 	return null;
 }
@@ -91,10 +94,12 @@ export function origin(addonName: string | null, tier: Tier | null, signal: Sign
 	return { text: `${addonName} · ${said}`, disagrees: false };
 }
 
-/** What the sound card is being sent right now, in a sentence (Settings › Sound). Null when nothing is open. */
+/** What the sound card is being sent right now, in a sentence (Settings › Sound): when the equalizer is the only change, it says
+ * so. Null when nothing is open. */
 export function outputSentence(signal: Signal | null | undefined): string | null {
 	if (!signal || !signal.output.sample_rate) return null;
 	const how = signal.mode === 'exclusive' ? 'for Stash alone' : signal.mode === 'shared' ? 'shared with other programs' : '';
-	const kept = !signal.resampled && !signal.converted && !signal.scaled;
-	return `Right now the sound card is open at ${kHz(signal.output.sample_rate)}${how ? `, ${how}` : ''}. The track is ${kept ? 'going out as it is' : 'being changed on the way'} (${kHz(signal.decoded.sample_rate)} in).`;
+	const others = signal.resampled || signal.converted || signal.scaled;
+	const change = others ? 'being changed on the way' : signal.equalized ? 'being changed on the way by your equalizer' : 'going out as it is';
+	return `Right now the sound card is open at ${kHz(signal.output.sample_rate)}${how ? `, ${how}` : ''}. The track is ${change} (${kHz(signal.decoded.sample_rate)} in).`;
 }

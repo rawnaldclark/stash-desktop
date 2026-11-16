@@ -1,5 +1,5 @@
-<!-- Settings, in the web player's layout: Sound (the sound card for Stash alone), Add-ons, Your library (music folders, bringing a
-     library in and saving one), Appearance, About. -->
+<!-- Settings, in the web player's layout: Sound (the output, its equalizer, the sound card for Stash alone), Add-ons, Your library
+     (music folders, bringing a library in and saving one), Appearance, About. -->
 <script lang="ts">
 	import { importPlaylistFile } from '../../lib/desktop/playlist-files';
 	import { onMount } from 'svelte';
@@ -11,6 +11,7 @@
 	import Blocked from '../../lib/desktop/Blocked.svelte';
 	import { R } from '../../lib/desktop/radio.svelte';
 	import Icon from '../../lib/ui/Icon.svelte';
+	import { correctionLine, eqStatus, eqSub, eqTrouble, outName } from '../../lib/ui/equalizer';
 	import { outputSentence } from '../../lib/ui/signal';
 	import { L, S, ui } from '../../lib/ui/state.svelte';
 	import { applyAppearance, readAppearance, saveAppearance, type Appearance, type ThemeChoice } from '../../lib/ui/theme';
@@ -43,7 +44,48 @@
 			void readOuts();
 		}
 	}
-	const outName = (d: core.Device) => (d.name === 'auto' ? 'The system’s choice' : d.description || d.name);
+
+	// ---- The equalizer of the output in use: a correction from a file, and two tones. Each output keeps its own.
+
+	const eq = $derived(S.v.eq);
+	const TONES = [
+		['bass', 'Bass'],
+		['treble', 'Treble']
+	] as const;
+	const TILTS = [
+		['less', 'Less'],
+		['as-is', 'As is'],
+		['more', 'More']
+	] as const;
+	/** A file that was not brought in, in the reader's words. */
+	let eqRefused = $state<string | null>(null);
+	let eqPicking = $state(false);
+	/** One request for each tap. */
+	function setEq(patch: core.EqPatch) {
+		eqRefused = null;
+		player.setEq(patch);
+	}
+	/** A tone chosen while the switch is off turns it on. */
+	function tone(which: 'bass' | 'treble', t: core.Tilt) {
+		const patch: core.EqPatch = which === 'bass' ? { bass: t } : { treble: t };
+		if (!eq.on) patch.on = true;
+		setEq(patch);
+	}
+	/** "Choose a file…": the system's own dialog, then the file is read and its correction put on. */
+	async function chooseEqFile() {
+		if (eqPicking) return;
+		eqPicking = true;
+		eqRefused = null;
+		try {
+			await player.eqFromFile();
+		} catch (e) {
+			eqRefused = trouble(e);
+		} finally {
+			eqPicking = false;
+		}
+	}
+	const eqSays = $derived(eqStatus(eq));
+	const eqAlert = $derived(eqTrouble(eq.trouble));
 
 	// ---- Add-ons: where music beyond the listener's own files comes from. Each is added by its link; the order is the listener's.
 
@@ -319,14 +361,57 @@
 				{/if}
 				<div class="set-row">
 					<div class="set-lab">
+						<span class="set-name" id="eq-l">Equalizer</span>
+						<span class="set-sub">{eqSub(eq, !(outs && outs.devices.length > 1))}</span>
+					</div>
+					<button type="button" class="sw" role="switch" aria-checked={eq.on} aria-labelledby="eq-l" onclick={() => setEq({ on: !eq.on })}><i></i></button>
+				</div>
+				<div class="set-row set-col">
+					<div class="set-lab">
+						<span class="set-name">Correction</span>
+						{#if eq.correction}
+							<span class="set-sub eq-name">{correctionLine(eq.correction)}</span>
+							<span class="set-sub">{eq.correction.summary}</span>
+						{:else}
+							<span class="set-sub">A file made for your headphones or speakers, in Equalizer APO’s format. For headphones: find yours on autoeq.app and download it for Equalizer APO.</span>
+						{/if}
+					</div>
+					<div class="chips">
+						{#if eq.correction}
+							<button type="button" class="btn ghost" disabled={eqPicking} onclick={chooseEqFile}>Choose another…</button>
+							<button type="button" class="btn ghost" onclick={() => setEq({ correction: null })}>Remove</button>
+						{:else}
+							<button type="button" class="btn" disabled={eqPicking} onclick={chooseEqFile}>Choose a file…</button>
+						{/if}
+					</div>
+					{#if eqRefused}<p class="set-sub set-trouble" role="alert">{eqRefused}</p>{/if}
+				</div>
+				{#each TONES as [which, name] (which)}
+					<div class="set-row set-col">
+						<div class="set-lab"><span class="set-name" id="{which}-l">{name}</span></div>
+						<div class="chips" class:eq-off={!eq.on} role="group" aria-labelledby="{which}-l">
+							{#each TILTS as [t, label] (t)}
+								<button type="button" class="chip" class:on={eq[which] === t} aria-pressed={eq[which] === t} onclick={() => tone(which, t)}>{label}</button>
+							{/each}
+						</div>
+					</div>
+				{/each}
+				{#if eqSays || eqAlert}
+					<div class="set-row set-col">
+						{#if eqSays}<p class="set-sub" role="status">{eqSays}</p>{/if}
+						{#if eqAlert}<p class="set-sub set-trouble" role="alert">{eqAlert}</p>{/if}
+					</div>
+				{/if}
+				<div class="set-row">
+					<div class="set-lab">
 						<span class="set-name" id="ex-l">Take the sound card for Stash alone</span>
-						<span class="set-sub">Each track then goes to the sound card at its own sample rate, with the system’s mixer out of the way. While Stash plays, other programs make no sound. If the sound card cannot take a track’s format, the nearest one it can take is used, and the bar at the bottom says so.</span>
+						<span class="set-sub">Each track then goes to the sound card at its own sample rate, with the system’s mixer out of the way. While Stash plays, other programs make no sound. If the sound card cannot take a track’s format, the nearest one it can take is used, and the bar at the bottom says so. Stash’s own equalizer still works here; equalizers outside Stash, such as Equalizer APO, do not reach the sound card this way.</span>
 					</div>
 					<button type="button" class="sw" role="switch" aria-checked={S.v.exclusive} aria-labelledby="ex-l" onclick={() => player.setExclusive(!S.v.exclusive)}><i></i></button>
 				</div>
 				<div class="set-row set-col">
 					<p class="set-p">Off, the system mixes Stash with everything else at one fixed rate, and tracks at another rate are resampled.</p>
-					<p class="set-p">The volume here changes the samples themselves. To send a track out untouched, leave it at 100.</p>
+					<p class="set-p">The volume and the equalizer here change the samples themselves. To send a track out untouched, leave the volume at 100 and the equalizer off.</p>
 					{#if now}<p class="set-p" role="status"><b>{now}</b></p>{/if}
 				</div>
 				<div class="set-row">
@@ -536,6 +621,9 @@
 	.src.off .tr-t { opacity: .55; }
 	.src .tr-t i { white-space: normal; }
 	.src-problem, .set-trouble { color: var(--red) !important; }
+	/* the equalizer: the correction's name reads first; while the switch is off, the tones it keeps are dimmed */
+	.eq-name { color: var(--wp-text); }
+	.eq-off .chip { opacity: .55; }
 	/* a folder's path: one line (the whole path is its title) */
 	.set-path { overflow: clip; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 	@container main (max-width: 560px) { .src { grid-template-columns: 24px minmax(0, 1fr); } .src-acts { grid-column: 2; } }

@@ -7,9 +7,9 @@ import type { Readable } from 'svelte/store';
 import type { SearchResult } from './sources/search';
 import type { Album, Artist, Artwork, Descriptor, Lyrics, LyricLine, LyricWord, Track } from './sources/contract';
 import type { LibraryItem } from './identity';
-import type { AddonInfo, Counts, Replaygain, Signal, SmartRules, Station, Tier } from './core';
+import { NO_EQ, type AddonInfo, type CoreEq, type Counts, type EqPatch, type Replaygain, type Signal, type SmartRules, type Station, type Tier } from './core';
 
-export type { Readable, SearchResult, Counts, Album, Artist, Artwork, Descriptor, Lyrics, LyricLine, LyricWord, Track, LibraryItem, Signal, Station, Tier };
+export type { Readable, SearchResult, Counts, Album, Artist, Artwork, Descriptor, Lyrics, LyricLine, LyricWord, Track, LibraryItem, Signal, Station, Tier, CoreEq, EqPatch };
 
 /** A queue entry: a library item plus an id for this particular slot (the same song can be queued twice). */
 export type QueueItem = LibraryItem & { qid: string };
@@ -69,6 +69,8 @@ export interface PlayerState {
 	exclusive: boolean;
 	/** How loudness is evened out between songs (Settings › Sound). */
 	replaygain: Replaygain;
+	/** The equalizer of the output in use (Settings › Sound). */
+	eq: CoreEq;
 	/** The station growing the queue (a radio, or autoplay), when one is. */
 	station: Station | null;
 }
@@ -100,6 +102,11 @@ export interface PlayerAPI {
 	/** Takes the sound card for Stash alone, or gives it back. */
 	setExclusive(on: boolean): void;
 	setReplaygain(mode: Replaygain): void;
+	/** Changes the equalizer of the output in use: one request for each tap. */
+	setEq(patch: EqPatch): void;
+	/** Asks for an equalizer file (the system's own dialog) and puts its correction on the output in use, switched on. False
+	 * when none was chosen; rejects with the core's words when the file is refused. */
+	eqFromFile(): Promise<boolean>;
 	/** Every song of the queue, in order (read from the core a page at a time): what "Save as playlist" keeps. */
 	wholeQueue(): Promise<LibraryItem[]>;
 	/** Starts a radio: from a song (the song playing plays on, and what follows it is replaced; any other plays now), or
@@ -244,5 +251,6 @@ export const INITIAL_PLAYER_STATE: PlayerState = {
 	servedBy: null,
 	exclusive: false,
 	replaygain: 'off',
+	eq: NO_EQ,
 	station: null
 };

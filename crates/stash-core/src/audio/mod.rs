@@ -118,6 +118,34 @@ impl Engine {
         self.mpv.command(&["stop"])
     }
 
+    /// The audio filter list, through the `af` command (`af set`; `af clr ""` for none). With a chain playing, a list
+    /// that cannot be built is refused and the old one stays; with nothing playing, nothing is checked.
+    pub fn set_filters(&self, list: Option<&str>) -> Result<()> {
+        match list {
+            Some(list) => self.mpv.command(&["af", "set", list]),
+            None => self.mpv.command(&["af", "clr", ""]),
+        }
+    }
+
+    /// The audio filter list as mpv holds it ("" for none).
+    pub fn filters(&self) -> String {
+        self.mpv.get("af").unwrap_or_default()
+    }
+
+    /// Sends `command` with `argument` to the filter `target` inside the list entry labelled `label` (`af-command`):
+    /// a change while it plays, with no rebuild. Fails while the entry's graph is not built yet (right after a start
+    /// or a seek).
+    pub fn filter_command(
+        &self,
+        label: &str,
+        command: &str,
+        argument: &str,
+        target: &str,
+    ) -> Result<()> {
+        self.mpv
+            .command(&["af-command", label, command, argument, target])
+    }
+
     /// The next thing the engine reports, waiting up to `timeout_seconds`.
     pub fn next_event(&self, timeout_seconds: f64) -> Event {
         self.mpv.wait_event(timeout_seconds)

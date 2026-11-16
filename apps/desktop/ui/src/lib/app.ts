@@ -317,6 +317,7 @@ function take(a: core.CorePlayer): void {
 		servedBy: a.served_by,
 		exclusive: a.exclusive,
 		replaygain: a.replaygain ?? 'off',
+		eq: same(state.eq, a.eq) ? state.eq : a.eq,
 		station: same(state.station, a.station ?? null) ? state.station : (a.station ?? null)
 	});
 	readQueue(a);
@@ -451,6 +452,14 @@ const player: PlayerAPI = {
 	},
 	setExclusive: (on) => void command(() => core.setExclusive(on)),
 	setReplaygain: (mode) => void command(() => core.setReplaygain(mode)),
+	setEq: (patch) => void command(() => core.setEq(patch)),
+	async eqFromFile() {
+		// The dialog is asked for outside the commands' order: while it is open, play and pause still go through.
+		const { path } = await core.pickEqFile();
+		if (!path) return false;
+		await command(() => core.eqFromFile(path), true);
+		return true;
+	},
 	wholeQueue: async () => (await allPages((o, l) => core.queueAt(o, l))).map(itemOfQueued),
 	canRadio: (item) => entryOf(item) !== null,
 	startRadio(from) {

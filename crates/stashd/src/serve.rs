@@ -992,6 +992,17 @@ impl Core {
                         counts_between_seconds: options
                             .play_counts_between_seconds
                             .unwrap_or(Settings::default().counts_between_seconds),
+                        // What changes by itself (the output opened last, an equalizer the engine could not use) is
+                        // kept as the listener's own changes are.
+                        on_equalizers: Some({
+                            let library = Arc::clone(&library);
+                            Arc::new(move |book: &stash_core::eq::Book| {
+                                let _ = library
+                                    .lock()
+                                    .unwrap()
+                                    .set_setting(crate::equalizer::SETTING, &book.to_json());
+                            })
+                        }),
                         ..Settings::default()
                     };
                     Player::start_with(&engine, output, settings).map_err(|e| e.to_string())
@@ -1010,6 +1021,8 @@ impl Core {
             if let Some(mode) = kept("replaygain") {
                 let _ = playing.set_replaygain(&mode);
             }
+            // Each output's equalizer, before the output is chosen again (which puts that output's in place).
+            crate::equalizer::bring_back(playing, kept(crate::equalizer::SETTING));
             // The output chosen last time, when it is connected; else the system's own choice, and the choice
             // holds for when it is back.
             if let Some(chosen) = kept("device").and_then(|text| chosen_device(&text))
@@ -1246,7 +1259,7 @@ pub(crate) fn body_json(request: &mut Request) -> Result<Value> {
 }
 
 /// The player's state as the window reads it. Without a player: `available: false` and the reason.
-fn player_reply(state: &State) -> Reply {
+pub(crate) fn player_reply(state: &State) -> Reply {
     match &state.player {
         Ok(player) => {
             let mut answer = json!(player.state());
@@ -2356,6 +2369,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
     let limit = |default: usize| number("limit", default).clamp(1, PAGE_CAP);
 
     let path = url.path().to_string();
+    if let Some(response) = crate::equalizer::route(state, request, &path)? {
+        return Ok((response, false));
+    }
     if let Some(response) = player_route(state, request, &path)? {
         return Ok((response, false));
     }

@@ -41,6 +41,12 @@ struct RawEndFile {
     playlist_insert_num_entries: c_int,
 }
 
+#[repr(C)]
+struct RawHook {
+    name: *const c_char,
+    id: u64,
+}
+
 const FORMAT_NONE: c_int = 0;
 const FORMAT_STRING: c_int = 1;
 
@@ -62,6 +68,8 @@ struct Api {
     request_log_messages: unsafe extern "C" fn(Handle, *const c_char) -> c_int,
     error_string: unsafe extern "C" fn(c_int) -> *const c_char,
     client_api_version: unsafe extern "C" fn() -> c_ulong,
+    hook_add: unsafe extern "C" fn(Handle, u64, *const c_char, c_int) -> c_int,
+    hook_continue: unsafe extern "C" fn(Handle, u64) -> c_int,
 }
 
 /// Why a file stopped.
@@ -92,7 +100,7 @@ pub enum Event {
     StartFile,
     FileLoaded,
     EndFile(EndReason),
-    /// The audio output was set up again (a new format, a new device).
+    /// The audio output or its filters were set up again (a new format, a new device, a new filter list).
     AudioReconfig,
     PlaybackRestart,
     Seek,
@@ -102,6 +110,12 @@ pub enum Event {
         value: Option<String>,
     },
     Idle,
+    /// A hook asked for with [`Mpv::hook_add`] is reached: mpv waits until [`Mpv::hook_continue`] is called with
+    /// `id`.
+    Hook {
+        name: String,
+        id: u64,
+    },
     Other(i32),
 }
 
@@ -174,6 +188,8 @@ impl Mpv {
             request_log_messages: bind!("mpv_request_log_messages"),
             error_string: bind!("mpv_error_string"),
             client_api_version: bind!("mpv_client_api_version"),
+            hook_add: bind!("mpv_hook_add"),
+            hook_continue: bind!("mpv_hook_continue"),
         };
         // The structs above are client API 2.x's.
         let version = unsafe { (api.client_api_version)() } as u64;
@@ -260,6 +276,24 @@ impl Mpv {
         )
     }
 
+    /// Asks mpv to stop at the hook `name` ("on_preloaded": a file is opened and its filters are about to be built)
+    /// and send [`Event::Hook`]; it waits there until [`Mpv::hook_continue`]. Lower `priority` runs first.
+    pub fn hook_add(&self, name: &str, priority: i32) -> Result<()> {
+        let n = c(name)?;
+        self.check(
+            unsafe { (self.api.hook_add)(self.handle, 0, n.as_ptr(), priority) },
+            &format!("hook {name}"),
+        )
+    }
+
+    /// Lets mpv go on from the hook [`Event::Hook`] named by `id`.
+    pub fn hook_continue(&self, id: u64) -> Result<()> {
+        self.check(
+            unsafe { (self.api.hook_continue)(self.handle, id) },
+            "going on from a hook",
+        )
+    }
+
     /// mpv's own words for one of its error codes: "loading failed", "audio output initialization failed".
     pub fn error_text(&self, code: i32) -> String {
         unsafe { text((self.api.error_string)(code)) }
@@ -317,6 +351,13 @@ impl Mpv {
                 Event::Property {
                     name: unsafe { text(property.name) },
                     value,
+                }
+            }
+            25 => {
+                let hook = unsafe { &*(raw.data as *const RawHook) };
+                Event::Hook {
+                    name: unsafe { text(hook.name) },
+                    id: hook.id,
                 }
             }
             other => {

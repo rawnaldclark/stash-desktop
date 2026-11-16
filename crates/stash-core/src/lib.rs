@@ -11,6 +11,7 @@ pub mod credits;
 pub mod db;
 pub mod downloads;
 pub mod eclipse;
+pub mod eq;
 pub mod folders;
 pub mod identity;
 pub mod import;

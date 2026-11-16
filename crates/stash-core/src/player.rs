@@ -19,6 +19,12 @@ use serde::Serialize;
 
 use crate::Result;
 use crate::audio::{EndReason, Engine, Event, Output};
+use crate::eq;
+
+mod eq_run;
+
+use eq_run::EqRun;
+pub use eq_run::{CorrectionShown, EqState};
 
 /// How many times an add-on that is in trouble (not: does not have the song) is asked for the next track.
 const TRIES: u32 = 3;
@@ -112,6 +118,10 @@ pub type OnPlay = Arc<dyn Fn(&QueueItem, i64) + Send + Sync>;
 /// what failed.
 pub type OnFailed = Arc<dyn Fn(&QueueItem) + Send + Sync>;
 
+/// Told when what each output keeps changed by itself (an output opened for the first time, or an equalizer the engine
+/// could not use and turned off), to keep it.
+pub type OnEqualizers = Arc<dyn Fn(&eq::Book) + Send + Sync>;
+
 pub struct Settings {
     /// Without one, the queue can hold files only.
     pub resolver: Option<Resolver>,
@@ -123,6 +133,8 @@ pub struct Settings {
     pub on_start: Option<OnPlay>,
     /// Told when the engine could not play a track.
     pub on_failed: Option<OnFailed>,
+    /// Told when what each output keeps changed by itself.
+    pub on_equalizers: Option<OnEqualizers>,
     /// A play counts once half the track was really played, but never before the first of these seconds and always
     /// by the second: the rule the other Stashes (and Last.fm) use, 30 s and 4 minutes.
     pub counts_between_seconds: (f64, f64),
@@ -136,6 +148,7 @@ impl Default for Settings {
             on_play: None,
             on_start: None,
             on_failed: None,
+            on_equalizers: None,
             counts_between_seconds: (30.0, 240.0),
         }
     }
@@ -167,6 +180,9 @@ pub struct Signal {
     /// The samples are made louder or softer on the way: the volume is not at 100, or ReplayGain evens this track
     /// out.
     pub scaled: bool,
+    /// An equalizer changes the samples on the way: the engine's filter list holds Stash's equalizer, and it has not
+    /// failed.
+    pub equalized: bool,
 }
 
 /// What happens at the end of the queue, or of a track.
@@ -227,6 +243,8 @@ pub struct PlayerState {
     pub exclusive: bool,
     /// How loudness is evened out between songs from the gain in their tags: "off", "track" or "album".
     pub replaygain: &'static str,
+    /// The equalizer of the output in use.
+    pub eq: EqState,
     pub signal: Option<Signal>,
     /// The last track that could not be played, and why.
     pub error: Option<String>,
@@ -297,6 +315,8 @@ struct Shared {
     retried: std::collections::HashSet<usize>,
     /// A queue place to ask for again: its stream did not start.
     retry: Option<usize>,
+    /// The engine could not build the equalizer for the track it was opening: that track plays again without it.
+    eq_failed: bool,
     /// Goes up whenever the queue is edited while it plays; a track located for an earlier number is dropped.
     edits: u64,
     next_qid: u64,
@@ -420,10 +440,90 @@ struct Ctx {
     on_play: Option<OnPlay>,
     on_start: Option<OnPlay>,
     on_failed: Option<OnFailed>,
+    on_equalizers: Option<OnEqualizers>,
     counts_between_seconds: (f64, f64),
+    eq: Arc<Mutex<EqRun>>,
 }
 
 impl Ctx {
+    /// The output chosen: `"auto"` for the system's own choice.
+    fn chosen(&self) -> String {
+        self.engine
+            .mpv()
+            .get("audio-device")
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| "auto".into())
+    }
+
+    /// The engine opens a file (its `on_preloaded` hook): its equalizer goes in from its first sample. The engine
+    /// waits until this is done, so it is quick: a property read and one write.
+    fn preloaded(&self, id: u64) {
+        let rate = self
+            .engine
+            .mpv()
+            .get("track-list")
+            .and_then(|text| serde_json::from_str::<Vec<serde_json::Value>>(&text).ok())
+            .and_then(|tracks| {
+                tracks
+                    .iter()
+                    .find(|t| t["type"] == "audio")
+                    .and_then(|t| t["demux-samplerate"].as_u64())
+            })
+            .and_then(|rate| u32::try_from(rate).ok());
+        let chosen = self.chosen();
+        self.eq
+            .lock()
+            .unwrap()
+            .preloaded(&self.engine, &chosen, rate);
+        let _ = self.engine.mpv().hook_continue(id);
+    }
+
+    /// The engine says it opened `device`: its equalizer goes in, and a new output opened last is kept.
+    fn opened_output(&self, device: Device) {
+        let chosen = self.chosen();
+        let (changed, book) = {
+            let mut run = self.eq.lock().unwrap();
+            let changed = run.opened_output(&self.engine, &chosen, device);
+            (changed, run.book.clone())
+        };
+        if let (true, Some(on_equalizers)) = (changed, &self.on_equalizers) {
+            on_equalizers(&book);
+        }
+    }
+
+    /// The engine could not use the equalizer: the list is cleared, the output's equalizer turned off and kept so.
+    fn equalizer_failed(&self, why: &str) {
+        let chosen = self.chosen();
+        let book = {
+            let mut run = self.eq.lock().unwrap();
+            let description = self.description(&run.output_key(&chosen));
+            run.fail(&self.engine, &chosen, &description, why);
+            run.book.clone()
+        };
+        if let Some(on_equalizers) = &self.on_equalizers {
+            on_equalizers(&book);
+        }
+    }
+
+    /// What the system calls the output `name`.
+    fn description(&self, name: &str) -> String {
+        self.engine
+            .mpv()
+            .get("audio-device-list")
+            .and_then(|text| serde_json::from_str::<Vec<serde_json::Value>>(&text).ok())
+            .and_then(|list| {
+                list.iter()
+                    .find(|d| d["name"] == name)
+                    .and_then(|d| d["description"].as_str().map(tidy))
+            })
+            .unwrap_or_else(|| {
+                if name == "auto" {
+                    "Autoselect device".into()
+                } else {
+                    name.to_string()
+                }
+            })
+    }
     /// Called a few times a second: adds the time since `last` to the listening of the current track when the engine
     /// really played through it, tells of the track once it is heard, and of the play once it counts.
     fn listen(&self, last: &mut Instant) {
@@ -805,6 +905,8 @@ impl Player {
     pub fn start_with(library: &Path, output: &Output, settings: Settings) -> Result<Self> {
         let engine = Arc::new(Engine::start(library, output, "v")?);
         engine.mpv().observe("playlist-pos")?;
+        // Every file's equalizer goes in as the engine opens it (hooks cannot be taken back: one for the player's life).
+        engine.mpv().hook_add("on_preloaded", 0)?;
         let ctx = Ctx {
             engine,
             shared: Arc::new(Mutex::new(Shared::default())),
@@ -813,7 +915,9 @@ impl Player {
             on_play: settings.on_play,
             on_start: settings.on_start,
             on_failed: settings.on_failed,
+            on_equalizers: settings.on_equalizers,
             counts_between_seconds: settings.counts_between_seconds,
+            eq: Arc::new(Mutex::new(EqRun::new(output))),
         };
         let stop = Arc::new(AtomicBool::new(false));
         let events = {
@@ -824,7 +928,51 @@ impl Player {
                 .spawn(move || {
                     let mut last = Instant::now();
                     while !stop.load(Ordering::Relaxed) {
-                        match ctx.engine.next_event(0.25) {
+                        // Steps of the equalizer waiting to be sent are looked at more often.
+                        let wait = if ctx.eq.lock().unwrap().busy() {
+                            0.05
+                        } else {
+                            0.25
+                        };
+                        match ctx.engine.next_event(wait) {
+                            Event::Hook { name, id } if name == "on_preloaded" => ctx.preloaded(id),
+                            Event::Hook { id, .. } => {
+                                let _ = ctx.engine.mpv().hook_continue(id);
+                            }
+                            // The output the engine opened ("the system's choice" may open another than last time).
+                            Event::Log { prefix, text, .. }
+                                if prefix.starts_with("ao")
+                                    && eq::opened_output(&prefix, text.trim_end()).is_some() =>
+                            {
+                                if let Some((name, description)) =
+                                    eq::opened_output(&prefix, text.trim_end())
+                                {
+                                    ctx.opened_output(Device {
+                                        name,
+                                        description: tidy(&description),
+                                    });
+                                }
+                            }
+                            // The equalizer could not be built for a file, or a filter of it failed while running (the
+                            // engine then passes the audio by it).
+                            Event::Log { text, .. }
+                                if (text.trim() == "Audio filter initialized failed!"
+                                    || text.starts_with("Disabling filter")
+                                        && text.trim_end().ends_with("because it has failed."))
+                                    && ctx.engine.filters().contains("@eq:") =>
+                            {
+                                if text.starts_with("Audio filter") {
+                                    ctx.shared.lock().unwrap().eq_failed = true;
+                                }
+                                ctx.equalizer_failed(text.trim());
+                            }
+                            // A seek the engine made itself (Repeat one's loop) built the graph again from the list
+                            // as written: a seam, so the whole curve is written now. After Stash's own seeks and a
+                            // file's start the list is in place already, and nothing is written.
+                            Event::PlaybackRestart => {
+                                let chosen = ctx.chosen();
+                                ctx.eq.lock().unwrap().commit(&ctx.engine, &chosen);
+                            }
                             Event::Property { name, value } if name == "playlist-pos" => {
                                 let pos = value
                                     .and_then(|v| v.parse::<i64>().ok())
@@ -845,6 +993,21 @@ impl Player {
                                 let mut shared = ctx.shared.lock().unwrap();
                                 if shared.complaints.len() < 6 {
                                     shared.complaints.push(format!("{prefix}: {}", text.trim()));
+                                }
+                            }
+                            // The equalizer could not be built for the track: the track is not at fault. It plays
+                            // again, without it (the equalizer was turned off), and nothing is said of the track.
+                            Event::EndFile(EndReason::Error(_))
+                                if ctx.shared.lock().unwrap().eq_failed =>
+                            {
+                                let mut shared = ctx.shared.lock().unwrap();
+                                shared.eq_failed = false;
+                                shared.complaints.clear();
+                                let place = shared.index().or(shared.starting);
+                                if let Some(place) = place
+                                    && shared.retried.insert(place)
+                                {
+                                    shared.retry = Some(place);
                                 }
                             }
                             Event::EndFile(EndReason::Error(code)) => {
@@ -930,6 +1093,17 @@ impl Player {
                         ctx.keep_ahead();
                         ctx.listen(&mut last);
                         ctx.settle();
+                        {
+                            let mut run = ctx.eq.lock().unwrap();
+                            if run.busy() {
+                                let position = ctx
+                                    .engine
+                                    .mpv()
+                                    .get("time-pos")
+                                    .and_then(|p| p.parse::<f64>().ok());
+                                run.tick(&ctx.engine, position);
+                            }
+                        }
                     }
                 })
                 .map_err(|e| crate::Error::Audio(format!("starting the player's thread: {e}")))?
@@ -1499,10 +1673,22 @@ impl Player {
                 return Ok(());
             }
         }
+        self.commit_eq();
         if self.ctx.engine.seek_to(seconds).is_err() {
             self.ctx.shared.lock().unwrap().pending_seek = Some(seconds);
         }
         Ok(())
+    }
+
+    /// A seam: the engine is about to drop the audio it queued (a seek, the output opened again), so the list is
+    /// written as planned now, and what is built again after is the equalizer as it should be.
+    fn commit_eq(&self) {
+        let chosen = self.ctx.chosen();
+        self.ctx
+            .eq
+            .lock()
+            .unwrap()
+            .commit(&self.ctx.engine, &chosen);
     }
 
     /// Sets the volume, 0 to 100. It is the engine's own volume, so in exclusive mode anything but 100 changes the
@@ -1574,6 +1760,9 @@ impl Player {
     pub fn set_device(&self, name: &str) -> Result<()> {
         let mpv = self.ctx.engine.mpv();
         mpv.set("audio-device", name)?;
+        // That output's equalizer goes in as it opens (until the engine says which it opened).
+        self.ctx.eq.lock().unwrap().opened = None;
+        self.commit_eq();
         let _ = mpv.command(&["ao-reload"]);
         Ok(())
     }
@@ -1583,6 +1772,7 @@ impl Player {
     pub fn set_exclusive(&self, exclusive: bool) -> Result<()> {
         let mpv = self.ctx.engine.mpv();
         mpv.set("audio-exclusive", if exclusive { "yes" } else { "no" })?;
+        self.commit_eq();
         // With nothing playing there is no output to open again: the setting holds for the next track.
         let _ = mpv.command(&["ao-reload"]);
         Ok(())
@@ -1598,6 +1788,71 @@ impl Player {
         };
         self.ctx.engine.mpv().set("replaygain", mode)?;
         Ok(())
+    }
+
+    /// What each output keeps, when the player starts: the equalizer of the output expected goes in.
+    pub fn set_equalizers(&self, book: eq::Book) {
+        let chosen = self.ctx.chosen();
+        let mut run = self.ctx.eq.lock().unwrap();
+        run.book = book;
+        run.commit(&self.ctx.engine, &chosen);
+    }
+
+    /// What each output keeps.
+    pub fn equalizers(&self) -> eq::Book {
+        self.ctx.eq.lock().unwrap().book.clone()
+    }
+
+    /// The output in use: the one the engine said it opened, else the one chosen (for the system's choice, the one
+    /// it opened last).
+    pub fn output_in_use(&self) -> Device {
+        let chosen = self.ctx.chosen();
+        let name = self.ctx.eq.lock().unwrap().output_key(&chosen);
+        let opened = self.ctx.eq.lock().unwrap().opened.clone();
+        opened.filter(|d| d.name == name).unwrap_or_else(|| Device {
+            description: self.ctx.description(&name),
+            name,
+        })
+    }
+
+    /// The equalizer of the output in use.
+    pub fn eq(&self) -> eq::Eq {
+        let chosen = self.ctx.chosen();
+        self.ctx.eq.lock().unwrap().eq(&chosen)
+    }
+
+    /// Sets the equalizer of the output in use and keeps it in what each output keeps. While a song plays it glides
+    /// there; when that starts with a new list and the engine refuses it, this answers the refusal and nothing changes.
+    pub fn set_eq(&self, eq: eq::Eq) -> Result<()> {
+        let output = self.output_in_use();
+        let chosen = self.ctx.chosen();
+        let playing = {
+            let shared = self.ctx.shared.lock().unwrap();
+            shared.slot().is_some() || shared.starting.is_some()
+        };
+        let mut run = self.ctx.eq.lock().unwrap();
+        let before = run.book.clone();
+        run.book.put(&output.name, &output.description, eq);
+        if let Err(e) = run.change(&self.ctx.engine, &chosen, playing) {
+            run.book = before;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Tests only: `list` becomes the engine's filter list, as it is, for every file until the equalizer is changed or
+    /// fails (the fail-safe's test).
+    #[doc(hidden)]
+    pub fn set_filters_unchecked(&self, list: &str) {
+        let mut run = self.ctx.eq.lock().unwrap();
+        run.forced = Some(list.to_string());
+        let _ = self.ctx.engine.set_filters(Some(list));
+    }
+
+    /// Tests only: the engine's filter list as it reads it back ("" for none).
+    #[doc(hidden)]
+    pub fn filters(&self) -> String {
+        self.ctx.engine.filters()
     }
 
     /// The queue from `offset` on.
@@ -1758,6 +2013,13 @@ impl Player {
             _ => "off",
         };
         let resting_length = track.as_ref().and_then(|t| t.duration_ms).unwrap_or(0);
+        let chosen = self.ctx.chosen();
+        let output = self.output_in_use();
+        let (eq, failed) = {
+            let run = self.ctx.eq.lock().unwrap();
+            (run.state(output, chosen == "auto"), run.failed)
+        };
+        let equalized = playing && !failed && self.ctx.engine.filters().contains("@eq:");
         let signal = playing.then(|| {
             let decoded = Format {
                 sample_rate: number("audio-params/samplerate"),
@@ -1794,6 +2056,7 @@ impl Player {
                         _ => false,
                     }
                 },
+                equalized,
                 decoded,
                 output,
                 driver: mpv.get("current-ao"),
@@ -1848,6 +2111,7 @@ impl Player {
             volume: volume.round().clamp(0.0, 100.0) as u32,
             exclusive: mpv.get("audio-exclusive").as_deref() == Some("yes"),
             replaygain,
+            eq,
             signal,
             error,
             error_id,

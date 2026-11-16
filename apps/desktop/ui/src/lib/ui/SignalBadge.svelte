@@ -1,6 +1,7 @@
 <!-- Format and signal path of the song playing: the format badge ("FLAC · 24-bit/44.1 kHz") and the verdict word beside it
-     (Bit-perfect, Lossless, Resampled, Lossy), from what the core's audio engine reports. `kind` 'bar' is the player bar's third line
-     (the web player's small badge), 'fs' the Now playing one. -->
+     (Bit-perfect, Lossless, Lossless + your EQ, Resampled, Lossy), from what the core's audio engine reports. While the equalizer
+     changes the sound, the tooltip names what it does. `kind` 'bar' is the player bar's third line (the web player's small badge),
+     'fs' the Now playing one. -->
 <script lang="ts">
 	import { formatLabel, verdict } from './signal';
 	import { S } from './state.svelte';
@@ -9,7 +10,8 @@
 
 	const fmt = $derived(formatLabel(S.v.signal, S.v.sourceBitDepth));
 	const says = $derived(verdict(S.v.signal));
-	const title = $derived(fmt ? `Playing as ${fmt}${says ? ` · ${says.word}` : ''}` : undefined);
+	const tuned = $derived(S.v.signal?.equalized && S.v.eq.describe ? `. Your equalizer: ${S.v.eq.describe}.` : '');
+	const title = $derived(fmt ? `Playing as ${fmt}${says ? ` · ${says.word}` : ''}${tuned}` : undefined);
 </script>
 
 {#if fmt}

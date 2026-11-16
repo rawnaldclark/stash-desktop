@@ -3,6 +3,7 @@
 mod autoplay;
 mod blocking;
 pub mod demo_addon;
+mod equalizer;
 mod folders;
 mod kept;
 mod playlist_files;

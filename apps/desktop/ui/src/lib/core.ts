@@ -396,6 +396,54 @@ export type Signal = {
 	converted: boolean;
 	/** The samples are made louder or softer on the way: the volume is not at 100, or ReplayGain evens the song out. */
 	scaled: boolean;
+	/** An equalizer changes the samples on the way: the engine's filter list holds Stash's equalizer, and it has not failed. */
+	equalized: boolean;
+};
+
+/** A tone choice of the equalizer: less, as it is, or more. */
+export type Tilt = 'less' | 'as-is' | 'more';
+
+/** The equalizer of the output in use, as the core says it (`eq` in /api/player). Each output keeps its own. */
+export type CoreEq = {
+	/** The output in use: the one the engine said it opened, else the one chosen. */
+	output: Device;
+	/** The output was not chosen by hand: it is the system's choice right now. */
+	system_choice: boolean;
+	on: boolean;
+	bass: Tilt;
+	treble: Tilt;
+	/** The correction read from a file (Equalizer APO's format): its name, the file's own name, how many filters it has, how
+	 * many lines of the file were switched off there or passed over, and what was read, in the core's sentence ("Read 10
+	 * filters and a preamp of −6.4 dB from Sennheiser HD 650 ParametricEQ.txt."). */
+	correction: { name: string; file: string; filters: number; switched_off: number; passed_over: number; summary: string } | null;
+	/** How much softer Stash plays, in dB, to leave room for the boosts (0 for cuts only). */
+	softer_db: number;
+	/** What the equalizer does, in words ("Sennheiser HD 650, more bass"); null when it changes nothing. */
+	describe: string | null;
+	/** It was turned off while the sound card is open at its format: the card is opened again at the song's own at the next pause. */
+	reopen_at_pause: boolean;
+	/** Why it was turned off by itself, when it was. A kept correction that could not be read again is the core's whole sentence,
+	 * "Your correction “{name}” could not be read again: {reason}"; when the engine could not use it, it is the reason alone,
+	 * which never starts with "Your", and the window puts it in its own sentence. */
+	trouble: string | null;
+};
+
+/** A change to the equalizer of the output in use: any of the switch, the two tones, and (`correction: null`) taking the
+ * correction off. A correction only comes from a file (`eqFromFile`). */
+export type EqPatch = { on?: boolean; bass?: Tilt; treble?: Tilt; correction?: null };
+
+/** No equalizer: off, with nothing set. */
+export const NO_EQ: CoreEq = {
+	output: { name: 'auto', description: '' },
+	system_choice: false,
+	on: false,
+	bass: 'as-is',
+	treble: 'as-is',
+	correction: null,
+	softer_db: 0,
+	describe: null,
+	reopen_at_pause: false,
+	trouble: null
 };
 
 export type CoreTrack = {
@@ -437,6 +485,8 @@ export type CorePlayer = {
 	exclusive: boolean;
 	/** How loudness is evened out between songs (ReplayGain). */
 	replaygain: Replaygain;
+	/** The equalizer of the output in use. */
+	eq: CoreEq;
 	shuffle: boolean;
 	repeat: 'off' | 'all' | 'one';
 	/** What the queue is playing from, in the words it was started with. */
@@ -490,6 +540,7 @@ export const IDLE: CorePlayer = {
 	volume: 100,
 	exclusive: false,
 	replaygain: 'off',
+	eq: NO_EQ,
 	shuffle: false,
 	repeat: 'off',
 	from: null,
@@ -627,6 +678,13 @@ export const setExclusive = (exclusive: boolean) => told('/api/player/exclusive'
 /** Off; every song equally loud ("track"); or the album's own differences kept ("album"). */
 export type Replaygain = 'off' | 'track' | 'album';
 export const setReplaygain = (mode: Replaygain) => told('/api/player/replaygain', { mode });
+/** Changes the equalizer of the output in use. A tone other than "as-is" turns it on, unless `on` says otherwise. */
+export const setEq = (patch: EqPatch) => told('/api/player/eq', patch);
+/** The system's own dialog, for an equalizer file (Equalizer APO's format); null when none was chosen. */
+export const pickEqFile = () => post<{ path: string | null }>('/api/player/eq/pick', {});
+/** Reads an equalizer file and puts its correction on the output in use, switched on. A file Stash cannot play exactly as it
+ * says is refused, in the reader's words, and nothing changes. */
+export const eqFromFile = (path: string) => told('/api/player/eq/file', { path });
 export const setShuffle = (on: boolean) => told('/api/player/shuffle', { on });
 export const setRepeat = (mode: 'off' | 'all' | 'one') => told('/api/player/repeat', { mode });
 /** Adds songs to the queue: at its end, or (`next`) right after the one playing. */
