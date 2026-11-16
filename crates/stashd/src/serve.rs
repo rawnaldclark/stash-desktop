@@ -129,6 +129,16 @@ fn allowed_origin(origin: &str, port: u16) -> bool {
         || origin == "tauri://localhost"
 }
 
+/// The origin of an address (its scheme, host and port), as a browser names it; `tauri://localhost` too, which the
+/// URL standard leaves without one.
+fn origin_of(url: &Url) -> String {
+    match (url.host_str(), url.port()) {
+        (Some(host), Some(port)) => format!("{}://{host}:{port}", url.scheme()),
+        (Some(host), None) => format!("{}://{host}", url.scheme()),
+        _ => String::new(),
+    }
+}
+
 fn capped(text: &str) -> String {
     text.chars().take(TEXT_CAP).collect()
 }
@@ -890,7 +900,19 @@ fn answer(state: &State, mut request: Request) -> bool {
     let host_ok = find(&request, "Host")
         .is_some_and(|h| h == format!("127.0.0.1:{port}") || h == format!("localhost:{port}"));
     let origin = find(&request, "Origin").map(str::to_string);
-    let origin_ok = origin.as_deref().is_none_or(|o| allowed_origin(o, port));
+    // A browser says where a request comes from (Sec-Fetch-Site). From another site it must come from the window: by
+    // its Origin, or, for a picture (an image names no Origin), by the page it was asked from (Referer). A web page's
+    // image or no-cors request names neither, and is not answered: it could otherwise spend an add-on's allowance.
+    // Programs that are not browsers (the engine, a script) say nothing of where they come from.
+    let elsewhere =
+        find(&request, "Sec-Fetch-Site").is_some_and(|s| !matches!(s, "same-origin" | "none"));
+    let origin_ok = match origin.as_deref() {
+        Some(o) => allowed_origin(o, port),
+        None if elsewhere => find(&request, "Referer")
+            .and_then(|r| Url::parse(r).ok())
+            .is_some_and(|r| allowed_origin(&origin_of(&r), port)),
+        None => true,
+    };
 
     // The engine reading a stream the core relays: answered on a thread of its own, as long as the song plays.
     if host_ok && request.url().starts_with("/relay/") {

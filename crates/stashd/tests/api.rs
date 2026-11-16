@@ -2853,3 +2853,54 @@ fn smart_playlists_fill_themselves_and_are_not_edited_by_hand() {
     assert_eq!(refused["done"], false, "{refused}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_web_page_cannot_use_the_core_and_the_window_can() {
+    let dir = std::env::temp_dir().join(format!("stash-api-pages-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let core = Core::bind(Options {
+        db: dir.join("library.db"),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: None,
+        mpv: None,
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let status = |headers: &[(&str, &str)]| {
+        let mut asked = agent.get(format!("{base}/api/counts"));
+        for (name, value) in headers {
+            asked = asked.header(*name, *value);
+        }
+        asked.call().unwrap().status().as_u16()
+    };
+    let other = ("Sec-Fetch-Site", "cross-site");
+    // A web page's image, or its no-cors request: from another site, naming no page of the window.
+    assert_eq!(status(&[other]), 403);
+    assert_eq!(
+        status(&[other, ("Referer", "https://pages.example/a/page")]),
+        403
+    );
+    assert_eq!(status(&[other, ("Origin", "https://pages.example")]), 403);
+    // The window: by its origin, or, for its pictures, by the page they were asked from.
+    assert_eq!(status(&[other, ("Origin", "http://tauri.localhost")]), 200);
+    assert_eq!(
+        status(&[other, ("Referer", "http://tauri.localhost/library")]),
+        200
+    );
+    assert_eq!(status(&[other, ("Referer", "tauri://localhost/")]), 200);
+    // The page the core serves itself, the listener typing the address, and programs that are not browsers.
+    assert_eq!(status(&[("Sec-Fetch-Site", "same-origin")]), 200);
+    assert_eq!(status(&[("Sec-Fetch-Site", "none")]), 200);
+    assert_eq!(status(&[]), 200);
+    let _ = std::fs::remove_dir_all(&dir);
+}
