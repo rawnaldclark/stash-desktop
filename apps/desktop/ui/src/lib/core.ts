@@ -94,6 +94,8 @@ export type PlaylistRow = {
 	updated_at_ms: number;
 	/** A smart playlist's rules: it fills itself. */
 	rules?: SmartRules;
+	/** Kept on this computer: its songs are saved, and so are songs that come onto it later. */
+	download?: boolean;
 };
 
 /** Smart playlists (the core's `smart.rs`): rules over what the library knows of a song. */
@@ -144,6 +146,14 @@ export const createSmartPlaylist = (name: string, rules: SmartRules) => post<Cha
 export const setPlaylistRules = (id: number, rules: SmartRules) => post<Changed>(`/api/playlists/${id}/rules`, { rules });
 /** How many songs `rules` pick now, and the first few. Rules that make no sense are refused in the core's words. */
 export const previewRules = (rules: SmartRules) => post<{ count: number; rows: TrackRow[] }>('/api/playlists/preview', { rules });
+
+// ---- Lists kept on this computer (a playlist, or the liked songs)
+
+/** Whether a list is kept on this computer, and how far: its songs, how many play with no connection, how many wait to be saved, and how many could not be. */
+export type ListDownload = { on: boolean; songs: number; here: number; waiting: number; failed: number };
+const keptPath = (list: string) => (list === 'liked' ? '/api/liked/download' : `/api/playlists/${encodeURIComponent(list)}/download`);
+export const listDownload = (list: string) => get<ListDownload>(keptPath(list));
+export const setListDownload = (list: string, on: boolean) => post<ListDownload>(keptPath(list), { on });
 
 // ---- Shortcuts that work in any app (the desktop app holds them; in a browser there are none)
 

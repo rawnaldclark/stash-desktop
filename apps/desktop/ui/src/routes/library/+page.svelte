@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { library, player, saveLiked } from '../../lib/app';
+	import { library, player } from '../../lib/app';
+	import DownloadSwitch from '../../lib/desktop/DownloadSwitch.svelte';
 	import type { HistoryEntry, LibraryItem, Playlist } from '../../lib/api';
 	import { measuring } from '../../lib/core';
 	import Albums from '../../lib/desktop/Albums.svelte';
@@ -138,7 +139,7 @@
 			<div class="lib-actions">
 				<button type="button" class="act-play" aria-label="Play your likes" disabled={!likes.length} onclick={() => play(likes)}><Icon name="play_arrow" /></button>
 				<button type="button" class="act-ib" aria-label="Shuffle your likes" title="Shuffle" disabled={!likes.length} onclick={() => { player.setShuffle(true); play(likes); }}><Icon name="shuffle" /></button>
-				<button type="button" class="act-ib" aria-label="Save your likes to this computer" title="Download" onclick={() => void saveLiked().then((said) => ui.toast(said), () => {})}><Icon name="download" /></button>
+				<DownloadSwitch list="liked" name="Liked songs" count={L.likes.length} />
 				<span class="lib-count">{needle ? `${likes.length} of ${songs(L.likes.length)}` : songs(L.likes.length)}</span>
 			</div>
 			<div class="trk-list">

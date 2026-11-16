@@ -145,6 +145,8 @@ pub struct PlaylistRow {
     /// A smart playlist's rules (`smart.rs`): it fills itself.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rules: Option<crate::smart::Rules>,
+    /// Kept on this computer: its songs are saved as files, and so are songs that come onto it later.
+    pub download: bool,
 }
 
 /// What the library knows a song by, for asking an add-on for it.
@@ -208,6 +210,7 @@ macro_rules! here {
         "((t.origin = 'file' AND t.missing_since IS NULL) OR EXISTS (SELECT 1 FROM played_copies pc WHERE pc.track_id = t.id))"
     };
 }
+pub(crate) use here;
 
 /// The most songs a search for albums or artists looks through. A query broad enough to pass it ("a") is answered
 /// from the first that many matches, which is still more albums and artists than a row of results shows.
@@ -593,7 +596,7 @@ impl Library {
     pub fn playlists(&self) -> Result<Vec<PlaylistRow>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT p.id, p.name, (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id), p.follow_id IS NOT NULL,
-                    p.external_id, p.created_at_ms, p.updated_at_ms, p.rules
+                    p.external_id, p.created_at_ms, p.updated_at_ms, p.rules, p.download
              FROM playlists p ORDER BY p.position, p.id",
         )?;
         let mut rows = stmt
@@ -610,6 +613,7 @@ impl Library {
                         .get::<_, Option<String>>(7)?
                         .and_then(|json| serde_json::from_str(&json).ok())
                         .and_then(|v| crate::smart::Rules::read(&v).ok()),
+                    download: r.get(8)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

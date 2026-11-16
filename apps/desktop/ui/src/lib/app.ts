@@ -434,6 +434,7 @@ function syncPlaylists(rows: core.PlaylistRow[], force: number[] = []): Promise<
 					const p: Playlist = { id, name: r.name, items, createdAt: r.created_at_ms, updatedAt: r.updated_at_ms };
 					if (r.followed) p.followed = true;
 					if (r.rules) p.rules = r.rules;
+					if (r.download) p.download = true;
 					return p;
 				})
 			);
@@ -506,8 +507,6 @@ export function saveSongs(items: LibraryItem[]): Promise<string> {
 		return savedWords((await core.saveSongs({ ids })).queued ?? 0, ids.length);
 	});
 }
-export const saveLiked = (): Promise<string> => change(async () => savedWords((await core.saveSongs({ liked: true })).queued ?? 0, 2));
-export const savePlaylist = (id: string): Promise<string> => change(async () => savedWords((await core.saveSongs({ playlist: Number(id) })).queued ?? 0, 2));
 /** Takes songs off the list; saved ones are deleted from this computer and play through the add-ons again. */
 export function unsaveSongs(items: LibraryItem[]): Promise<void> {
 	return change(async () => {

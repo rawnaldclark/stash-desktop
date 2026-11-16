@@ -9,11 +9,24 @@ use serde_json::{Map, Value, json};
 
 use crate::identity::clean_text;
 use crate::import::Song;
-use crate::library::Library;
+use crate::library::{Library, here};
 use crate::{Error, Result};
 
 /// Where a query's own columns start, after a track's.
 const AFTER: usize = crate::library::TRACK_COLUMN_COUNT;
+
+/// The setting that keeps the liked songs on this computer ("1"), as a playlist's `download` keeps it.
+pub const DOWNLOAD_LIKED: &str = "download.liked";
+
+/// How far a list kept on this computer is: its songs, how many play with no connection, how many wait to be saved
+/// (or are coming in), and how many could not be saved.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct DownloadProgress {
+    pub songs: u64,
+    pub here: u64,
+    pub waiting: u64,
+    pub failed: u64,
+}
 
 /// The file's own limits, kept by this writer too.
 const MAX_LIKES: usize = 50_000;
@@ -233,6 +246,95 @@ impl Library {
         }
         tx.commit()?;
         Ok(queued)
+    }
+
+    /// Puts songs on the list as [`Library::ask_downloads`] does, but leaves alone every song that has been on it: one
+    /// that could not be saved is not tried again, so a list kept on this computer does not spend an add-on's allowance
+    /// on the same song again and again (the listener can ask for it again). Answers how many were put on it.
+    pub fn ask_new_downloads(&mut self, ids: &[i64], now_ms: i64) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let mut queued = 0;
+        {
+            let mut ask = tx.prepare(
+                "INSERT INTO downloads(track_id, state, asked_at)
+                 SELECT id, 'queued', ?2 FROM tracks WHERE id = ?1 AND origin <> 'file'
+                 ON CONFLICT(track_id) DO NOTHING",
+            )?;
+            for id in ids {
+                queued += ask.execute(params![id, now_ms])?;
+            }
+        }
+        tx.commit()?;
+        Ok(queued)
+    }
+
+    /// Keeps playlist `id` on this computer, or stops. False when there is no such playlist.
+    pub fn set_playlist_download(&mut self, id: i64, on: bool) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE playlists SET download = ?2 WHERE id = ?1",
+            params![id, on],
+        )? > 0)
+    }
+
+    /// Whether playlist `id` is kept on this computer; `None` when there is no such playlist.
+    pub fn playlist_download(&self, id: i64) -> Result<Option<bool>> {
+        Ok(self
+            .conn
+            .query_row("SELECT download FROM playlists WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+
+    /// The songs of every list kept on this computer: the liked songs when they are, and each playlist that is (a
+    /// smart playlist's, as its rules pick them now).
+    pub fn kept_downloaded_ids(&self) -> Result<Vec<i64>> {
+        let mut ids = Vec::new();
+        if self.setting(DOWNLOAD_LIKED)?.as_deref() == Some("1") {
+            ids.extend(self.liked_ids_at(0, usize::MAX >> 1)?);
+        }
+        let lists: Vec<i64> = self
+            .conn
+            .prepare_cached("SELECT id FROM playlists WHERE download = 1")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for list in lists {
+            ids.extend(self.playlist_track_ids(list, 0, usize::MAX >> 1)?);
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        Ok(ids)
+    }
+
+    /// How far these songs are on this computer: how many play with no connection, how many wait to be saved (or are
+    /// coming in), and how many could not be saved.
+    pub fn download_progress(&self, ids: &[i64]) -> Result<DownloadProgress> {
+        let mut stmt = self.conn.prepare_cached(concat!(
+            "SELECT ",
+            here!(),
+            ", (SELECT d.state FROM downloads d WHERE d.track_id = t.id) FROM tracks t WHERE t.id = ?1"
+        ))?;
+        let mut progress = DownloadProgress {
+            songs: ids.len() as u64,
+            ..DownloadProgress::default()
+        };
+        for id in ids {
+            let found: Option<(bool, Option<String>)> = stmt
+                .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?;
+            let Some((here, state)) = found else {
+                continue;
+            };
+            if here {
+                progress.here += 1;
+            }
+            match state.as_deref() {
+                Some("queued" | "saving") => progress.waiting += 1,
+                Some("failed") => progress.failed += 1,
+                _ => {}
+            }
+        }
+        Ok(progress)
     }
 
     /// The next song to save, now marked as saving; the first asked for first.

@@ -3995,3 +3995,151 @@ fn offline_takes_back_the_song_handed_ahead() {
     assert_eq!(streams(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_list_kept_on_this_computer_saves_its_songs_and_those_that_come_later() {
+    let dir =
+        std::env::temp_dir().join(format!("stash-api-kept-lists-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (served, saved) = (dir.join("Served"), dir.join("Saved"));
+    std::fs::create_dir_all(&served).unwrap();
+    for name in ["echo", "foxtrot", "golf", "hotel", "india", "juliet"] {
+        silence(&served.join(format!("{name}.wav")));
+    }
+    let addon = DemoAddon::bind(&served, 0, Duration::ZERO).unwrap();
+    let link = addon.link();
+    std::thread::spawn(move || addon.run());
+    let core = Core::bind(Options {
+        db: dir.join("library.db"),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: None,
+        mpv: None,
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    let folder = saved.to_string_lossy().into_owned();
+    client.post("/api/downloads/folder", json!({ "folder": folder }));
+    client.post("/api/addons", json!({ "link": link }));
+    let keep = |title: &str| -> i64 {
+        let (_, found) = client.get(&format!(
+            "/api/addons/search?q={title}&addon=demo.folder&limit=1"
+        ));
+        let track = found["groups"][0]["tracks"][0].clone();
+        client.post(
+            "/api/tracks/keep",
+            json!({ "addon": "demo.folder", "track": track }),
+        )["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let [echo, foxtrot, golf, hotel, india, juliet] =
+        ["echo", "foxtrot", "golf", "hotel", "india", "juliet"].map(keep);
+    let road = client.post("/api/playlists", json!({ "name": "Road" }))["id"]
+        .as_i64()
+        .unwrap();
+    client.post(
+        &format!("/api/playlists/{road}/add"),
+        json!({ "ids": [echo] }),
+    );
+    let kept = |path: &str| -> Value { client.get(path).1 };
+    let road_kept = format!("/api/playlists/{road}/download");
+    // Waits until nothing is queued or coming in, and answers how far the list is.
+    let settled = |path: &str| -> Value {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let now = kept(path);
+            let (_, list) = client.get("/api/downloads");
+            if now["waiting"] == 0 && list["counts"]["queued"] == 0 && list["counts"]["saving"] == 0
+            {
+                return now;
+            }
+            assert!(Instant::now() < deadline, "still saving: {now} {list}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+
+    // Not kept: nothing is saved.
+    assert_eq!(
+        kept(&road_kept),
+        json!({ "on": false, "songs": 1, "here": 0, "waiting": 0, "failed": 0 })
+    );
+    // Kept: its song is saved, and its row says so.
+    let on = client.post(&road_kept, json!({ "on": true }));
+    assert_eq!(on["on"], true);
+    assert_eq!(
+        settled(&road_kept),
+        json!({ "on": true, "songs": 1, "here": 1, "waiting": 0, "failed": 0 })
+    );
+    let (_, lists) = client.get("/api/playlists");
+    let row = lists["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == road)
+        .unwrap()
+        .clone();
+    assert_eq!(row["download"], true, "{row}");
+    assert!(saved.join("Unknown artist").join("echo.wav").is_file());
+    // A song added to it later is saved too.
+    client.post(
+        &format!("/api/playlists/{road}/add"),
+        json!({ "ids": [foxtrot] }),
+    );
+    assert_eq!(settled(&road_kept)["here"], 2);
+
+    // The liked songs, kept: the liked ones are saved, and a song liked later.
+    client.post("/api/tracks/like", json!({ "id": golf, "liked": true }));
+    assert_eq!(
+        client.post("/api/liked/download", json!({ "on": true }))["on"],
+        true
+    );
+    assert_eq!(settled("/api/liked/download")["here"], 1);
+    client.post("/api/tracks/like", json!({ "id": hotel, "liked": true }));
+    assert_eq!(
+        settled("/api/liked/download"),
+        json!({ "on": true, "songs": 2, "here": 2, "waiting": 0, "failed": 0 })
+    );
+
+    // A song that cannot be saved (the add-on has lost it) is said so, and is not tried again on its own: keeping the
+    // list again does not put it back on the list (the listener can, in Library › Downloads).
+    std::fs::remove_file(served.join("india.wav")).unwrap();
+    client.post(
+        &format!("/api/playlists/{road}/add"),
+        json!({ "ids": [india] }),
+    );
+    assert_eq!(settled(&road_kept)["failed"], 1);
+    client.post(&road_kept, json!({ "on": false }));
+    let again = client.post(&road_kept, json!({ "on": true }));
+    assert_eq!(
+        (&again["failed"], &again["waiting"]),
+        (&json!(1), &json!(0))
+    );
+
+    // Stopped: a song added later is not saved, and the songs saved stay.
+    client.post(&road_kept, json!({ "on": false }));
+    client.post(
+        &format!("/api/playlists/{road}/add"),
+        json!({ "ids": [juliet] }),
+    );
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(
+        kept(&road_kept),
+        json!({ "on": false, "songs": 4, "here": 2, "waiting": 0, "failed": 1 })
+    );
+    assert!(saved.join("Unknown artist").join("foxtrot.wav").is_file());
+
+    // Refused: a switch with no true or false, and a playlist there is not.
+    assert_eq!(client.send(&road_kept, json!({ "on": "yes" })).0, 400);
+    assert_eq!(client.get("/api/playlists/999999/download").0, 404);
+    let _ = std::fs::remove_dir_all(&dir);
+}

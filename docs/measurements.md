@@ -592,3 +592,35 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 
 - No key was pressed on this computer, since a press would reach other programs. A key pressed reaches the core through the same call the tests make. The one step not seen is the plugin handing a press to the shell.
 - macOS and Linux were not tried. On Linux the keys need X11; under Wayland they are not held.
+
+## 24. Lists kept on this computer
+
+- **A playlist, or the liked songs, can be kept on this computer.** The download button on a playlist's page, and on Library › Liked, is now a switch. While it is on:
+  - the list's songs are saved as files;
+  - so are songs that come onto the list later: added to it, liked, or picked by a smart playlist's rules.
+
+  The kept lists are looked at whenever the likes or the playlists change, and every 30 seconds while nothing is being saved. Next to the switch, the list says how far it is: "Saving: 3 of 40 on this computer", "On this computer", and how many could not be saved.
+- **A song that could not be saved is not tried again on its own.** Each try may spend an add-on's allowance. The listener can ask for it again in Library › Downloads.
+- **Turning the switch off saves no more of the list.** Songs already saved stay; Library › Downloads takes them off. Offline, nothing is fetched and the list waits.
+- **Schema 15** adds `playlists.download`. The liked songs' choice is the setting `download.liked`.
+
+### Checked
+
+- **By the tests:** `a_list_kept_on_this_computer_saves_its_songs_and_those_that_come_later`, with an add-on on this computer:
+  - A playlist that was not kept had nothing saved.
+  - Kept, its song was saved, and the playlist's row said so. A song added to it later was saved too.
+  - Liked songs, kept: the liked song was saved, and so was a song liked later.
+  - A song the add-on had lost could not be saved. It was said so, and was not put back on the list when the playlist was kept again.
+  - Turned off, a song added later was not saved, and the songs saved stayed.
+  - A switch with no true or false, and a playlist that does not exist, were refused.
+- **On the built page served by the core, light and dark.** This used a new scratch library and an add-on on this computer serving four made-up songs, with each answer held back 0.7 s.
+  - The playlist's switch said "Saving: 0 of 3 on this computer", then "On this computer".
+  - A song added to the playlist showed "Saving: 3 of 4 on this computer", then "On this computer".
+  - Liked songs, kept, showed "On this computer".
+  - Turned off, the playlist said "Trip is no longer kept on this computer. Songs saved stay (Library › Downloads)", and the four files saved were still there.
+  - No errors in the page.
+
+### Not covered yet
+
+- The library's cards and the sidebar do not mark which lists are kept.
+- Turning the switch off does not take back songs still waiting to be saved: they still come.

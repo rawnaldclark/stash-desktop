@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { library, player, savePlaylist } from '../../../lib/app';
+	import { library, player } from '../../../lib/app';
+	import DownloadSwitch from '../../../lib/desktop/DownloadSwitch.svelte';
 	import type { LibraryItem } from '../../../lib/api';
 	import Icon from '../../../lib/ui/Icon.svelte';
 	import Tile from '../../../lib/ui/Tile.svelte';
@@ -58,7 +59,7 @@
 		<div class="alb-act">
 			<button type="button" class="act-play" aria-label="Play {pl.name}" disabled={!pl.items.length} onclick={() => play(pl.items)}><Icon name="play_arrow" /></button>
 			<button type="button" class="act-ib" aria-label="Shuffle {pl.name}" title="Shuffle" disabled={!pl.items.length} onclick={() => { player.setShuffle(true); play(pl.items); }}><Icon name="shuffle" /></button>
-			<button type="button" class="act-ib" aria-label="Save {pl.name} to this computer" title="Download" disabled={!pl.items.length} onclick={() => void savePlaylist(pl.id).then((said) => ui.toast(said), () => {})}><Icon name="download" /></button>
+			<DownloadSwitch list={pl.id} name={pl.name} count={pl.items.length} />
 			{#if smart}<button type="button" class="btn ghost" onclick={() => (ui.smart = { id: pl.id })}>Edit rules</button>{/if}
 			<button type="button" class="act-ib" aria-label="Rename playlist" title="Rename" onclick={() => { draft = pl.name; editing = true; }}><Icon name="edit" /></button>
 			{#if confirmDelete}

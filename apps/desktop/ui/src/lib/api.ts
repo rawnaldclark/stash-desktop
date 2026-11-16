@@ -122,6 +122,8 @@ export type Playlist = {
 	followed?: boolean;
 	/** A smart playlist's rules: it fills itself, and its songs are not edited by hand. */
 	rules?: SmartRules;
+	/** Kept on this computer (its songs are saved, and so are songs added later). */
+	download?: boolean;
 };
 
 /** A play that counted. `playedAt` is when the play STARTED (epoch ms). */

@@ -27,12 +27,17 @@ use crate::serve::{Reply, State, body_json, now_ms, refuse, reply_json, through_
 const FOLDER: &str = "downloads.folder";
 /// How often the one coming in checks it is still wanted.
 const LOOK_EVERY: Duration = Duration::from_millis(500);
+/// How often, with nothing to save, the lists kept on this computer are looked at for songs that came onto them (a
+/// smart playlist's rules pick new songs as they are played). A change to the likes or the playlists looks at once.
+const LISTS_EVERY: Duration = Duration::from_secs(30);
 
 /// The song coming in, how far, and a bell to ring when there is something new on the list.
 #[derive(Default)]
 pub(crate) struct Saving {
     now: Mutex<Option<Progress>>,
     bell: (Mutex<bool>, Condvar),
+    /// The lists kept on this computer are to be looked at again.
+    lists: AtomicBool,
 }
 
 #[derive(Clone, Copy, serde::Serialize)]
@@ -43,8 +48,9 @@ struct Progress {
 }
 
 impl Saving {
-    /// Something was put on the list: the worker looks at once.
+    /// Something was put on the list, or the lists kept on this computer may hold new songs: the worker looks at once.
     pub fn ring(&self) {
+        self.lists.store(true, Ordering::Relaxed);
         *self.bell.0.lock().unwrap() = true;
         self.bell.1.notify_all();
     }
@@ -80,6 +86,7 @@ pub(crate) fn folder(library: &Library) -> PathBuf {
 /// one song at a time, and a line is not shared between two big files).
 pub(crate) fn run(state: &State, stop: &AtomicBool) {
     let _ = state.library.lock().unwrap().requeue_downloads();
+    let mut looked: Option<Instant> = None;
     while !stop.load(Ordering::Relaxed) {
         // Offline, nothing is fetched: what was asked for waits.
         if crate::serve::offline(state) {
@@ -87,10 +94,25 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
             continue;
         }
         let next = state.library.lock().unwrap().next_download().ok().flatten();
-        match next {
-            Some(id) => save(state, id, stop),
-            None => state.saving.wait(Duration::from_secs(2)),
+        if let Some(id) = next {
+            save(state, id, stop);
+            continue;
         }
+        // Nothing to save: songs that came onto a list kept on this computer are put on the list.
+        let changed = state.saving.lists.swap(false, Ordering::Relaxed);
+        if changed || looked.is_none_or(|at| at.elapsed() >= LISTS_EVERY) {
+            looked = Some(Instant::now());
+            let mut library = state.library.lock().unwrap();
+            let asked = library
+                .kept_downloaded_ids()
+                .and_then(|ids| library.ask_new_downloads(&ids, now_ms()));
+            match asked {
+                Ok(0) => {}
+                Ok(_) => continue,
+                Err(e) => eprintln!("the lists kept on this computer were not read: {e:#}"),
+            }
+        }
+        state.saving.wait(Duration::from_secs(2));
     }
 }
 
@@ -281,6 +303,89 @@ fn remove_saved(file: &Path, root: &Path) {
 }
 
 /// The downloads routes. `None`: the path is not one of them.
+/// A list kept on this computer (`/api/liked/download`, `/api/playlists/{id}/download`). GET: whether it is, and how
+/// far (its songs, how many play with no connection, how many wait to be saved, how many could not be). POST `{on}`:
+/// keeps it or stops; kept, its songs are put on the list at once, and songs that come onto it later are saved too.
+/// Stopping saves no more of it: songs saved stay on this computer (Library › Downloads takes them off).
+pub(crate) fn kept_route(
+    state: &State,
+    request: &mut Request,
+    path: &str,
+) -> anyhow::Result<Option<Reply>> {
+    let playlist = match path {
+        "/api/liked/download" => None,
+        _ => match path
+            .strip_prefix("/api/playlists/")
+            .and_then(|rest| rest.strip_suffix("/download"))
+        {
+            Some(id) => match id.parse::<i64>() {
+                Ok(id) => Some(id),
+                Err(_) => return Ok(None),
+            },
+            None => return Ok(None),
+        },
+    };
+    let method = request.method().clone();
+    if !matches!(method, Method::Get | Method::Post) {
+        return Ok(None);
+    }
+    let on = if method == Method::Post {
+        let Some(on) = body_json(request)?.get("on").and_then(Value::as_bool) else {
+            return Ok(Some(refuse(400, "on is true or false")));
+        };
+        Some(on)
+    } else {
+        None
+    };
+    let mut library = state.library.lock().unwrap();
+    let kept = match playlist {
+        None => {
+            library
+                .setting(stash_core::lists::DOWNLOAD_LIKED)?
+                .as_deref()
+                == Some("1")
+        }
+        Some(id) => match library.playlist_download(id)? {
+            Some(kept) => kept,
+            None => return Ok(Some(refuse(404, "no such playlist"))),
+        },
+    };
+    let ids = |library: &Library| -> stash_core::Result<Vec<i64>> {
+        match playlist {
+            None => library.liked_ids_at(0, usize::MAX >> 1),
+            Some(id) => library.playlist_track_ids(id, 0, usize::MAX >> 1),
+        }
+    };
+    let kept = match on {
+        Some(on) if on != kept => {
+            match playlist {
+                None => library.set_setting(
+                    stash_core::lists::DOWNLOAD_LIKED,
+                    if on { "1" } else { "0" },
+                )?,
+                Some(id) => {
+                    library.set_playlist_download(id, on)?;
+                }
+            }
+            if on {
+                let songs = ids(&library)?;
+                library.ask_new_downloads(&songs, now_ms())?;
+            }
+            on
+        }
+        _ => kept,
+    };
+    let progress = library.download_progress(&ids(&library)?)?;
+    drop(library);
+    if on.is_some() {
+        // The playlists' rows say which are kept: every window reads them again.
+        state.edited();
+    }
+    let mut answer = json!(progress);
+    answer["on"] = json!(kept);
+    Ok(Some(reply_json(200, answer)))
+}
+
 pub(crate) fn route(
     state: &State,
     request: &mut Request,

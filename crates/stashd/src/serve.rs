@@ -702,9 +702,10 @@ pub(crate) struct State {
 }
 
 impl State {
-    /// Notes that the likes or the playlists changed.
+    /// Notes that the likes or the playlists changed. A list kept on this computer may have new songs to save.
     pub(crate) fn edited(&self) {
         self.edits.fetch_add(1, Ordering::Relaxed);
+        self.saving.ring();
     }
 
     /// Starts reading `folders` into the library on a thread of its own, through a connection of its own, so the
@@ -2097,6 +2098,10 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
     let library = || state.library.lock().unwrap();
     if *request.method() == Method::Post && path == "/api/import" {
         return Ok((import_route(state, request)?, false));
+    }
+    // Before the lists' own routes, which read a request's body before passing on a path they do not answer.
+    if let Some(response) = crate::saving::kept_route(state, request, &path)? {
+        return Ok((response, false));
     }
     if let Some(response) = lists_route(state, request, &path)? {
         return Ok((response, false));
