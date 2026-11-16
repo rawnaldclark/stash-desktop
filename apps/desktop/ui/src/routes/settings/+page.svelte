@@ -121,7 +121,7 @@
 		}
 	}
 	/** A new version of an add-on, shown until it is taken or put off. */
-	let offer = $state<{ id: string; version: string; changes: core.AddonChange[] } | null>(null);
+	let offer = $state<{ id: string; version: string; changes: core.AddonChange[]; token: string | null } | null>(null);
 	/** The add-on being asked for a new version, or being updated. */
 	let checking = $state<string | null>(null);
 	/** What the last check said, when there was nothing to take. */
@@ -143,12 +143,12 @@
 		}
 	}
 	async function takeOffer() {
-		if (!offer || checking) return;
-		const { id } = offer;
+		if (!offer || !offer.token || checking) return;
+		const { id, token } = offer;
 		checking = id;
 		addonTrouble = null;
 		try {
-			await sources.update(id);
+			await sources.update(id, token);
 			offer = null;
 		} catch (x) {
 			offer = null;
@@ -515,7 +515,7 @@
 									<button type="button" class="act-ib" disabled={i === 0} aria-label="Ask {a.name} earlier" title="Ask earlier" onclick={() => move(i, -1)}><Icon name="arrow_upward" /></button>
 									<button type="button" class="act-ib" disabled={i === L.sources.length - 1} aria-label="Ask {a.name} later" title="Ask later" onclick={() => move(i, 1)}><Icon name="arrow_downward" /></button>
 									<button type="button" class="btn ghost" aria-label="Check {a.name} for a new version" title="Check for a new version" disabled={checking !== null || ui.offline} onclick={() => check(a)}>{checking === a.id && offer?.id !== a.id ? 'Checking…' : 'Check'}</button>
-									<button type="button" class="btn ghost" aria-label="Remove {a.name}" onclick={() => addonChange(() => sources.remove(a.id))}>Remove</button>
+									<button type="button" class="btn ghost" aria-label="Remove {a.name}" onclick={() => { if (offer?.id === a.id) offer = null; void addonChange(() => sources.remove(a.id)); }}>Remove</button>
 								</span>
 								{#if offer?.id === a.id}
 									<div class="src-offer" role="group" aria-labelledby="offer-h">

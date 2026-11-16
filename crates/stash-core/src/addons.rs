@@ -333,8 +333,41 @@ impl Addon {
     /// on: the add-on may send Stash no nearer.
     pub fn from_link(link: &str) -> Result<Self> {
         let (url, base) = base_of(link)?;
-        let (fetcher, seen) = reach::Guarded::noting(config());
-        let given: serde_json::Value = get_json(&fetcher, url.as_str())?;
+        // Each place in turn, farthest first, until one answers: there the add-on is (see `Guarded::only`). A place
+        // where the name has no address is passed over at once; one where nothing answers, after its wait.
+        let mut answered = None;
+        let mut trouble: Option<AddonError> = None;
+        for place in [Reach::Internet, Reach::Home, Reach::Here] {
+            match get_json::<serde_json::Value>(
+                &reach::Guarded::only(place, config()),
+                url.as_str(),
+            ) {
+                Ok(given) => {
+                    answered = Some((given, place));
+                    break;
+                }
+                Err(e) if e.message == NONE_THERE => {}
+                Err(e) if matches!(e.code, Code::Network | Code::Timeout) => {
+                    trouble.get_or_insert(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        let Some((mut given, reach)) = answered else {
+            return Err(trouble.unwrap_or_else(|| AddonError::host(Code::Network, "")));
+        };
+        // The host's own notes are not an add-on's to set, nor to break by a field of the same name.
+        if let Some(fields) = given.as_object_mut() {
+            for note in [
+                "dialect",
+                "resolve_by_isrc",
+                "quality",
+                "no_downloads",
+                "reach",
+            ] {
+                fields.remove(note);
+            }
+        }
         let mut manifest = match given.get("stash").map(|v| v.as_u64()) {
             Some(Some(1)) => {
                 let mut manifest: Manifest = serde_json::from_value(given).map_err(|e| {
@@ -367,8 +400,6 @@ impl Addon {
             }
         };
         check_manifest(&manifest)?;
-        // Where its manifest came from (the farthest of the addresses its name gave).
-        let reach = seen.farthest().unwrap_or(Reach::Internet);
         manifest.reach = Some(reach);
         Ok(Self {
             manifest,
@@ -409,7 +440,21 @@ impl Addon {
     fn within_reach(&self, url: &str) -> Result<()> {
         let url = Url::parse(url).map_err(|e| AddonError::invalid(e.to_string()))?;
         reach::as_written(&url, self.reach)
-            .map_err(|refused| AddonError::host(Code::Refused, refused.to_string()))
+            .map_err(|refused| self.hinted(AddonError::host(Code::Refused, refused.to_string())))
+    }
+
+    /// A refusal for being nearer than the add-on may reach, told how to mend it when the add-on was added before
+    /// Stash noted where add-ons are (it was then placed by its link alone, and may be nearer than that).
+    fn hinted(&self, mut e: AddonError) -> AddonError {
+        if self.manifest.reach.is_none()
+            && e.code == Code::Refused
+            && e.message.ends_with("may not send Stash there")
+        {
+            e.message.push_str(
+                " (it was added before Stash noted where add-ons are: check it for a new version in Settings, Add-ons)",
+            );
+        }
+        e
     }
 
     /// `track` without the covers whose address names a place the add-on may not send Stash.
@@ -463,7 +508,21 @@ impl Addon {
             );
         }
         if was.description != now.description {
-            said("Its description changed.".into(), false);
+            said(
+                match now
+                    .description
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|d| !d.is_empty())
+                {
+                    Some(text) => format!(
+                        "It describes itself now as \u{201c}{}\u{201d}.",
+                        described(text)
+                    ),
+                    None => "It no longer describes itself.".into(),
+                },
+                false,
+            );
         }
         let (before, after) = (kept.abilities(), self.abilities());
         let gained: Vec<&str> = after
@@ -561,7 +620,9 @@ impl Addon {
     /// A file to keep of one of its tracks (contract section 4.5): one progressive file, the best it has within
     /// `want`'s tiers. An Eclipse add-on is asked for its stream, which is the whole file.
     pub fn download(&self, id: &str, want: &StreamRequest) -> Result<StreamInfo> {
-        let info = self.download_as_given(id, want)?;
+        let info = self
+            .download_as_given(id, want)
+            .map_err(|e| self.hinted(e))?;
         self.within_reach(&info.url)?;
         Ok(info)
     }
@@ -609,7 +670,9 @@ impl Addon {
 
     /// Tracks matching `query`, at most `limit` (1 to 200).
     pub fn search(&self, query: &str, limit: u32) -> Result<Vec<Track>> {
-        let found = self.search_as_given(query, limit)?;
+        let found = self
+            .search_as_given(query, limit)
+            .map_err(|e| self.hinted(e))?;
         Ok(found.into_iter().map(|t| self.screened(t)).collect())
     }
 
@@ -635,6 +698,14 @@ impl Addon {
     /// The add-on's lyrics (contract section 4.6) for one of its own tracks (`id`), else for the song `wanted`.
     /// `None` when it has none. An add-on made for Eclipse is not asked: its lyrics are not part of what is read.
     pub fn lyrics(
+        &self,
+        id: Option<&str>,
+        wanted: &Wanted,
+    ) -> Result<Option<crate::lyrics::Lyrics>> {
+        self.lyrics_as_given(id, wanted).map_err(|e| self.hinted(e))
+    }
+
+    fn lyrics_as_given(
         &self,
         id: Option<&str>,
         wanted: &Wanted,
@@ -679,7 +750,9 @@ impl Addon {
     /// can: a track whose length is off by more than 8 s or 3 % is refused, and so is one the add-on says it cannot
     /// give at `min_tier`.
     pub fn resolve(&self, wanted: &Wanted, min_tier: Option<Tier>) -> Result<Option<Track>> {
-        let found = self.resolve_as_given(wanted, min_tier)?;
+        let found = self
+            .resolve_as_given(wanted, min_tier)
+            .map_err(|e| self.hinted(e))?;
         Ok(found.map(|t| self.screened(t)))
     }
 
@@ -784,7 +857,7 @@ impl Addon {
     /// the asked range, a delivery that was not asked for, an encrypted stream, a URL that is not https, or a tier
     /// its own codec contradicts are all refused as [`Code::InvalidResponse`].
     pub fn stream(&self, id: &str, want: &StreamRequest) -> Result<StreamInfo> {
-        let info = self.stream_as_given(id, want)?;
+        let info = self.stream_as_given(id, want).map_err(|e| self.hinted(e))?;
         self.within_reach(&info.url)?;
         Ok(info)
     }
@@ -917,6 +990,14 @@ fn listed(items: &[&str]) -> String {
     }
 }
 
+/// An add-on's description, cut short at 200 characters.
+fn described(text: &str) -> String {
+    if text.chars().count() <= 200 {
+        return text.to_string();
+    }
+    text.chars().take(200).collect::<String>() + "\u{2026}"
+}
+
 /// What an add-on says, cut short for a sentence of the host's.
 fn short(text: &str) -> String {
     let text = text.trim();
@@ -941,6 +1022,8 @@ fn config() -> ureq::config::Config {
         .max_redirects(0)
         .http_status_as_error(false)
         .user_agent(concat!("Stash-desktop/", env!("CARGO_PKG_VERSION")))
+        // Through a proxy, the guard would look up the proxy and never the add-on: none is used.
+        .proxy(None)
         .build()
 }
 
@@ -1068,11 +1151,17 @@ struct ErrorDetail {
 /// that broke once the request was on its way (it may have been asked, and have spent something on it), an answer
 /// that is not HTTP, or a secure connection its server could not make (a certificate that does not hold: the server
 /// answered).
+/// What a request for a manifest says when the place asked has no address for the name (see `Addon::from_link`).
+const NONE_THERE: &str = "the name has no address there";
+
 fn unanswered(e: ureq::Error) -> AddonError {
     use std::io::ErrorKind;
     // An address nearer than the add-on may send Stash: refused before anything was sent.
     if let Some(words) = reach::refusal(&e) {
         return AddonError::host(Code::Refused, words);
+    }
+    if reach::none_there(&e) {
+        return AddonError::host(Code::Network, NONE_THERE);
     }
     match e {
         ureq::Error::HostNotFound
@@ -1496,7 +1585,10 @@ mod tests {
         assert_eq!(
             said,
             [
-                ("Its description changed.".to_string(), false),
+                (
+                    "It describes itself now as \u{201c}Now with lyrics\u{201d}.".to_string(),
+                    false
+                ),
                 (
                     "It can now be asked for lyrics, \u{201c}x-new\u{201d} and saving songs.".to_string(),
                     true

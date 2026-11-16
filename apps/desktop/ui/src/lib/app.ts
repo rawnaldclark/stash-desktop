@@ -815,9 +815,9 @@ const sources: SourcesAPI = {
 	check: async (id) => {
 		const checked = await core.checkAddon(id);
 		addonStore.set(checked.addons);
-		return { changes: checked.changes, version: checked.version };
+		return { changes: checked.changes, version: checked.version, token: checked.token };
 	},
-	update: async (id) => addonStore.set(await core.updateAddon(id))
+	update: async (id, token) => addonStore.set(await core.updateAddon(id, token))
 };
 
 // ------------------------------------------------------------------------------------------------ search

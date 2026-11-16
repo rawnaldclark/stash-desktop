@@ -220,9 +220,9 @@ export interface SourcesAPI {
 	/** The add-ons' ids in the order they are asked. */
 	order(ids: string[]): Promise<void>;
 	/** Asks the add-on's link for a new version: what changed (none: it is up to date) and the version it gives. */
-	check(id: string): Promise<{ changes: AddonChange[]; version: string }>;
-	/** Takes the new version `check` offered. */
-	update(id: string): Promise<void>;
+	check(id: string): Promise<{ changes: AddonChange[]; version: string; token: string | null }>;
+	/** Takes the new version `check` offered: `token` is the one it came with, so what is taken is what was shown. */
+	update(id: string, token: string): Promise<void>;
 }
 
 export interface AppAPI {

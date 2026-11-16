@@ -212,6 +212,8 @@ pub fn fetch(
         .timeout_recv_body(Some(Duration::from_secs(30 * 60)))
         .max_redirects(5)
         .https_only(!is_loopback(url))
+        // Through a proxy, the guard would look up the proxy and never the server: none is used.
+        .proxy(None)
         .build();
     let agent = Guarded::agent(reach, config);
     let mut answer = agent.get(url).call().map_err(|e| {
@@ -312,6 +314,8 @@ pub fn fetch(
 /// A stream as its server answers it, to be relayed to the engine: the status, the headers the engine reads, and the
 /// body.
 pub struct Upstream {
+    /// Where the answer came from, after any redirects.
+    pub url: String,
     pub status: u16,
     pub content_type: Option<String>,
     pub length: Option<u64>,
@@ -338,6 +342,8 @@ pub fn open_stream(url: &str, reach: Reach, range: Option<&str>) -> Result<Upstr
         .timeout_recv_body(Some(Duration::from_secs(4 * 3600)))
         .max_redirects(5)
         .https_only(!is_loopback(url))
+        // Through a proxy, the guard would look up the proxy and never the server: none is used.
+        .proxy(None)
         .build();
     let agent = Guarded::agent(reach, config);
     // As it is: a compressed answer's length and ranges are not those of the bytes read from it.
@@ -349,6 +355,7 @@ pub fn open_stream(url: &str, reach: Reach, range: Option<&str>) -> Result<Upstr
         let why = crate::reach::refusal(&e).unwrap_or_else(|| e.to_string());
         Trouble::Failed(format!("the stream could not be opened: {why}"))
     })?;
+    let landed = ureq::ResponseExt::get_uri(&answer).to_string();
     let text = |name: &str| {
         answer
             .headers()
@@ -365,6 +372,7 @@ pub fn open_stream(url: &str, reach: Reach, range: Option<&str>) -> Result<Upstr
     let encoded = text("content-encoding")
         .is_some_and(|v| !v.trim().is_empty() && !v.trim().eq_ignore_ascii_case("identity"));
     Ok(Upstream {
+        url: landed,
         status: answer.status().as_u16(),
         content_type: text("content-type"),
         length: length.filter(|_| !encoded),
@@ -399,6 +407,8 @@ pub fn fetch_cover(url: &str, reach: Reach) -> Option<Vec<u8>> {
         .timeout_global(Some(Duration::from_secs(20)))
         .max_redirects(5)
         .https_only(!is_loopback(url))
+        // Through a proxy, the guard would look up the proxy and never the server: none is used.
+        .proxy(None)
         .build();
     let agent = Guarded::agent(reach, config);
     let mut answer = agent.get(url).call().ok()?;

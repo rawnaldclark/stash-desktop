@@ -335,20 +335,6 @@ fn quality(info: &StreamInfo) -> String {
 
 /// What the start of a stream's file is, fetched as the core fetches it (held to the add-on's reach, from a range).
 fn first_bytes(addon: &Addon, info: &StreamInfo) -> (Verdict, String) {
-    if info.manifest != Delivery::None {
-        let url = url::Url::parse(&info.url);
-        return match url.map(|u| stash_core::reach::looked_up(&u, addon.reach())) {
-            Ok(Ok(())) => (
-                Verdict::Ok,
-                format!(
-                    "a {} stream, which the engine reads by itself (not fetched here)",
-                    info.manifest.as_str()
-                ),
-            ),
-            Ok(Err(refused)) => (Verdict::Fail, refused.to_string()),
-            Err(e) => (Verdict::Fail, format!("its address is not a URL: {e}")),
-        };
-    }
     let upstream = match downloads::open_stream(&info.url, addon.reach(), Some("bytes=0-")) {
         Ok(upstream) => upstream,
         Err(
@@ -361,6 +347,34 @@ fn first_bytes(addon: &Addon, info: &StreamInfo) -> (Verdict, String) {
         ) => return (Verdict::Fail, why),
         Err(downloads::Trouble::Cancelled) => return (Verdict::Fail, "cancelled".into()),
     };
+    if info.manifest != Delivery::None {
+        // A playlist of pieces: read as the relay reads it.
+        let mut text = String::new();
+        let _ = upstream
+            .body
+            .take(4 * 1024 * 1024)
+            .read_to_string(&mut text);
+        let wanted = match info.manifest {
+            Delivery::Hls => crate::pieces::Kind::Hls,
+            _ => crate::pieces::Kind::Dash,
+        };
+        return match crate::pieces::kind_of(&text) {
+            Some(kind) if kind == wanted => (
+                Verdict::Ok,
+                format!(
+                    "a {} playlist; the engine reads it and its pieces through the core (the pieces are not fetched here)",
+                    info.manifest.as_str()
+                ),
+            ),
+            _ => (
+                Verdict::Fail,
+                format!(
+                    "the add-on said a {} playlist, and its address gives something else",
+                    info.manifest.as_str()
+                ),
+            ),
+        };
+    }
     if !(200..300).contains(&upstream.status) {
         return (
             Verdict::Fail,

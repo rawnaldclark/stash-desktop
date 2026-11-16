@@ -256,9 +256,11 @@ fn stream_from(
     })
 }
 
-/// What the engine is given for a stream an add-on of `reach` named: a plain one goes through the relay, where every
-/// connection, redirects too, is held to the add-on's reach (and a copy may be kept of a library song's); a
-/// playlist of pieces, which the engine fetches by itself, only once its address is looked up and found in reach.
+/// What the engine is given for a stream an add-on of `reach` named: always an address of the relay, which makes
+/// every connection for it held to the add-on's reach, redirects too. A plain stream goes through a link of its own
+/// (and a copy may be kept of a library song's); a playlist of pieces through the relay's address for its server,
+/// where it is rewritten so that its pieces come through the relay as well ([`crate::pieces`]). The engine is never
+/// given the add-on's address itself: it would read some of them otherwise than the core does (a backslash, say).
 fn hand_over(
     relays: &crate::relay::Relays,
     port: u16,
@@ -266,12 +268,18 @@ fn hand_over(
     (plain, located): (bool, Located),
     reach: stash_core::reach::Reach,
 ) -> std::result::Result<Located, String> {
+    let url = Url::parse(&located.locator).map_err(|e| format!("its address is not one: {e}"))?;
     if plain {
+        let located = Located {
+            locator: url.as_str().to_string(),
+            ..located
+        };
         return Ok(relays.link(port, song, located, reach));
     }
-    let url = Url::parse(&located.locator).map_err(|e| e.to_string())?;
-    stash_core::reach::looked_up(&url, reach).map_err(|refused| refused.to_string())?;
-    Ok(located)
+    Ok(Located {
+        locator: relays.origin_address(port, &url, reach),
+        ..located
+    })
 }
 
 /// What each add-on was found not to have, and when: (the song, the add-on). It is not asked again for a while, so a
@@ -884,14 +892,33 @@ pub(crate) struct State {
 /// An add-on as its link gave it when it was checked, waiting for the listener to say yes. What is taken is what they
 /// were shown: the link is not asked again.
 struct Offered {
-    /// The link it came from: an add-on added again since, from another link, is not replaced by it.
+    /// The add-on as it was kept when it was checked: one changed since (removed, added again) is not replaced.
     link: String,
+    manifest: String,
     addon: Addon,
     at: Instant,
+    /// Given to the window with the changes, and asked back: what is taken is what that window showed.
+    token: String,
 }
 
 /// How long a new version that was offered may be taken.
 const OFFER_FOR: Duration = Duration::from_secs(15 * 60);
+/// What a check or an update says when the add-on was removed, added again or updated while it ran.
+const CHANGED_MEANWHILE: &str =
+    "the add-on changed while it was being checked (removed, or added again): check it again";
+
+/// A number hard to guess, for an offer's token.
+fn rand_u64() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    );
+    hasher.finish()
+}
 
 impl State {
     /// Notes that the likes or the playlists changed. A list kept on this computer may have new songs to save.
@@ -1260,7 +1287,20 @@ fn answer(state: &State, mut request: Request) -> bool {
 
     // The engine reading a stream the core relays: answered on a thread of its own, as long as the song plays.
     if host_ok && request.url().starts_with("/relay/") {
-        state.relays.answer(Arc::clone(&state.library), request);
+        state
+            .relays
+            .answer(Arc::clone(&state.library), request, state.port);
+        return false;
+    }
+    // A cover on a server, fetched by the core held to the reach of the add-on that named it: answered on a thread
+    // of its own, as a page of them would otherwise keep the window's other requests waiting.
+    if host_ok
+        && origin_ok
+        && keyed
+        && *request.method() == Method::Get
+        && request.url().starts_with(crate::remote_art::ROUTE)
+    {
+        crate::remote_art::answer(request, origin.filter(|o| allowed_origin(o, port)));
         return false;
     }
     let mut done = false;
@@ -1940,6 +1980,10 @@ pub(crate) fn search_addons(asked: &[Arc<Loaded>], query: &str, limit: usize) ->
         };
         match addon.search(query, limit as u32) {
             Ok(tracks) => {
+                // Their covers are fetched for the window held to this add-on's reach.
+                for art in tracks.iter().filter_map(Track::art) {
+                    crate::remote_art::note(art, addon.reach());
+                }
                 let tracks: Vec<Value> =
                     tracks.iter().filter_map(found_track).take(limit).collect();
                 json!({ "addon": who, "tracks": tracks, "error": null })
@@ -2108,6 +2152,17 @@ fn addons_route(
                 Ok(addon) => addon,
                 Err(e) => return Ok(Some(unread(&e))),
             };
+            // Another add-on at its link is never taken in its place, however it was kept.
+            if offered.manifest.id != id {
+                let e = AddonError::host(
+                    Code::Refused,
+                    format!(
+                        "its link now holds another add-on ({}): add that one as a new add-on",
+                        capped(&offered.manifest.id)
+                    ),
+                );
+                return Ok(Some(unread(&e)));
+            }
             let changes = match &loaded.addon {
                 Ok(kept) => offered.changes_from(kept),
                 Err(problem) => Ok(vec![Change {
@@ -2122,52 +2177,70 @@ fn addons_route(
                 Err(e) => return Ok(Some(unread(&e))),
             };
             let version = capped(&offered.manifest.version);
+            let mut token = None;
             if changes.is_empty() {
                 state.offered.lock().unwrap().remove(id);
-                state.library.lock().unwrap().save_addon(
+                let replaced = state.library.lock().unwrap().replace_addon(
                     id,
+                    &loaded.stored.link,
+                    &loaded.stored.manifest,
                     offered.link(),
                     &offered.manifest_json(),
                 )?;
+                if !replaced {
+                    return Ok(Some(refuse(409, CHANGED_MEANWHILE)));
+                }
                 state.reload_addons()?;
             } else {
+                let made = format!("{:016x}", rand_u64());
+                token = Some(made.clone());
                 state.offered.lock().unwrap().insert(
                     id.to_string(),
                     Offered {
                         link: loaded.stored.link.clone(),
+                        manifest: loaded.stored.manifest.clone(),
                         addon: offered,
                         at: Instant::now(),
+                        token: made,
                     },
                 );
             }
             let mut reply = state.addons_value();
             reply["changes"] = json!(changes);
             reply["version"] = json!(version);
+            reply["token"] = json!(token);
             return Ok(Some(reply_json(200, reply)));
         }
         // Takes the new version the listener was shown, as it was shown.
         "/api/addons/update" => {
-            let offered = state.offered.lock().unwrap().remove(id);
-            let link = state
-                .addons
-                .read()
-                .unwrap()
-                .iter()
-                .find(|a| a.stored.id == id)
-                .map(|a| a.stored.link.clone());
-            let Some(offered) = offered
-                .filter(|o| o.at.elapsed() < OFFER_FOR && link.as_deref() == Some(o.link.as_str()))
-            else {
+            let token = body
+                .get("token")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let offered = {
+                let mut offers = state.offered.lock().unwrap();
+                // Only the offer the window was shown: another check's since is left for its own window.
+                match offers.get(id) {
+                    Some(o) if o.token == token => offers.remove(id),
+                    _ => None,
+                }
+            };
+            let Some(offered) = offered.filter(|o| o.at.elapsed() < OFFER_FOR) else {
                 return Ok(Some(refuse(
                     409,
                     "there is no new version of it at hand: check for one again",
                 )));
             };
-            state.library.lock().unwrap().save_addon(
+            let replaced = state.library.lock().unwrap().replace_addon(
                 id,
+                &offered.link,
+                &offered.manifest,
                 offered.addon.link(),
                 &offered.addon.manifest_json(),
             )?;
+            if !replaced {
+                return Ok(Some(refuse(409, CHANGED_MEANWHILE)));
+            }
             state.lacks.forget_addon(id);
             wake = true;
         }

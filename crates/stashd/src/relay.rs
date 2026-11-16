@@ -8,6 +8,12 @@
 //! does not end early; one whose length is known goes to the engine with that length, so an end that comes too soon
 //! is never taken for the song's end.
 //!
+//! The relay is also the only way the engine reaches an add-on's server: every add-on stream is handed to the engine
+//! as a relay address, and every connection the relay makes is held to the add-on's reach. A playlist of pieces
+//! (HLS, DASH) comes through `/relay/o/{token}/{path}`, a token standing for one server: the playlist is rewritten so
+//! that every address in it names the relay too ([`crate::pieces`]), and its pieces come the same way. What starts as
+//! text (a playlist, whatever its server calls it) is never passed to the engine as it is.
+//!
 //! Also the routes for the copies: `GET /api/played` (how many, how much room), `POST /api/played` (`cap_mb`: how
 //! much room they may take, 0 for none) and `POST /api/played/clear`.
 
@@ -27,9 +33,11 @@ use stash_core::Library;
 use stash_core::downloads;
 use stash_core::played::{self, PlayedCopy};
 use stash_core::player::Located;
-use stash_core::reach::{self, Reach};
+use stash_core::reach::Reach;
 use tiny_http::{Header, Method, Request, Response, StatusCode};
+use url::Url;
 
+use crate::pieces;
 use crate::serve::{Reply, State, body_json, now_ms, reply_json};
 
 /// How long a relay link is answered: the engine opens it again to seek, until the song is over.
@@ -38,14 +46,10 @@ const ANSWERED_FOR: Duration = Duration::from_secs(12 * 3600);
 const MOST_LINKS: usize = 64;
 /// How many times a stream that broke off is picked up again.
 const PICK_UPS: u32 = 3;
-/// What a playlist of pieces (HLS, DASH) is called: the engine is sent to it, as its pieces are named from where it is.
-const PLAYLISTS: [&str; 5] = [
-    "application/vnd.apple.mpegurl",
-    "application/x-mpegurl",
-    "audio/mpegurl",
-    "audio/x-mpegurl",
-    "application/dash+xml",
-];
+/// How many servers the engine may be reaching through the relay at once (the oldest go first).
+const MOST_ORIGINS: usize = 256;
+/// The largest playlist the relay reads and rewrites.
+const PLAYLIST_MOST: u64 = 4 * 1024 * 1024;
 
 /// The streams being relayed, and the folder the copies go to.
 pub(crate) struct Relays {
@@ -59,6 +63,16 @@ pub(crate) struct Relays {
     undeleted: Arc<Mutex<Vec<String>>>,
     /// The songs whose copy was the last thing handed to the engine for them: one the engine fails on is let go.
     handed: Mutex<HashMap<i64, Instant>>,
+    /// The servers the engine reaches through the relay (the playlists of pieces and their pieces), by token.
+    origins: Mutex<HashMap<String, Arc<Origin>>>,
+}
+
+/// A server whose playlists and pieces the engine asks of the relay: its scheme, host and port, and the reach of the
+/// add-on that named it.
+struct Origin {
+    origin: String,
+    reach: Reach,
+    at: Instant,
 }
 
 /// A stream the engine may ask for: where it is, which song it is, and where it came from.
@@ -92,7 +106,59 @@ impl Relays {
             cleared: Arc::new(AtomicU64::new(0)),
             undeleted: Arc::new(Mutex::new(Vec::new())),
             handed: Mutex::new(HashMap::new()),
+            origins: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// A token hard to guess (the hasher's keys are random for each run), and never the same twice.
+    fn token(&self, salt: i64) -> String {
+        let mut hasher = self.keys.build_hasher();
+        hasher.write_u64(self.made.fetch_add(1, Ordering::Relaxed));
+        hasher.write_i64(salt);
+        let first = hasher.finish();
+        hasher.write_i64(now_ms());
+        format!("{first:016x}{:016x}", hasher.finish())
+    }
+
+    /// The relay's address for `url` (http or https), an address an add-on of `reach` named that the engine is to
+    /// fetch: the same path and query, asked of the relay, which fetches it from `url`'s server held to `reach`.
+    pub(crate) fn origin_address(&self, port: u16, url: &Url, reach: Reach) -> String {
+        let origin = url.origin().ascii_serialization();
+        let mut origins = self.origins.lock().unwrap();
+        let known = origins
+            .iter()
+            .find(|(_, o)| o.origin == origin && o.reach == reach && o.at.elapsed() < ANSWERED_FOR)
+            .map(|(token, _)| token.clone());
+        let token = match known {
+            Some(token) => token,
+            None => {
+                origins.retain(|_, o| o.at.elapsed() < ANSWERED_FOR);
+                while origins.len() >= MOST_ORIGINS {
+                    let Some(oldest) = origins
+                        .iter()
+                        .min_by_key(|(_, o)| o.at)
+                        .map(|(token, _)| token.clone())
+                    else {
+                        break;
+                    };
+                    origins.remove(&oldest);
+                }
+                let token = self.token(origins.len() as i64);
+                origins.insert(
+                    token.clone(),
+                    Arc::new(Origin {
+                        origin,
+                        reach,
+                        at: Instant::now(),
+                    }),
+                );
+                token
+            }
+        };
+        format!(
+            "http://127.0.0.1:{port}/relay/o/{token}{}",
+            &url[url::Position::BeforePath..url::Position::AfterQuery]
+        )
     }
 
     /// The song `id`'s copy and its file: `None` when none is kept. One whose file is gone, or is not the size it
@@ -178,15 +244,7 @@ impl Relays {
         reach: Reach,
     ) -> Located {
         let id = song.unwrap_or(0);
-        // Hard to guess (the hasher's keys are random for each run), and never the same twice.
-        let token = {
-            let mut hasher = self.keys.build_hasher();
-            hasher.write_u64(self.made.fetch_add(1, Ordering::Relaxed));
-            hasher.write_i64(id);
-            let first = hasher.finish();
-            hasher.write_i64(now_ms());
-            format!("{first:016x}{:016x}", hasher.finish())
-        };
+        let token = self.token(id);
         let mut links = self.links.lock().unwrap();
         links.retain(|_, link| link.at.elapsed() < ANSWERED_FOR);
         while links.len() >= MOST_LINKS {
@@ -219,17 +277,23 @@ impl Relays {
     }
 
     /// Answers the engine's request for a relay link, on a thread of its own (a stream stays open while it plays).
-    pub(crate) fn answer(self: &Arc<Self>, library: Arc<Mutex<Library>>, request: Request) {
+    /// `port` is the core's, for the relay addresses a playlist is rewritten to.
+    pub(crate) fn answer(
+        self: &Arc<Self>,
+        library: Arc<Mutex<Library>>,
+        request: Request,
+        port: u16,
+    ) {
         let relays = Arc::clone(self);
         let spawned = std::thread::Builder::new()
             .name("stash-relay".into())
-            .spawn(move || relays.relay(&library, request));
+            .spawn(move || relays.relay(&library, request, port));
         if let Err(e) = spawned {
             eprintln!("the relay could not start: {e}");
         }
     }
 
-    fn relay(&self, library: &Arc<Mutex<Library>>, request: Request) {
+    fn relay(&self, library: &Arc<Mutex<Library>>, request: Request, port: u16) {
         let plain = |status: u16, text: &str| {
             Response::from_string(text).with_status_code(StatusCode(status))
         };
@@ -247,6 +311,10 @@ impl Relays {
             let _ = request.respond(plain(403, "for the player only"));
             return;
         }
+        if let Some(rest) = request.url().strip_prefix("/relay/o/").map(str::to_string) {
+            self.piece(&rest, request, port);
+            return;
+        }
         let link = request
             .url()
             .strip_prefix("/relay/")
@@ -260,43 +328,41 @@ impl Relays {
             .iter()
             .find(|h| h.field.equiv("Range"))
             .map(|h| h.value.as_str().to_string());
-        let upstream = match downloads::open_stream(&link.url, link.reach, range.as_deref()) {
+        let mut upstream = match downloads::open_stream(&link.url, link.reach, range.as_deref()) {
             Ok(upstream) => upstream,
             Err(trouble) => {
-                let why = match trouble {
-                    downloads::Trouble::Failed(why)
-                    | downloads::Trouble::Held(why, _)
-                    | downloads::Trouble::Away(why)
-                    | downloads::Trouble::Busy(why, _)
-                    | downloads::Trouble::Later(why, _)
-                    | downloads::Trouble::Refused(why, _) => why,
-                    downloads::Trouble::Cancelled => "cancelled".into(),
-                };
-                let _ = request.respond(plain(502, &why));
+                let _ = request.respond(plain(502, &said(trouble)));
                 return;
             }
         };
-        // A playlist of pieces names them from where it is: the engine is sent there.
-        let kind = upstream.content_type.as_deref().unwrap_or_default();
-        let kind = kind
-            .split(';')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase();
-        if PLAYLISTS.contains(&kind.as_str()) {
-            // The engine fetches it and its pieces by itself: its address is looked up first.
-            let near = url::Url::parse(&link.url)
-                .map_err(|e| e.to_string())
-                .and_then(|url| reach::looked_up(&url, link.reach).map_err(|r| r.to_string()));
-            if let Err(why) = near {
-                let _ = request.respond(plain(502, &why));
-                return;
-            }
-            if let Ok(to) = Header::from_bytes(&b"Location"[..], link.url.as_bytes()) {
-                let _ = request.respond(Response::empty(StatusCode(302)).with_header(to));
-            } else {
-                let _ = request.respond(plain(502, "the stream's address cannot be given"));
+        // A playlist of pieces (whatever its server calls it: what starts as text is one) is not passed on as it is:
+        // the engine is sent to the relay's own address for it, where it is rewritten and its pieces come through
+        // the relay too.
+        let from_start = upstream.status != 206
+            || upstream
+                .range
+                .as_deref()
+                .and_then(span)
+                .is_some_and(|(start, _, _)| start == 0);
+        let head = if from_start {
+            let (head, body) = peek(upstream.body);
+            upstream.body = body;
+            head
+        } else {
+            Vec::new()
+        };
+        if pieces::is_playlist(&content_type(&upstream), "") || is_text(&head) {
+            let to = Url::parse(&upstream.url)
+                .map(|landed| self.origin_address(port, &landed, link.reach))
+                .ok()
+                .and_then(|to| Header::from_bytes(&b"Location"[..], to.as_bytes()).ok());
+            match to {
+                Some(to) => {
+                    let _ = request.respond(Response::empty(StatusCode(302)).with_header(to));
+                }
+                None => {
+                    let _ = request.respond(plain(502, "the stream's address cannot be given"));
+                }
             }
             return;
         }
@@ -384,6 +450,198 @@ impl Relays {
         } else {
             respond(Box::new(body));
         }
+    }
+}
+
+impl Relays {
+    /// The engine asks for a playlist or a piece of one: `rest` is "{token}/{path}". A playlist (by its type, its
+    /// address, or because it starts as text) is read whole, rewritten, and given as text; a piece is passed on.
+    fn piece(&self, rest: &str, request: Request, port: u16) {
+        let plain = |status: u16, text: &str| {
+            Response::from_string(text).with_status_code(StatusCode(status))
+        };
+        let (token, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+        let origin = self.origins.lock().unwrap().get(token).cloned();
+        let Some(origin) = origin.filter(|o| o.at.elapsed() < ANSWERED_FOR) else {
+            let _ = request.respond(plain(404, "no such server"));
+            return;
+        };
+        let asked = format!(
+            "{}{}",
+            origin.origin,
+            if path.is_empty() { "/" } else { path }
+        );
+        let range = request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("Range"))
+            .map(|h| h.value.as_str().to_string());
+        let mut upstream = match downloads::open_stream(&asked, origin.reach, range.as_deref()) {
+            Ok(upstream) => upstream,
+            Err(trouble) => {
+                let _ = request.respond(plain(502, &said(trouble)));
+                return;
+            }
+        };
+        let (head, body) = peek(upstream.body);
+        upstream.body = body;
+        let landed_path = Url::parse(&upstream.url)
+            .map(|u| u.path().to_string())
+            .unwrap_or_default();
+        if !(pieces::is_playlist(&content_type(&upstream), &landed_path) || is_text(&head)) {
+            pass_on(request, upstream);
+            return;
+        }
+        // A playlist: read whole, and rewritten.
+        let Ok(landed) = Url::parse(&upstream.url) else {
+            let _ = request.respond(plain(502, "the playlist's address cannot be read"));
+            return;
+        };
+        let mut bytes = Vec::new();
+        let read = upstream
+            .body
+            .take(PLAYLIST_MOST + 1)
+            .read_to_end(&mut bytes);
+        if read.is_err() || bytes.len() as u64 > PLAYLIST_MOST {
+            let _ = request.respond(plain(502, "the playlist could not be read whole"));
+            return;
+        }
+        let Some((text, kind)) = String::from_utf8(bytes)
+            .ok()
+            .and_then(|text| pieces::kind_of(&text).map(|kind| (text, kind)))
+        else {
+            let _ = request.respond(plain(
+                502,
+                "the stream is text, and not a playlist Stash knows",
+            ));
+            return;
+        };
+        // A DASH playlist names its pieces from where it is: one that came from elsewhere (a redirect) is asked of
+        // the relay at its own address, so they are named from there.
+        if kind == pieces::Kind::Dash && landed.as_str() != asked {
+            let to = self.origin_address(port, &landed, origin.reach);
+            if let Ok(to) = Header::from_bytes(&b"Location"[..], to.as_bytes()) {
+                let _ = request.respond(Response::empty(StatusCode(302)).with_header(to));
+                return;
+            }
+        }
+        let mut servers = std::collections::HashSet::new();
+        let rewritten = pieces::rewrite(kind, &text, &landed, &mut |url: &Url| {
+            servers.insert(url.origin().ascii_serialization());
+            self.origin_address(port, url, origin.reach)
+        });
+        let rewritten = match rewritten {
+            Ok(_) if servers.len() > pieces::MOST_SERVERS => Err(format!(
+                "the playlist names more than {} servers",
+                pieces::MOST_SERVERS
+            )),
+            other => other,
+        };
+        match rewritten {
+            Ok(text) => {
+                let kind = match kind {
+                    pieces::Kind::Hls => "application/vnd.apple.mpegurl",
+                    pieces::Kind::Dash => "application/dash+xml",
+                };
+                let mut response = Response::from_string(text);
+                if let Ok(h) = Header::from_bytes(&b"Content-Type"[..], kind.as_bytes()) {
+                    response = response.with_header(h);
+                }
+                let _ = request.respond(response);
+            }
+            Err(why) => {
+                let _ = request.respond(plain(502, &why));
+            }
+        }
+    }
+}
+
+/// A piece, passed on as it came: its status, type, length and range.
+fn pass_on(request: Request, upstream: downloads::Upstream) {
+    let mut headers = Vec::new();
+    let mut add = |name: &str, value: &str| {
+        if let Ok(h) = Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+            headers.push(h);
+        }
+    };
+    if let Some(kind) = &upstream.content_type {
+        add("Content-Type", kind);
+    }
+    if let Some(range) = &upstream.range {
+        add("Content-Range", range);
+    }
+    if upstream.ranges {
+        add("Accept-Ranges", "bytes");
+    }
+    let length = upstream.length.and_then(|n| usize::try_from(n).ok());
+    let response = Response::new(
+        StatusCode(upstream.status),
+        headers,
+        upstream.body,
+        length,
+        None,
+    );
+    let response = match length {
+        Some(_) => response.with_chunked_threshold(usize::MAX),
+        None => response,
+    };
+    let _ = request.respond(response);
+}
+
+/// The type the server gave, without its parameters, in lower case.
+fn content_type(upstream: &downloads::Upstream) -> String {
+    upstream
+        .content_type
+        .as_deref()
+        .unwrap_or_default()
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// How many bytes are looked at to tell sound from text.
+const HEAD: usize = 64;
+
+/// The first bytes of `body`, and `body` whole again.
+fn peek(mut body: Box<dyn Read + Send>) -> (Vec<u8>, Box<dyn Read + Send>) {
+    let mut head = Vec::with_capacity(HEAD);
+    let _ = (&mut body).take(HEAD as u64).read_to_end(&mut head);
+    let whole = std::io::Cursor::new(head.clone()).chain(body);
+    (head, Box::new(whole))
+}
+
+/// Whether the first bytes of an answer are text (a playlist, whatever its server called it), not sound: UTF-8 (a
+/// character cut off at the end aside), with no control characters but tabs and line ends. Every sound file Stash
+/// plays starts with bytes that are not.
+fn is_text(head: &[u8]) -> bool {
+    if head.is_empty() {
+        return false;
+    }
+    let text = match std::str::from_utf8(head) {
+        Ok(text) => text,
+        Err(e) if e.error_len().is_none() => {
+            std::str::from_utf8(&head[..e.valid_up_to()]).unwrap_or_default()
+        }
+        Err(_) => return false,
+    };
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|c| !c.is_control() || matches!(c, '\t' | '\n' | '\r'))
+}
+
+/// Why a stream could not be opened, in words.
+fn said(trouble: downloads::Trouble) -> String {
+    match trouble {
+        downloads::Trouble::Failed(why)
+        | downloads::Trouble::Held(why, _)
+        | downloads::Trouble::Away(why)
+        | downloads::Trouble::Busy(why, _)
+        | downloads::Trouble::Later(why, _)
+        | downloads::Trouble::Refused(why, _) => why,
+        downloads::Trouble::Cancelled => "cancelled".into(),
     }
 }
 

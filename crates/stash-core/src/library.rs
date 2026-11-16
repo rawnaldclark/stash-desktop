@@ -871,6 +871,24 @@ impl Library {
         Ok(())
     }
 
+    /// Gives a kept add-on a new link and manifest, only if it is still kept with `was_link` and `was_manifest`: an
+    /// add-on removed meanwhile is not brought back, and one added again since (from another link, say) is not
+    /// replaced. Says whether it was.
+    pub fn replace_addon(
+        &mut self,
+        id: &str,
+        was_link: &str,
+        was_manifest: &str,
+        link: &str,
+        manifest: &str,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE addons SET link = ?4, manifest = ?5 WHERE id = ?1 AND link = ?2 AND manifest = ?3",
+            params![id, was_link, was_manifest, link, manifest],
+        )?;
+        Ok(changed == 1)
+    }
+
     /// Forgets an add-on. Says whether there was one.
     pub fn remove_addon(&mut self, id: &str) -> Result<bool> {
         Ok(self

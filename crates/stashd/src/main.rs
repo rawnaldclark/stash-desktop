@@ -157,7 +157,13 @@ fn check_addon(link: &str, query: &str) -> Result<()> {
             Verdict::Fail => "FAIL",
             Verdict::Skipped => "-",
         };
-        println!("{verdict:<5} {:<9} {}", line.what, line.words);
+        // What an add-on says is printed without control characters: none can steer the terminal.
+        let words: String = line
+            .words
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        println!("{verdict:<5} {:<9} {words}", line.what);
     }
     let count = |v: Verdict| lines.iter().filter(|l| l.verdict == v).count();
     let (failed, warned) = (count(Verdict::Fail), count(Verdict::Warn));

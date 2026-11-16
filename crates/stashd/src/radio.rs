@@ -644,8 +644,14 @@ impl Radio {
                     .map(|(neighbor, items, pool)| {
                         let loaded = &loaded;
                         scope.spawn(move || {
-                            let tracks =
-                                loaded.usable().map(|a| a.search(&neighbor.name, SEARCHED));
+                            let tracks = loaded.usable().map(|a| {
+                                let found = a.search(&neighbor.name, SEARCHED);
+                                // Their covers are fetched for the window held to this add-on's reach.
+                                for art in found.iter().flatten().filter_map(Track::art) {
+                                    crate::remote_art::note(art, a.reach());
+                                }
+                                found
+                            });
                             (neighbor, items, pool, tracks)
                         })
                     })

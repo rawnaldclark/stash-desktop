@@ -6,11 +6,10 @@
 //!
 //! The core holds to it on every connection it makes for an add-on: its resolver keeps only the addresses the
 //! add-on may reach, so a name that leads somewhere nearer is refused however it was named, and every redirect is
-//! looked up the same way. What the engine fetches by itself (a playlist of pieces, an encrypted stream) is checked
-//! before it is handed over; covers the window shows by themselves are checked by the address they name.
+//! looked up the same way. The engine never fetches an add-on's address by itself: it is given the relay's, and the
+//! relay's connections are the core's. Covers the window shows are checked by the address they name.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
-use std::sync::{Arc, Mutex};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -103,19 +102,34 @@ fn of_v4(ip: Ipv4Addr) -> Option<Reach> {
 }
 
 fn of_v6(ip: Ipv6Addr) -> Option<Reach> {
-    if let Some(v4) = ip.to_ipv4_mapped() {
-        return of_v4(v4);
-    }
     if ip.is_unspecified() || ip.is_multicast() {
         return None;
     }
     if ip.is_loopback() {
         return Some(Reach::Here);
     }
-    let first = ip.segments()[0];
-    let unique_local = first & 0xfe00 == 0xfc00;
-    let link_local = first & 0xffc0 == 0xfe80;
-    if unique_local || link_local {
+    // An IPv4 address carried in an IPv6 one is where that IPv4 address is: written as IPv6 (::ffff:a.b.c.d, and the
+    // old ::a.b.c.d), translated (NAT64, 64:ff9b::/96 and the local 64:ff9b:1::/48), or tunnelled (6to4, 2002::/16).
+    let s = ip.segments();
+    let last = Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8);
+    let mapped = s[..5] == [0; 5] && (s[5] == 0xffff || s[5] == 0);
+    let nat64 = (s[0], s[1]) == (0x64, 0xff9b) && (s[2..6] == [0; 4] || s[2] == 1);
+    if mapped || nat64 {
+        return of_v4(last);
+    }
+    if s[0] == 0x2002 {
+        return of_v4(Ipv4Addr::new(
+            (s[1] >> 8) as u8,
+            s[1] as u8,
+            (s[2] >> 8) as u8,
+            s[2] as u8,
+        ));
+    }
+    let unique_local = s[0] & 0xfe00 == 0xfc00;
+    let link_local = s[0] & 0xffc0 == 0xfe80;
+    // Site-local (fec0::/10): given up long ago, still where Windows looks for a name server on the network.
+    let site_local = s[0] & 0xffc0 == 0xfec0;
+    if unique_local || link_local || site_local {
         return Some(Reach::Home);
     }
     Some(Reach::Internet)
@@ -172,7 +186,7 @@ pub fn keep_reachable(
 }
 
 /// Whether an add-on of `allowed` may name `url`, by what is written in it: its address, or a name whose form says
-/// it is nearer. A name that only a lookup tells passes here (see [`looked_up`]).
+/// it is nearer. A name that only a lookup tells passes here: the connections made for it are guarded ([`Guarded`]).
 pub fn as_written(url: &Url, allowed: Reach) -> Result<(), TooNear> {
     let target = match literal(url) {
         Some(target) => target,
@@ -191,77 +205,38 @@ pub fn as_written(url: &Url, allowed: Reach) -> Result<(), TooNear> {
     }
 }
 
-/// Whether an add-on of `allowed` may name `url`, its name looked up: for what the engine fetches by itself. (A
-/// name's answer can change between this look and the engine's own: the engine's fetches are checked once, here.)
-pub fn looked_up(url: &Url, allowed: Reach) -> Result<(), TooNear> {
-    as_written(url, allowed)?;
-    if literal(url).is_some() || allowed == Reach::Here {
-        return Ok(());
-    }
-    let host = url.host_str().unwrap_or_default();
-    let port = url.port_or_known_default().unwrap_or(443);
-    // A name that cannot be looked up now goes nowhere: the engine finds that out by itself.
-    let Ok(found) = (host, port).to_socket_addrs() else {
-        return Ok(());
-    };
-    let found: Vec<SocketAddr> = found.collect();
-    if found.is_empty() {
-        return Ok(());
-    }
-    // All of its addresses: the engine may connect to any of them.
-    let kept = keep_reachable(host, found.iter().copied(), allowed)?;
-    if kept.len() < found.len() {
-        let near = found
-            .iter()
-            .filter_map(|a| Reach::of_ip(a.ip()))
-            .filter(|r| !allowed.allows(*r))
-            .max();
-        return Err(TooNear {
-            host: host.to_string(),
-            target: near,
-            allowed,
-        });
-    }
-    Ok(())
-}
-
 /// The resolver of every connection the core makes for an add-on of `allowed`: names are looked up as usual, and only
 /// the addresses the add-on may reach are kept. A name that could not be looked up is said as such.
 #[derive(Debug)]
 pub struct Guarded {
     allowed: Reach,
-    /// Where the addresses it gave out are, when it is asked to note that.
-    seen: Option<Arc<Seen>>,
+    /// Only the addresses of this place, when it is asked for (see [`Guarded::only`]).
+    only: Option<Reach>,
     inner: ureq::unversioned::resolver::DefaultResolver,
 }
 
-/// Where the addresses a guard gave out to connect to are: the farthest of them.
-#[derive(Debug, Default)]
-pub struct Seen(Mutex<Option<Reach>>);
+/// Why a guard that keeps one place's addresses connected nowhere: the name has none there.
+#[derive(Debug)]
+pub struct NoneThere;
 
-impl Seen {
-    /// The farthest place of the addresses given out; none before any was.
-    pub fn farthest(&self) -> Option<Reach> {
-        *self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+impl std::fmt::Display for NoneThere {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the name has no address there")
     }
+}
 
-    fn note(&self, reach: Reach) {
-        let mut seen = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *seen = Some(seen.map_or(reach, |s| s.min(reach)));
-    }
+impl std::error::Error for NoneThere {}
+
+/// Whether `e` is a guard's that kept one place's addresses and found none.
+pub fn none_there(e: &ureq::Error) -> bool {
+    matches!(e, ureq::Error::Other(inner) if inner.is::<NoneThere>())
 }
 
 impl Guarded {
     pub fn new(allowed: Reach) -> Self {
         Self {
             allowed,
-            seen: None,
+            only: None,
             inner: ureq::unversioned::resolver::DefaultResolver::default(),
         }
     }
@@ -275,21 +250,21 @@ impl Guarded {
         )
     }
 
-    /// An agent for the listener's own link (an add-on's manifest), which may go anywhere, and what it notes of where
-    /// it went: where an add-on is, is where its manifest came from. (A name looked up apart from the fetch could
-    /// answer one place to the look and another to the fetch.) Of several addresses, the farthest decides.
-    pub fn noting(config: ureq::config::Config) -> (ureq::Agent, Arc<Seen>) {
-        let seen = Arc::new(Seen::default());
+    /// An agent that connects only to the addresses of `place`: for the listener's own link (an add-on's manifest),
+    /// asked of each place in turn, farthest first. Where it answers is where the add-on is. (A name looked up apart
+    /// from the fetch could answer one place to the look and another to the fetch; and an add-on on the listener's
+    /// network whose name has an address on the internet too, where nothing answers, is where it answers. Over https
+    /// only the add-on's own server can answer for its name: another place cannot pass for it.)
+    pub fn only(place: Reach, config: ureq::config::Config) -> ureq::Agent {
         let guard = Guarded {
-            seen: Some(seen.clone()),
+            only: Some(place),
             ..Guarded::new(Reach::Here)
         };
-        let agent = ureq::Agent::with_parts(
+        ureq::Agent::with_parts(
             config,
             ureq::unversioned::transport::DefaultConnector::default(),
             guard,
-        );
-        (agent, seen)
+        )
     }
 }
 
@@ -309,13 +284,16 @@ impl ureq::unversioned::resolver::Resolver for Guarded {
                 other => other,
             })?;
         let host = uri.host().unwrap_or_default();
-        let kept = keep_reachable(host, found.iter().copied(), self.allowed)
+        let mut kept = keep_reachable(host, found.iter().copied(), self.allowed)
             .map_err(|refused| ureq::Error::Other(Box::new(refused)))?;
+        if let Some(place) = self.only {
+            kept.retain(|a| Reach::of_ip(a.ip()) == Some(place));
+            if kept.is_empty() {
+                return Err(ureq::Error::Other(Box::new(NoneThere)));
+            }
+        }
         let mut out = self.empty();
         for address in kept {
-            if let (Some(seen), Some(reach)) = (&self.seen, Reach::of_ip(address.ip())) {
-                seen.note(reach);
-            }
             out.push(address);
         }
         Ok(out)
@@ -355,6 +333,16 @@ mod tests {
             ("fd12:3456::1", Some(Reach::Home)),
             ("fe80::1", Some(Reach::Home)),
             ("::ffff:192.168.0.5", Some(Reach::Home)),
+            ("::127.0.0.1", Some(Reach::Here)),
+            ("::c0a8:101", Some(Reach::Home)),
+            ("64:ff9b::7f00:1", Some(Reach::Here)),
+            ("64:ff9b::c0a8:101", Some(Reach::Home)),
+            ("64:ff9b:1::a00:1", Some(Reach::Home)),
+            ("64:ff9b::808:808", Some(Reach::Internet)),
+            ("2002:c0a8:101::1", Some(Reach::Home)),
+            ("2002:7f00:1::1", Some(Reach::Here)),
+            ("2002:808:808::1", Some(Reach::Internet)),
+            ("fec0:0:0:ffff::1", Some(Reach::Home)),
             ("172.32.0.1", Some(Reach::Internet)),
             ("100.128.0.1", Some(Reach::Internet)),
             ("8.8.8.8", Some(Reach::Internet)),
@@ -405,7 +393,7 @@ mod tests {
             Here
         );
 
-        // Where an add-on is, is where its manifest came from: noted by the fetch itself.
+        // Where an add-on is, is where its manifest answers: each place asked in turn.
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -416,13 +404,18 @@ mod tests {
             let _ = socket
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
         });
-        let (agent, seen) = Guarded::noting(ureq::config::Config::default());
-        assert_eq!(seen.farthest(), None);
-        agent
-            .get(&format!("http://127.0.0.1:{port}/manifest.json"))
+        let link = format!("http://127.0.0.1:{port}/manifest.json");
+        for place in [Internet, Home] {
+            let e = Guarded::only(place, ureq::config::Config::default())
+                .get(&link)
+                .call()
+                .unwrap_err();
+            assert!(none_there(&e), "{place:?}: {e}");
+        }
+        Guarded::only(Here, ureq::config::Config::default())
+            .get(&link)
             .call()
             .unwrap();
-        assert_eq!(seen.farthest(), Some(Here));
         assert_eq!(
             Reach::of_link_as_written(&url("https://addon.example.org/manifest.json")),
             Internet
@@ -463,8 +456,6 @@ mod tests {
                 .to_string(),
             "192.168.1.1 is on your network, and an add-on on the internet may not send Stash there"
         );
-        // A name that leads to this computer is refused once looked up, as the engine would reach it.
-        assert!(looked_up(&url("http://localhost:9/x"), Reach::Home).is_err());
     }
 
     #[test]

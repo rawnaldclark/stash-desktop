@@ -153,11 +153,22 @@ fn follow(
         });
         if which != shown {
             let text = |name: &str| track[name].as_str().filter(|s| !s.is_empty());
+            // A cover on a server is asked of the core, which fetches it held to where the add-on that named it may
+            // send Stash: the system would fetch it as it is, redirects and all.
             let art = text("art").map(|art| {
                 if art.starts_with('/') {
                     format!("{base}{art}")
                 } else {
-                    art.to_string()
+                    let escaped: String = art
+                        .bytes()
+                        .map(|b| match b {
+                            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                                (b as char).to_string()
+                            }
+                            _ => format!("%{b:02X}"),
+                        })
+                        .collect();
+                    format!("{base}/api/art/remote?u={escaped}")
                 }
             });
             let metadata = MediaMetadata {

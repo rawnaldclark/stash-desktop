@@ -5446,8 +5446,17 @@ fn an_add_on_s_new_version_is_shown_and_taken_only_when_the_listener_says_so() {
     );
     assert_eq!(checked["addons"][0]["reach"].as_str(), Some("internet"));
 
-    // Taken: as it was shown.
-    let updated = client.post("/api/addons/update", json!({ "id": "demo.folder" }));
+    // Taken: as it was shown, by the token it was shown with.
+    let token = checked["token"].as_str().unwrap().to_string();
+    let (status, _) = client.send(
+        "/api/addons/update",
+        json!({ "id": "demo.folder", "token": "not-it" }),
+    );
+    assert_eq!(status, 409);
+    let updated = client.post(
+        "/api/addons/update",
+        json!({ "id": "demo.folder", "token": token }),
+    );
     let listed = &updated["addons"][0];
     assert_eq!(
         (listed["version"].as_str(), listed["reach"].as_str()),
@@ -5459,7 +5468,10 @@ fn an_add_on_s_new_version_is_shown_and_taken_only_when_the_listener_says_so() {
     assert!(found["groups"][0]["error"].is_null(), "{found}");
 
     // Taken once; checked again, it is as it is.
-    let (status, _) = client.send("/api/addons/update", json!({ "id": "demo.folder" }));
+    let (status, _) = client.send(
+        "/api/addons/update",
+        json!({ "id": "demo.folder", "token": token }),
+    );
     assert_eq!(status, 409);
     let again = client.post("/api/addons/check", json!({ "id": "demo.folder" }));
     assert_eq!(again["changes"], json!([]), "{again}");

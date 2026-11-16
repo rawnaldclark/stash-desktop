@@ -53,8 +53,17 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 	return answer<T>(path, await fetch(at(path), sent));
 }
 
-/** A picture the core names (`art`): an address of its own (`/api/…`) is asked of the core; anything else is used as it is. */
-export const artUrl = (art: string | null | undefined): string | undefined => (!art ? undefined : art.startsWith('/') ? at(art) : art);
+/**
+ * A picture the core names (`art`): an address of its own (`/api/…`) is asked of the core, and so is a cover on a
+ * server (an add-on's): the core fetches it, held to where that add-on may send Stash. The window never fetches one
+ * itself: a cover's server could redirect it to a device on the listener's network.
+ */
+export const artUrl = (art: string | null | undefined): string | undefined => {
+	if (!art) return undefined;
+	if (art.startsWith('/')) return at(art);
+	if (/^https?:\/\//i.test(art)) return at(`/api/art/remote?u=${encodeURIComponent(art)}`);
+	return undefined;
+};
 
 // ---- The library
 
@@ -377,11 +386,11 @@ export const orderAddons = (ids: string[]) => post<Listed>('/api/addons/order', 
 /** One way an add-on's new version differs from the one added. `more`: it gives the add-on more than was agreed to. */
 export type AddonChange = { words: string; more: boolean };
 /** An add-on's link asked for a new version: what changed (nothing: it is up to date), and the version it gives. */
-export type AddonCheck = { addons: AddonInfo[]; changes: AddonChange[]; version: string };
+export type AddonCheck = { addons: AddonInfo[]; changes: AddonChange[]; version: string; token: string | null };
 /** Asks the add-on's link for a new version. Nothing the listener would care about is taken until `updateAddon`. */
 export const checkAddon = (id: string) => post<AddonCheck>('/api/addons/check', { id });
 /** Takes the new version that was offered, as it was shown. */
-export const updateAddon = (id: string) => post<Listed>('/api/addons/update', { id }).then((r) => r.addons);
+export const updateAddon = (id: string, token: string) => post<Listed>('/api/addons/update', { id, token }).then((r) => r.addons);
 
 /** What an add-on gave since a time (streams and downloads), when it last gave a song, and its last trouble. */
 export type AddonUse = { streams: number; downloads: number; found_at_ms: number | null; trouble: { at_ms: number; message: string } | null };
