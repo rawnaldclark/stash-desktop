@@ -199,6 +199,9 @@ fn stream_from(addon: &Addon, id: &str, track: &str) -> std::result::Result<Loca
 pub(crate) struct Lacks {
     missed: Mutex<HashMap<(i64, String), Instant>>,
     found: Mutex<HashMap<String, Instant>>,
+    /// For the window: when each add-on last gave a song, and its last trouble (when, in words).
+    found_at: Mutex<HashMap<String, i64>>,
+    troubles: Mutex<HashMap<String, (i64, String)>>,
 }
 
 impl Lacks {
@@ -215,6 +218,26 @@ impl Lacks {
             .lock()
             .unwrap()
             .insert(addon.to_string(), Instant::now());
+        self.found_at
+            .lock()
+            .unwrap()
+            .insert(addon.to_string(), now_ms());
+    }
+
+    /// Notes the add-on's trouble (it could not be reached, its allowance is spent…), for the window.
+    fn troubled(&self, addon: &str, e: &AddonError) {
+        self.troubles
+            .lock()
+            .unwrap()
+            .insert(addon.to_string(), (now_ms(), e.in_words()));
+    }
+
+    /// When the add-on last gave a song, and its last trouble.
+    fn health(&self, addon: &str) -> (Option<i64>, Option<(i64, String)>) {
+        (
+            self.found_at.lock().unwrap().get(addon).copied(),
+            self.troubles.lock().unwrap().get(addon).cloned(),
+        )
     }
 
     fn finding(&self, addon: &str) -> bool {
@@ -301,6 +324,7 @@ pub(crate) fn through_addons<T>(
                     continue;
                 }
                 Err(e) => {
+                    lacks.troubled(addon_id, &e);
                     trouble = Some(e);
                     continue;
                 }
@@ -353,6 +377,7 @@ pub(crate) fn through_addons<T>(
                 continue;
             }
             Err(e) => {
+                lacks.troubled(addon_id, &e);
                 trouble = Some(e);
                 continue;
             }
@@ -368,6 +393,7 @@ pub(crate) fn through_addons<T>(
                 continue;
             }
             Err(e) => {
+                lacks.troubled(addon_id, &e);
                 trouble = Some(e);
                 continue;
             }
@@ -438,10 +464,27 @@ fn resolver(
                 return Err(gone("its add-on is switched off"));
             }
             let addon = loaded.addon.as_ref().map_err(|why| gone(why))?;
-            return stream_from(addon, &loaded.stored.id, &wanted.track).map_err(|e| Failure {
-                message: e.in_words(),
-                miss: e.is_miss(),
-            });
+            let addon_id = &loaded.stored.id;
+            return match stream_from(addon, addon_id, &wanted.track) {
+                Ok(located) => {
+                    lacks.found_by(addon_id);
+                    let _ = library.lock().unwrap().note_addon_use(
+                        addon_id,
+                        stash_core::usage::Given::Stream,
+                        now_ms(),
+                    );
+                    Ok(located)
+                }
+                Err(e) => {
+                    if !e.is_miss() {
+                        lacks.troubled(addon_id, &e);
+                    }
+                    Err(Failure {
+                        message: e.in_words(),
+                        miss: e.is_miss(),
+                    })
+                }
+            };
         }
         let Some(id) = item.id else {
             return Err(gone("it has nowhere to play from"));
@@ -470,7 +513,12 @@ fn resolver(
                 })
             },
         )
-        .map(|((plain, located), _)| {
+        .map(|((plain, located), addon_id)| {
+            let _ = library.lock().unwrap().note_addon_use(
+                &addon_id,
+                stash_core::usage::Given::Stream,
+                now_ms(),
+            );
             if plain && keeping {
                 relays.link(port, id, located)
             } else {
@@ -1372,6 +1420,34 @@ fn addons_route(
     if *request.method() == Method::Get {
         return Ok(match path {
             "/api/addons" => Some(state.addons_reply()),
+            "/api/addons/use" => {
+                let since = param("since")
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .unwrap_or_else(|| now_ms() - 24 * 3600 * 1000);
+                let used = state.library.lock().unwrap().addon_use_since(since)?;
+                let ids: Vec<String> = state
+                    .addons
+                    .read()
+                    .unwrap()
+                    .iter()
+                    .map(|a| a.stored.id.clone())
+                    .collect();
+                let mut out = serde_json::Map::new();
+                for id in ids {
+                    let given = used.get(&id).copied().unwrap_or_default();
+                    let (found_at, trouble) = state.lacks.health(&id);
+                    out.insert(
+                        id,
+                        json!({
+                            "streams": given.streams,
+                            "downloads": given.downloads,
+                            "found_at_ms": found_at,
+                            "trouble": trouble.map(|(at, message)| json!({ "at_ms": at, "message": message })),
+                        }),
+                    );
+                }
+                Some(reply_json(200, json!({ "addons": out })))
+            }
             // `q`, and optionally `addon` (ask only that one) and `limit`.
             "/api/addons/search" => {
                 let query = param("q").unwrap_or_default();

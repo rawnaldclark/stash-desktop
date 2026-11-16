@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
@@ -264,6 +264,16 @@ const V11: &str = "
     CREATE INDEX played_copies_used ON played_copies(used_at_ms);
 ";
 
+/// Each stream and download an add-on gave, with its time (`usage.rs`), kept for a week.
+const V12: &str = "
+    CREATE TABLE addon_events(
+        addon  TEXT NOT NULL,
+        kind   TEXT NOT NULL,
+        at_ms  INTEGER NOT NULL
+    );
+    CREATE INDEX addon_events_at ON addon_events(at_ms);
+";
+
 /// Opens (or creates) the library at `path` and migrates it to [`SCHEMA_VERSION`].
 pub fn open(path: &std::path::Path) -> Result<Connection> {
     prepare(Connection::open(path)?)
@@ -368,6 +378,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V11)?;
         tx.pragma_update(None, "user_version", 11)?;
+        tx.commit()?;
+    }
+    if found < 12 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V12)?;
+        tx.pragma_update(None, "user_version", 12)?;
         tx.commit()?;
     }
     Ok(())

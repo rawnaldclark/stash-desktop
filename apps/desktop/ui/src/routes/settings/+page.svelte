@@ -77,6 +77,34 @@
 	}
 	/** What an add-on does, from what its manifest lists. */
 	const does = (a: SourceStatus) => [a.resources.includes('search') ? 'search' : '', a.resources.includes('stream') ? 'playing' : ''].filter((p) => p !== '').join(' and ');
+	// What each add-on was asked for today (its allowance is the listener's), when it last gave a song, its last trouble.
+	let used = $state<Record<string, core.AddonUse>>({});
+	async function readUse() {
+		const midnight = new Date();
+		midnight.setHours(0, 0, 0, 0);
+		try {
+			used = await core.addonUse(midnight.getTime());
+		} catch {
+			/* the core is not answering: the lines stay as they were */
+		}
+	}
+	const whole = (n: number) => n.toLocaleString();
+	const ago = (ms: number) => {
+		const minutes = Math.floor((Date.now() - ms) / 60_000);
+		return minutes < 1 ? 'just now' : minutes < 60 ? `${minutes} min ago` : `${Math.floor(minutes / 60)} h ago`;
+	};
+	function useLine(id: string): string {
+		const u = used[id];
+		if (!u) return '';
+		const parts = [u.streams ? `${many(u.streams, 'song', 'songs')} played` : '', u.downloads ? (u.streams ? `${whole(u.downloads)} saved` : `${many(u.downloads, 'song', 'songs')} saved`) : ''].filter(Boolean);
+		const asked = parts.length ? `Today: ${parts.join(', ')}` : 'Nothing asked of it today';
+		return u.found_at_ms ? `${asked} · last gave a song ${ago(u.found_at_ms)}` : asked;
+	}
+	/** Its last trouble, when that came after the last song it gave. */
+	const troubleOf = (id: string) => {
+		const u = used[id];
+		return u?.trouble && u.trouble.at_ms > (u.found_at_ms ?? 0) ? u.trouble : null;
+	};
 	const detail = (a: SourceStatus) => [a.version ? `version ${a.version}` : '', a.host ?? '', does(a)].filter((p) => p !== '').join(' · ');
 
 	// ---- Your library: music folders, and one file that carries a library between this computer, the phone and the web player
@@ -208,14 +236,22 @@
 			(s) => (autoplay = s.on),
 			() => {}
 		);
+		void readUse();
+		const useTimer = setInterval(() => void readUse(), 15_000);
 		void core.playedRoom().then(
 			(r) => (room = r),
 			() => {}
 		);
 		void readOuts();
-		const back = () => void readOuts();
+		const back = () => {
+			void readOuts();
+			void readUse();
+		};
 		window.addEventListener('focus', back);
-		return () => window.removeEventListener('focus', back);
+		return () => {
+			window.removeEventListener('focus', back);
+			clearInterval(useTimer);
+		};
 	});
 
 	// ---- Appearance
@@ -308,6 +344,8 @@
 								<span class="tr-t">
 									<b>{a.name}</b>
 									<i>{detail(a)}</i>
+									{#if useLine(a.id)}<i class="src-use">{useLine(a.id)}</i>{/if}
+									{#if troubleOf(a.id)}<i class="src-problem">Trouble {ago(troubleOf(a.id)!.at_ms)}: {troubleOf(a.id)!.message}</i>{/if}
 									{#if a.problem}<i class="src-problem">Cannot be used: {a.problem}.</i>{:else if a.description}<i>{a.description}</i>{/if}
 								</span>
 								<span class="src-acts">

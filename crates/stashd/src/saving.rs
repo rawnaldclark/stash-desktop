@@ -154,6 +154,11 @@ fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<(), Troub
             |addon, _, track| addon.download(track, &StreamRequest::default()),
         )
         .map_err(|failure| Trouble::Failed(failure.message))?;
+        let _ = state.library.lock().unwrap().note_addon_use(
+            &addon,
+            stash_core::usage::Given::Download,
+            now_ms(),
+        );
         let (looked, wanted) = (Cell::new(Instant::now()), Cell::new(true));
         let fetched = downloads::fetch(
             &info.url,

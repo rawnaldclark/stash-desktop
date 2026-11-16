@@ -406,3 +406,16 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 
 - No real add-on's stream has been relayed: a server that does not answer ranges, or one that sends the file slower than it plays, was not tried; neither was a long hi-res file larger than the engine's own buffer (the stream then stays open as long as the song plays, on a thread of its own).
 - A song kept is not marked in the lists, and the copies are not counted as offline songs anywhere yet.
+
+## 17. What each add-on was asked for
+
+- **Settings › Add-ons says, for each add-on, what Stash asked of it today** ("Today: 12 songs played, 1 saved"), when it last gave a song, and its last trouble when that came after ("Trouble 3 min ago: …", in the add-on's own words: not reachable, its allowance is spent). An add-on's allowance is the listener's, so this is what tells them how much is left. Every stream and download an add-on gave is kept with its time for a week (schema 12 `addon_events`); "today" is counted from the window's own midnight (the core has no time zone; `GET /api/addons/use?since=`). A song played from its kept copy, or from a file, asks nothing and counts nothing. The window reads it again every 15 seconds while Settings is open.
+
+### Checked
+
+- **By the tests:** `crates/stashd/tests/api.rs`: a song saved from the demo add-on counts one download and no stream, and the add-on's last song is known; a song played from it counts one stream.
+- **On the built page served by the core** (scratch library, demo add-on): the add-on's row said "Today: 1 song saved · last gave a song just now". No errors in the page.
+
+### Not covered yet
+
+- Searches are not counted (the matcher searches add-ons that cannot be asked for a song; whether a search spends an allowance is the add-on's to say). The last trouble and the last song given are kept in memory only.

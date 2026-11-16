@@ -206,6 +206,11 @@ export const removeAddon = (id: string) => post<Listed>('/api/addons/remove', { 
 export const setAddonEnabled = (id: string, enabled: boolean) => post<Listed>('/api/addons/enabled', { id, enabled }).then((r) => r.addons);
 export const orderAddons = (ids: string[]) => post<Listed>('/api/addons/order', { ids }).then((r) => r.addons);
 
+/** What an add-on gave since a time (streams and downloads), when it last gave a song, and its last trouble. */
+export type AddonUse = { streams: number; downloads: number; found_at_ms: number | null; trouble: { at_ms: number; message: string } | null };
+/** Each add-on's use since `since` (ms; the window's own midnight for "today"). */
+export const addonUse = (since: number) => get<{ addons: Record<string, AddonUse> }>(`/api/addons/use?since=${since}`).then((r) => r.addons);
+
 /** Asks one add-on for tracks. */
 export const searchAddon = (id: string, query: string, limit: number, signal?: AbortSignal) =>
 	get<{ groups: AddonGroup[] }>(`/api/addons/search?q=${encodeURIComponent(query)}&addon=${encodeURIComponent(id)}&limit=${limit}`, signal).then((r) => r.groups[0] ?? null);

@@ -2240,6 +2240,15 @@ fn songs_from_add_ons_are_saved_as_files_and_given_back() {
     );
     let file = saved.join("Unknown artist").join("echo.wav");
     assert!(file.is_file(), "{list}");
+    // What the add-on was asked for is counted (its allowance is the listener's).
+    let (_, used) = client.get("/api/addons/use?since=0");
+    let demo = &used["addons"]["demo.folder"];
+    assert_eq!(
+        (demo["downloads"].as_u64(), demo["streams"].as_u64()),
+        (Some(1), Some(0)),
+        "{used}"
+    );
+    assert!(demo["found_at_ms"].is_i64(), "{used}");
     // Its tags say what the library knows it by.
     {
         use lofty::file::TaggedFileExt;
@@ -2695,6 +2704,14 @@ fn a_song_played_from_an_add_on_is_kept_and_plays_again_without_it() {
     assert_eq!(
         std::fs::read(&copy).unwrap(),
         std::fs::read(served.join("kilo.wav")).unwrap()
+    );
+
+    // One stream was asked of the add-on.
+    let (_, used) = client.get("/api/addons/use?since=0");
+    assert_eq!(
+        used["addons"]["demo.folder"]["streams"].as_u64(),
+        Some(1),
+        "{used}"
     );
 
     // With the add-on gone, it plays from the copy.
