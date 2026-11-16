@@ -1273,9 +1273,10 @@ fn offline_route(state: &State, request: &mut Request, path: &str) -> Result<Opt
         if on && let Ok(player) = &state.player {
             player.ask_again_ahead();
         }
-        // Back online: what waited goes.
+        // Back online: what waited goes (saving does not wait out a hold from while the add-on could not be reached).
         if !on {
             state.scrobbling.ring(None);
+            state.saving.release();
             state.saving.ring();
         }
         // Every window reads its lists again: which songs are on this computer may have changed since it last did

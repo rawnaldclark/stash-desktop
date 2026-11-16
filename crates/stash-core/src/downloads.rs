@@ -140,8 +140,12 @@ pub enum Trouble {
     /// again, and saving waits a while before it asks again: as many seconds as the second field says, when an add-on
     /// or server said.
     Held(String, Option<u32>),
-    /// A server (the add-on's, or the file's) could not be reached, was busy, or stopped sending: maybe everyone's
-    /// trouble, maybe this song's. Tried again later, and given up on at last.
+    /// The add-on could not be reached at all (no connection, its server down): everyone's, and nothing was asked of
+    /// it. The song waits its turn again, and saving waits a minute, then longer, but never long, so it goes on soon
+    /// after the connection is back.
+    Away(String),
+    /// A server (the add-on's, or the file's) was busy, too slow, or stopped sending: maybe everyone's trouble, maybe
+    /// this song's. Tried again later, and given up on at last.
     Busy(String, Option<u32>),
     /// "No" from add-ons that are not finding other songs either: maybe the song's own answer, maybe theirs (a broken
     /// lookup, a spent allowance that answers "nothing"). Tried again later; the flag says whether an add-on was asked

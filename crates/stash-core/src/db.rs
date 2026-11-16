@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 18;
+pub const SCHEMA_VERSION: i64 = 19;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
@@ -304,6 +304,17 @@ const V18: &str = "
     ALTER TABLE playlists ADD COLUMN folder_id INTEGER REFERENCES playlist_folders(id) ON DELETE SET NULL;
 ";
 
+/// Version 19: what a song on the downloads has had of trouble that may be its own (`stashd`'s saving), kept across
+/// starts: its tries that asked something (`asks`), those that count against it (`strikes`: another song was saved
+/// since its try before), since when (`unsure_since`), and when it was last asked (`tried_at`). A song saved, or asked
+/// for again, starts over.
+const V19: &str = "
+    ALTER TABLE downloads ADD COLUMN strikes INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE downloads ADD COLUMN asks INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE downloads ADD COLUMN unsure_since INTEGER;
+    ALTER TABLE downloads ADD COLUMN tried_at INTEGER;
+";
+
 /// Version 16: what a list kept on this computer leaves alone. A song the listener took off the downloads is
 /// remembered (`download_declined`), so a kept list does not put it back; and a song a list put on the downloads says
 /// so (`by_list`), so it is taken off again when no kept list holds it, while one asked for by hand stays.
@@ -504,6 +515,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V18)?;
         tx.pragma_update(None, "user_version", 18)?;
+        tx.commit()?;
+    }
+    if found < 19 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V19)?;
+        tx.pragma_update(None, "user_version", 19)?;
         tx.commit()?;
     }
     Ok(())

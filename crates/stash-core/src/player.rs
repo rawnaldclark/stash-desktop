@@ -547,12 +547,19 @@ impl Ctx {
 
     /// Starts the queue place `ahead` points at, in place of whatever plays; a track the add-on does not have is
     /// passed over for the one after it.
-    fn start(&self, generation: u64) {
+    ///
+    /// With `stop_first`, what plays stops at once (not when the add-on has answered), and only while this start is
+    /// still the newest: the check and the stop are under the same hold of the player's state, so a start that began
+    /// meanwhile is left playing.
+    fn start(&self, generation: u64, mut stop_first: bool) {
         loop {
             let (item, place) = {
                 let mut shared = self.shared.lock().unwrap();
                 if shared.generation != generation {
                     return;
+                }
+                if std::mem::take(&mut stop_first) {
+                    let _ = self.engine.stop();
                 }
                 let place = shared.ahead;
                 match shared.queue.get(place).cloned() {
@@ -682,8 +689,7 @@ impl Ctx {
             shared.error_id = None;
             shared.generation
         };
-        let _ = self.engine.stop();
-        self.run(true, move |ctx| ctx.start(generation));
+        self.run(true, move |ctx| ctx.start(generation, true));
     }
 
     /// Called every time the engine reports something, and a few times a second besides. While a track plays it
@@ -1309,11 +1315,8 @@ impl Player {
 
     /// Hands a start begun (see [`Player::begin`]) to the engine.
     fn go(&self, generation: u64, waits: bool) {
-        if waits {
-            // What was playing stops now, not when the add-on has answered.
-            let _ = self.ctx.engine.stop();
-        }
-        self.ctx.run(waits, move |ctx| ctx.start(generation));
+        // A start that waits for an add-on stops what plays at once, if it is still the newest (see `Ctx::start`).
+        self.ctx.run(waits, move |ctx| ctx.start(generation, waits));
     }
 
     /// Pauses, or plays on. Resting on a track, playing on starts that track from where it rests.

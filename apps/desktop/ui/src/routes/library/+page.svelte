@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { focusNow } from '../../lib/ui/focus';
 	import { untrack } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { P, type PickList } from '../../lib/ui/pick.svelte';
@@ -95,6 +96,14 @@
 	let folderName = $state('');
 	let renamingFolder = $state(false);
 	let folderDraft = $state('');
+	// Another folder opened (the page stays): what was being named or renamed is let go, so it is not saved onto it.
+	$effect(() => {
+		void openFolder?.id;
+		untrack(() => {
+			renamingFolder = false;
+			namingFolder = false;
+		});
+	});
 	async function createFolder() {
 		try {
 			await library.createFolder(folderName);
@@ -207,8 +216,7 @@
 				<span class="tile fold-tile"><Icon name="folder_open" /></span>
 				{#if renamingFolder}
 					<form class="rename" onsubmit={(e) => { e.preventDefault(); void renameFolder(); }}>
-						<!-- svelte-ignore a11y_autofocus -->
-						<input aria-label="Folder name" bind:value={folderDraft} maxlength="80" autofocus onkeydown={(e) => e.key === 'Escape' && (renamingFolder = false)} />
+						<input aria-label="Folder name" bind:value={folderDraft} maxlength="80" use:focusNow onkeydown={(e) => e.key === 'Escape' && (renamingFolder = false)} />
 						<button type="submit" class="btn">Save</button>
 					</form>
 				{:else}
@@ -237,16 +245,14 @@
 		{#if openFolder && !needle && !shownPlaylists.length}<p class="s-hint">This folder is empty. Drag a playlist onto it in the sidebar, or choose Move to folder on a playlist’s page.</p>{/if}
 		{#if namingFolder}
 			<form class="new-form" onsubmit={(e) => { e.preventDefault(); void createFolder(); }}>
-				<!-- svelte-ignore a11y_autofocus -->
-				<input aria-label="Folder name" placeholder="Folder name" bind:value={folderName} maxlength="80" autofocus />
+				<input aria-label="Folder name" placeholder="Folder name" bind:value={folderName} maxlength="80" use:focusNow />
 				<button type="submit" class="btn" disabled={!folderName.trim()}>Create</button>
 				<button type="button" class="btn ghost" onclick={() => (namingFolder = false)}>Cancel</button>
 			</form>
 		{/if}
 		{#if naming}
 			<form class="new-form" onsubmit={(e) => { e.preventDefault(); void create(); }}>
-				<!-- svelte-ignore a11y_autofocus -->
-				<input aria-label="Playlist name" placeholder="Playlist name" bind:value={name} maxlength="80" autofocus />
+				<input aria-label="Playlist name" placeholder="Playlist name" bind:value={name} maxlength="80" use:focusNow />
 				<button type="submit" class="btn" disabled={!name.trim()}>Create</button>
 				<button type="button" class="btn ghost" onclick={() => (naming = false)}>Cancel</button>
 			</form>

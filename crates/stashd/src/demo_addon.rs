@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::Duration;
 
@@ -37,6 +37,9 @@ pub struct DemoAddon {
     /// The listener's allowance is spent: every stream and download is refused as the contract says (to try what Stash
     /// does then). Shared, so it can be switched while the add-on runs.
     spent: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Out of reach: every stream and download is met with no answer at all, only a broken line (to try what Stash
+    /// does with no connection, or the add-on's server down). Shared, like `spent`.
+    gone: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn header(name: &str, value: &str) -> Header {
@@ -145,12 +148,18 @@ impl DemoAddon {
             eclipse,
             resolves,
             spent: Default::default(),
+            gone: Default::default(),
         })
     }
 
     /// Switches the allowance spent (true) or back (false), also once the add-on runs.
     pub fn allowance_spent(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         self.spent.clone()
+    }
+
+    /// Switches the add-on out of reach (true) or back (false), also once it runs.
+    pub fn out_of_reach(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.gone.clone()
     }
 
     pub fn tracks(&self) -> usize {
@@ -269,6 +278,18 @@ impl DemoAddon {
             .or_else(|| path.strip_prefix("/download/").filter(|_| !self.eclipse))
         {
             std::thread::sleep(self.delay);
+            if self.gone.load(std::sync::atomic::Ordering::Relaxed) {
+                // No answer: what comes back is not HTTP at all, as from a line that broke (tiny_http cannot drop
+                // the connection itself).
+                let mut line = request.into_writer();
+                let _ = line.write_all(
+                    b"no answer
+
+",
+                );
+                let _ = line.flush();
+                return;
+            }
             if self.spent.load(std::sync::atomic::Ordering::Relaxed) {
                 let _ = request.respond(refusal(
                     429,

@@ -243,7 +243,8 @@ impl Library {
             let mut ask = tx.prepare(
                 "INSERT INTO downloads(track_id, state, asked_at)
                  SELECT id, 'queued', ?2 FROM tracks WHERE id = ?1 AND origin <> 'file'
-                 ON CONFLICT(track_id) DO UPDATE SET state = 'queued', error = NULL, asked_at = excluded.asked_at
+                 ON CONFLICT(track_id) DO UPDATE SET state = 'queued', error = NULL, asked_at = excluded.asked_at,
+                                                     strikes = 0, asks = 0, unsure_since = NULL, tried_at = NULL
                  WHERE downloads.state = 'failed'",
             )?;
             let mut claim = tx.prepare("UPDATE downloads SET by_list = 0 WHERE track_id = ?1")?;
@@ -400,6 +401,44 @@ impl Library {
         Ok(())
     }
 
+    /// Trouble that may be its own, for the song coming in (`id`). A try that asked something (`asked`) is noted, and
+    /// counted against the song (a strike) when another song was saved since its try before: the add-on gives other
+    /// songs, so the trouble is likely this one's. Answers what the song has had so far; it is kept across starts, and
+    /// a song saved or asked for again starts over.
+    pub fn download_unsure(&mut self, id: i64, asked: bool, now_ms: i64) -> Result<UnsureTries> {
+        let tx = self.conn.transaction()?;
+        let strike: bool = asked
+            && tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM downloads d JOIN downloads o
+                                  ON o.track_id <> d.track_id AND o.state = 'saved' AND o.saved_at > d.tried_at
+                                 WHERE d.track_id = ?1)",
+                [id],
+                |r| r.get(0),
+            )?;
+        tx.execute(
+            "UPDATE downloads SET strikes = strikes + ?2, asks = asks + ?3, unsure_since = COALESCE(unsure_since, ?4),
+                                  tried_at = CASE WHEN ?3 = 1 THEN ?4 ELSE tried_at END
+             WHERE track_id = ?1",
+            params![id, i64::from(strike), i64::from(asked), now_ms],
+        )?;
+        let tries = tx
+            .query_row(
+                "SELECT strikes, asks, COALESCE(unsure_since, ?2) FROM downloads WHERE track_id = ?1",
+                params![id, now_ms],
+                |r| {
+                    Ok(UnsureTries {
+                        strikes: r.get(0)?,
+                        asks: r.get(1)?,
+                        since_ms: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or_default();
+        tx.commit()?;
+        Ok(tries)
+    }
+
     /// Songs that were coming in when the program last ended are queued again (what came in is thrown away).
     pub fn requeue_downloads(&mut self) -> Result<usize> {
         Ok(self.conn.execute(
@@ -456,7 +495,7 @@ impl Library {
         )?;
         tx.execute(
             "UPDATE downloads SET state = 'saved', path = ?2, addon = ?3, tier = ?4, bytes = ?5, error = NULL,
-                                  saved_at = ?6
+                                  saved_at = ?6, strikes = 0, asks = 0, unsure_since = NULL, tried_at = NULL
              WHERE track_id = ?1",
             params![
                 id,
@@ -538,14 +577,20 @@ impl Library {
     }
 
     /// Failed songs back on the list (all of them when `ids` is empty). Asked for by hand: a song a kept list put
-    /// there is the listener's own now.
+    /// there is the listener's own now. Every song named (all on the list when `ids` is empty) starts its tries over.
     pub fn retry_downloads(&mut self, ids: &[i64], now_ms: i64) -> Result<usize> {
+        const AFRESH: &str = "strikes = 0, asks = 0, unsure_since = NULL, tried_at = NULL";
         if ids.is_empty() {
             // Asked for again by hand: no list's to take back (a list let go since would otherwise drop them).
-            return Ok(self.conn.execute(
+            let n = self.conn.execute(
                 "UPDATE downloads SET state = 'queued', error = NULL, asked_at = ?1, by_list = 0 WHERE state = 'failed'",
                 [now_ms],
-            )?);
+            )?;
+            self.conn.execute(
+                &format!("UPDATE downloads SET {AFRESH} WHERE state IN ('queued', 'saving')"),
+                [],
+            )?;
+            return Ok(n);
         }
         let mut n = 0;
         for id in ids {
@@ -553,6 +598,10 @@ impl Library {
                 "UPDATE downloads SET state = 'queued', error = NULL, asked_at = ?2, by_list = 0
                  WHERE track_id = ?1 AND state = 'failed'",
                 params![id, now_ms],
+            )?;
+            self.conn.execute(
+                &format!("UPDATE downloads SET {AFRESH} WHERE track_id = ?1 AND state IN ('queued', 'saving')"),
+                [id],
             )?;
         }
         Ok(n)
@@ -1156,6 +1205,75 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_songs_unsure_tries_are_kept_and_strike_only_after_another_song_was_saved() {
+        let mut library = Library::open_in_memory().unwrap();
+        let song = |title: &str| crate::import::Song {
+            title: title.into(),
+            artist: "Someone".into(),
+            ..Default::default()
+        };
+        let ids = library
+            .adopt_songs(&[song("Alpha"), song("Bravo")])
+            .unwrap();
+        let (alpha, bravo) = (ids[0], ids[1]);
+        library.ask_downloads(&ids, 1).unwrap();
+        let had = |strikes, asks, since_ms| UnsureTries {
+            strikes,
+            asks,
+            since_ms,
+        };
+        // The first try: noted, no strike (there is no try before it).
+        assert_eq!(
+            library.download_unsure(alpha, true, 100).unwrap(),
+            had(0, 1, 100)
+        );
+        // A try that asked nothing is not noted; with nothing saved since, a try is no strike.
+        assert_eq!(
+            library.download_unsure(alpha, false, 150).unwrap(),
+            had(0, 1, 100)
+        );
+        assert_eq!(
+            library.download_unsure(alpha, true, 200).unwrap(),
+            had(0, 2, 100)
+        );
+        // Another song saved since its try before: a strike. The same save is not counted twice.
+        library
+            .conn
+            .execute(
+                "UPDATE downloads SET state = 'saved', saved_at = 250 WHERE track_id = ?1",
+                [bravo],
+            )
+            .unwrap();
+        assert_eq!(
+            library.download_unsure(alpha, true, 300).unwrap(),
+            had(1, 3, 100)
+        );
+        assert_eq!(
+            library.download_unsure(alpha, true, 400).unwrap(),
+            had(1, 4, 100)
+        );
+        // Try again starts every song on the list over.
+        library.retry_downloads(&[], 500).unwrap();
+        assert_eq!(
+            library.download_unsure(alpha, true, 600).unwrap(),
+            had(0, 1, 600)
+        );
+        // So does the song's own save; one off the list has had nothing.
+        library
+            .conn
+            .execute(
+                "UPDATE downloads SET state = 'saving' WHERE track_id = ?1",
+                [alpha],
+            )
+            .unwrap();
+        library.forget_downloads(&[alpha]).unwrap();
+        assert_eq!(
+            library.download_unsure(alpha, true, 700).unwrap(),
+            UnsureTries::default()
+        );
+    }
+
+    #[test]
     fn times_are_written_as_javascript_writes_them() {
         assert_eq!(iso_millis(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(iso_millis(1_759_838_405_000), "2025-10-07T12:00:05.000Z");
@@ -1163,6 +1281,17 @@ mod tests {
         assert_eq!(iso_millis(951_782_400_000), "2000-02-29T00:00:00.000Z");
         assert_eq!(iso_millis(4_102_444_800_000), "2100-01-01T00:00:00.000Z");
     }
+}
+
+/// What a song on the downloads has had of trouble that may be its own (see [`Library::download_unsure`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UnsureTries {
+    /// Its tries after another song was saved since its try before.
+    pub strikes: u32,
+    /// Its tries that asked something.
+    pub asks: u32,
+    /// When it first had such trouble (since it was asked for, or last saved).
+    pub since_ms: i64,
 }
 
 /// Lyrics kept from the network for a song: what was found (`None`: it had none), from where, and when (Unix seconds).

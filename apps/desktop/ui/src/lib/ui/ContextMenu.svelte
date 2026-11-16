@@ -1,6 +1,7 @@
 <!-- The song menu: Play next, Add to Up next, Add to playlist, Go to artist / album (a song of the library), Like. A real menu (arrow keys, Escape, focus returns).
      For a group (a Home album card, or the songs picked in a list) the queue, playlist and like entries act on every song in it. -->
 <script lang="ts">
+	import { focusNow } from './focus';
 	import { tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { library, notPlayed, notPlayedSongs, player, saveSongs, unsaveSongs } from '../app';
@@ -300,8 +301,7 @@
 			{/each}
 			{#if naming}
 				<form class="mnew" onsubmit={(e) => { e.preventDefault(); createAndAdd(); }}>
-					<!-- svelte-ignore a11y_autofocus -->
-					<input aria-label="Playlist name" placeholder="Playlist name" bind:value={name} autofocus maxlength="80" />
+					<input aria-label="Playlist name" placeholder="Playlist name" bind:value={name} use:focusNow maxlength="80" />
 					<button type="submit" disabled={!name.trim()}>Create</button>
 				</form>
 			{:else}

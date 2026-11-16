@@ -1,6 +1,7 @@
 <!-- A menu of choices (a playlist's, a folder's, the sidebar's "new"): the song menu's look and keys (arrow keys, Home,
      End, Escape; focus goes back where it was). An entry can ask for a name in place (a new folder, a folder's new name). -->
 <script lang="ts">
+	import { focusNow } from './focus';
 	import { tick } from 'svelte';
 	import Icon from './Icon.svelte';
 	import { ui, type Choice } from './state.svelte';
@@ -98,8 +99,7 @@
 		{#each c.choices as choice, i (i)}
 			{#if asking === i && choice.ask}
 				<form class="mnew" onsubmit={(e) => { e.preventDefault(); named(choice); }}>
-					<!-- svelte-ignore a11y_autofocus -->
-					<input aria-label={choice.ask.placeholder} placeholder={choice.ask.placeholder} bind:value={name} autofocus maxlength="80" />
+					<input aria-label={choice.ask.placeholder} placeholder={choice.ask.placeholder} bind:value={name} use:focusNow maxlength="80" />
 					<button type="submit" disabled={!name.trim()}>{choice.ask.submit}</button>
 				</form>
 			{:else if choice.checked !== undefined}

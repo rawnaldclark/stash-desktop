@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { focusNow } from '../../../lib/ui/focus';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { library, player } from '../../../lib/app';
@@ -71,8 +72,7 @@
 				<p class="caps">{smart ? 'Smart playlist' : followed ? 'Shared mix' : 'Playlist'}{#if folder}<span class="sep">{' · '}</span><a class="pl-folder" href={folderHref(folder.id)}>{folder.name}</a>{/if}</p>
 				{#if editing}
 					<form class="rename" onsubmit={(e) => { e.preventDefault(); void rename(); }}>
-						<!-- svelte-ignore a11y_autofocus -->
-						<input aria-label="Playlist name" bind:value={draft} maxlength="80" autofocus onkeydown={(e) => e.key === 'Escape' && (editing = false)} />
+						<input aria-label="Playlist name" bind:value={draft} maxlength="80" use:focusNow onkeydown={(e) => e.key === 'Escape' && (editing = false)} />
 						<button type="submit" class="btn">Save</button>
 					</form>
 				{:else}

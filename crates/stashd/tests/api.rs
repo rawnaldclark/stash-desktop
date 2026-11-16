@@ -4480,7 +4480,7 @@ fn an_add_on_whose_allowance_is_spent_holds_saving_and_fails_nothing() {
         silence(&served.join(format!("{name}.wav")));
     }
     let addon = DemoAddon::bind(&served, 0, Duration::ZERO).unwrap();
-    let (link, spent) = (addon.link(), addon.allowance_spent());
+    let (link, spent, gone) = (addon.link(), addon.allowance_spent(), addon.out_of_reach());
     std::thread::spawn(move || addon.run());
     let core = Core::bind(Options {
         db: dir.join("library.db"),
@@ -4523,23 +4523,21 @@ fn an_add_on_whose_allowance_is_spent_holds_saving_and_fails_nothing() {
         .unwrap();
     client.post(&format!("/api/playlists/{list}/add"), json!({ "ids": ids }));
 
-    let held_for = |words: &str| -> serde_json::Value {
+    let held_when = |what: &str, why: &dyn Fn(&str) -> bool| -> serde_json::Value {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let (_, now) = client.get("/api/downloads");
-            if now["held"]["why"]
-                .as_str()
-                .is_some_and(|why| why.contains(words))
-            {
+            if now["held"]["why"].as_str().is_some_and(why) {
                 break now;
             }
             assert!(
                 Instant::now() < deadline,
-                "saving did not wait for {words:?}: {now}"
+                "saving did not wait for {what}: {now}"
             );
             std::thread::sleep(Duration::from_millis(50));
         }
     };
+    let held_for = |words: &str| held_when(words, &|why| why.contains(words));
 
     // No add-on to save from (the only one is switched off): saving waits instead of failing every song.
     client.post(
@@ -4579,9 +4577,36 @@ fn an_add_on_whose_allowance_is_spent_holds_saving_and_fails_nothing() {
     );
     assert!(now["held"]["until_ms"].as_i64().unwrap() > 0, "{now}");
 
-    // The allowance is back and the listener tries again: saving goes on at once, and every song is saved.
+    // The allowance is back and the listener tries again: saving asks at once. The add-on is out of reach now (no
+    // connection, its server down): everyone's trouble again, and nothing was spent, so saving waits, a minute at
+    // first, and still marks nothing as not saved.
     spent.store(false, std::sync::atomic::Ordering::Relaxed);
+    gone.store(true, std::sync::atomic::Ordering::Relaxed);
     client.post("/api/downloads/retry", json!({}));
+    let away = held_when("the add-on out of reach", &|why| !why.contains("allowance"));
+    std::thread::sleep(Duration::from_millis(500));
+    let (_, now) = client.get("/api/downloads");
+    assert_eq!(
+        (
+            &now["counts"]["queued"],
+            &now["counts"]["failed"],
+            &now["counts"]["saved"]
+        ),
+        (&json!(3), &json!(0), &json!(0)),
+        "{now}"
+    );
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let left = away["held"]["until_ms"].as_i64().unwrap() - now_ms;
+    assert!((0..=61_000).contains(&left), "{away}");
+
+    // It can be reached again, and the connection comes back (Stash was offline): saving goes on at once, without
+    // waiting out its minute, and every song is saved.
+    gone.store(false, std::sync::atomic::Ordering::Relaxed);
+    client.post("/api/offline", json!({ "offline": true }));
+    client.post("/api/offline", json!({ "offline": false }));
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let (_, now) = client.get("/api/downloads");

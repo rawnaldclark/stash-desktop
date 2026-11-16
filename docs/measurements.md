@@ -889,7 +889,7 @@ Deleting a folder keeps its playlists: they come out of it. The deletion is said
 
 ## 30. Third review: saving's tries, group actions, Downloads picks
 
-A reviewer read sections 27 and 28 (picking songs, the second review's fixes) and found these. All are fixed. The saving rules below replace §28's strikes and unbelieved "no"s.
+A reviewer read sections 27 and 28 (picking songs, the second review's fixes) and found these. All are fixed. The saving rules below replace §28's strikes and unbelieved "no"s. (How tries are counted changed again after a fourth review: see §32.)
 
 ### Saving: whose trouble it is
 
@@ -1011,3 +1011,58 @@ The core splits a credit (`crates/stash-core/src/credits.rs`). The library has n
   - A name in a row there went on to Ada Vale's page: with others ["Fireline", "Glasshouse", "Paper Planes"].
   - The duo's page had no "With others".
   - There were no errors in the page.
+
+## 32. Fourth review: saving's tries kept, no bursts; a start never stops a newer one; name fields
+
+A reviewer read sections 29 and 30 (playlist folders, the third review's fixes). It found two major defects in saving and three minor ones; all are fixed. The saving rules below replace §30's counting. The folders work, `retain`, the batch routes and the Downloads picks were found sound.
+
+### Saving
+
+- **An add-on out of reach is everyone's trouble.**
+  - No answer at all from an add-on (no connection, or its server down) now holds saving. The song waits its turn, and nothing is spent.
+  - The wait is a minute, doubling to five minutes (not an hour), so saving goes on soon after the connection is back.
+  - Under §30 a dropped connection failed a song waiting alone in about a minute.
+- **Back online, saving goes on at once:** switching Offline off ends a hold.
+- **A try counts against a song (a strike) only when another song was saved since its try before.** Then the add-on is giving other songs, so the trouble is likely this one's. A song is given up on:
+  - at its third strike;
+  - at once for a refusal the song before did not have (unchanged);
+  - when nothing tells whose trouble it is for a long while: it has had such trouble for a day and been asked three times in it, or been asked twelve times.
+
+  So a lone song whose server keeps failing is still given up on, and an outage with nothing saved fails nothing for a day.
+- **What a song has had is kept in the library** (schema 19: `strikes`, `asks`, `unsure_since` and `tried_at` on its downloads row). A new start of Stash no longer gives every song three new tries. A song saved, asked for again, or retried with Try again starts over.
+- **No bursts.** Saving waits before the next song, even after a song is given up on, when:
+  - the song before had trouble that may be its own (of any kind now, not only the same);
+  - the same song comes again;
+  - the add-on asked to be left alone.
+
+  Under §30 the last round of a run asked every song back to back and failed them all within a second. The add-on's "ask again in" was also dropped when the next song was asked at once.
+
+### The player
+
+- **`Player::go` stopped what played before it handed a start to its thread**, without checking that the start was still the newest. Two quick starts (an import and a "Don't play" at once) could stop the newer one's song, and then nothing played.
+- **The stop is now in `Ctx::start`**, after its generation check and under the same hold of the player's state. `retry_failed` stops the same way.
+
+### The window
+
+- **Library › Playlists' folder view kept a rename open when another folder was opened** (the page stays), and Save then renamed the other folder. Opening another folder now drops the form.
+- **Name fields now get the keyboard when they show** (`lib/ui/focus.ts`), with their words picked. This covers renaming a folder or playlist, a new folder or playlist, and the menus' name fields. `autofocus` did nothing there, because the button that showed them had the keyboard.
+
+### Checked
+
+- **Core test (`lists::tests`):**
+  - A song's first try, and a try that asked nothing, are no strike.
+  - Another song saved since its try before is one strike, counted once.
+  - Try again, and taking the song off the list, start it over.
+- **stashd tests (`saving::tests`):**
+  - A song is given up on at its third strike, after a day with three asks, or at twelve asks. A try that asked nothing gives nothing up.
+  - A run waits, and a give-up in a run still waits. A save, a settled song, or Try again ends a run.
+  - The add-on's "ask again in" is waited for even after the first song.
+  - Refusals behave as before.
+- **API test (the allowance one, extended):**
+  - Try again with the add-on out of reach (the demo add-on now answers with no HTTP at all): saving waited, held for at most 61 s, with 3 queued, 0 failed and 0 saved.
+  - Once the add-on could be reached, Offline on and then off saved all three at once.
+- **Player tests:** all 13 passed, with libmpv.
+- **Page check (folders):**
+  - Rename put the keyboard in the name, with "Summer" picked.
+  - Opening Work from the sidebar dropped the form.
+  - The sidebar's Rename put the keyboard in its field.

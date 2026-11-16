@@ -250,6 +250,7 @@ impl Relays {
                 let why = match trouble {
                     downloads::Trouble::Failed(why)
                     | downloads::Trouble::Held(why, _)
+                    | downloads::Trouble::Away(why)
                     | downloads::Trouble::Busy(why, _)
                     | downloads::Trouble::Later(why, _)
                     | downloads::Trouble::Refused(why, _) => why,
