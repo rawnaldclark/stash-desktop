@@ -197,15 +197,20 @@ impl Library {
 }
 
 /// Deletes `files` from the copies' folder `folder` (only plain names in it: never a path that leads elsewhere).
-pub fn delete_files(folder: &Path, files: &[String]) {
+pub fn delete_files(folder: &Path, files: &[String]) -> Vec<String> {
+    let mut left = Vec::new();
     for file in files {
         let plain = Path::new(file)
             .file_name()
             .is_some_and(|name| name == std::ffi::OsStr::new(file));
         if plain {
-            let _ = std::fs::remove_file(folder.join(file));
+            let path = folder.join(file);
+            if std::fs::remove_file(&path).is_err() && path.exists() {
+                left.push(file.clone());
+            }
         }
     }
+    left
 }
 
 /// Whether `name` is one the copies are written under: `<song>.<kind>`, or `<song>-<n>.part` while one comes in.

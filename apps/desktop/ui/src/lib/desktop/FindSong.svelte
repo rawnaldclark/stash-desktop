@@ -93,7 +93,7 @@
 			{:else if g.tracks.length}
 				<p class="caps nf-from">On {g.addon.name}</p>
 				<ul class="nf-picks">
-					{#each g.tracks as t (t.id)}
+					{#each g.tracks as t, i (i)}
 						<li>
 							<button type="button" class="nf-pick" disabled={busy} onclick={() => pick(g, t)}>
 								<span class="nf-pt"><b dir="auto">{t.title}</b><i dir="auto">{#if t.explicit}<span class="fmt">E</span>{/if}{t.artist}{t.album ? ` · ${t.album}` : ''}</i></span>

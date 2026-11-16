@@ -4,7 +4,6 @@
 	import { tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { library, player, saveSongs, unsaveSongs } from '../app';
-	import { setAside } from '../core';
 	import { NF } from '../desktop/unfound.svelte';
 	import { LIB_REF } from '../identity';
 	import { albumHref, albumLink, artistHref, artistLink } from '../identity';
@@ -24,13 +23,9 @@
 	const isGroup = $derived(!!m?.group?.length);
 	const allLiked = $derived(targets.length > 0 && targets.every((t) => L.isLiked(t)));
 	/** A song no add-on could find: to Library › Not found, opened on it (back on the list if it was set aside). */
-	async function findIt(row: string) {
-		try {
-			NF.take(await setAside([Number(row)], false));
-		} catch {
-			/* it opens anyway */
-		}
-		go(`/library?tab=notfound&song=${row}`);
+	function findIt(row: string) {
+		ui.sheet = false;
+		void NF.show(Number(row));
 	}
 	function likeAll() {
 		const like = !allLiked;

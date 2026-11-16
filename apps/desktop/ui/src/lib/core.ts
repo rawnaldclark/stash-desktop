@@ -278,6 +278,8 @@ export type CorePlayer = {
 	error: string | null;
 	/** That song's row in the library, when it is one. */
 	error_id: number | null;
+	/** How many times a song could not be played: each is told, the same one twice too. */
+	errors: number;
 	/** Nothing plays and the player rests on `track` (status "paused"): the queue ended there, or it was brought back from last time. Play starts it. */
 	resting: boolean;
 };
@@ -303,6 +305,7 @@ export const IDLE: CorePlayer = {
 	signal: null,
 	error: null,
 	error_id: null,
+	errors: 0,
 	resting: false
 };
 

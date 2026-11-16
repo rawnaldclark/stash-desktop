@@ -99,22 +99,29 @@ pub(crate) fn route(
                     "a song, an add-on and its track are needed",
                 )));
             };
-            let plays = state.addons.read().unwrap().iter().any(|a| {
-                a.stored.id == addon
-                    && a.usable()
-                        .is_some_and(|usable| usable.offers_resource("stream"))
-            });
+            // Whether the add-on plays songs, and lets them be saved (a save that failed goes again only then).
+            let (plays, saves) = state
+                .addons
+                .read()
+                .unwrap()
+                .iter()
+                .find(|a| a.stored.id == addon)
+                .and_then(|a| a.usable())
+                .map_or((false, false), |usable| {
+                    (usable.offers_resource("stream"), usable.offers_download())
+                });
             if !plays {
                 return Ok(Some(refuse(
                     400,
                     "that add-on is not one that plays songs here",
                 )));
             }
-            let fixed = state
-                .library
-                .lock()
-                .unwrap()
-                .fix_unfound(id, addon, track, now_ms())?;
+            let fixed =
+                state
+                    .library
+                    .lock()
+                    .unwrap()
+                    .fix_unfound(id, addon, track, saves, now_ms())?;
             let Some(saving) = fixed else {
                 return Ok(Some(refuse(404, "no such song in the library")));
             };

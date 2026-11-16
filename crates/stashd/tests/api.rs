@@ -2555,12 +2555,25 @@ fn songs_no_add_on_finds_wait_to_be_fixed_by_hand() {
     };
     let unfound = || client.get("/api/unfound").1;
 
-    // An add-on's "I don't have it" counts only once it is finding other songs.
+    // An add-on's "I don't have it" counts only once it is finding other songs it is asked for.
     save(&[india]);
     assert_eq!(unfound()["open"], 0);
     let list = save(&[golf]);
     assert_eq!(list["counts"]["saved"], 1, "{list}");
+    // Hotel is asked now, and listed. India's "no" was said before, when it was not believed: it is not asked
+    // again for a while, and does not count.
     save(&[india, hotel]);
+    assert_eq!(unfound()["open"], 1, "{}", unfound());
+    // Switched off and on again, the add-on is asked again, and now its "no" for India is believed.
+    client.post(
+        "/api/addons/enabled",
+        json!({ "id": "demo.folder", "enabled": false }),
+    );
+    client.post(
+        "/api/addons/enabled",
+        json!({ "id": "demo.folder", "enabled": true }),
+    );
+    save(&[india]);
     let listed = unfound();
     let mut titles: Vec<&str> = listed["rows"]
         .as_array()

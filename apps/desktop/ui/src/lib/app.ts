@@ -199,8 +199,12 @@ const same = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.s
 function take(a: core.CorePlayer): void {
 	const before = state.current?.qid;
 	// A failure the core still remembers from before this window opened is not news: it is said when it changes.
-	if (old === undefined) old = a.error;
-	if (a.error !== old) old = null;
+	// A message from before the window opened is not told again, until another comes (the same words count again).
+	if (old === undefined) {
+		old = a.error;
+		oldErrors = a.errors ?? 0;
+	}
+	if (a.error !== old || (a.errors ?? 0) !== oldErrors) old = null;
 	heard = a;
 	heardAt = performance.now();
 	const index = a.track && a.index !== null ? a.index : -1;
@@ -224,6 +228,7 @@ function take(a: core.CorePlayer): void {
 		repeat: a.repeat,
 		error: old !== null && a.error === old ? null : a.error,
 		errorId: a.error_id,
+		errors: a.errors ?? 0,
 		from: a.from,
 		available: a.available,
 		reason: a.reason ?? null,
@@ -246,6 +251,7 @@ function take(a: core.CorePlayer): void {
 let unknownAddon: string | null = null;
 /** The failure the core already had when the window first heard from it (undefined: not heard yet; null: none, or it has changed since). */
 let old: string | null | undefined;
+let oldErrors = 0;
 
 /** Reads the queue from the song playing on, when it changed or the part the window holds is running out. */
 function readQueue(a: core.CorePlayer): void {

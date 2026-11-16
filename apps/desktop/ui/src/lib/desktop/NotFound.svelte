@@ -19,6 +19,11 @@
 	async function read() {
 		try {
 			d = await core.unfound(0, shown);
+			// The song asked for is further down: the list is read on to it.
+			while (open !== null && !d.rows.some((r) => r.id === open) && d.open > d.rows.length && shown < 20 * PAGE) {
+				shown += PAGE;
+				d = await core.unfound(0, shown);
+			}
 			NF.take(d);
 		} catch {
 			/* the core said nothing new: the list stays as it was */

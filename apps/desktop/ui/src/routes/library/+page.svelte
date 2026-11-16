@@ -173,7 +173,7 @@
 	{:else if tab === 'downloads'}
 		<Downloads />
 	{:else if tab === 'notfound'}
-		{#key page.url.searchParams.get('song')}<NotFound />{/key}
+		{#key page.url.search}<NotFound />{/key}
 	{:else if groups.length}
 		{#each groups as g (g.day)}
 			<p class="caps hist-day">{g.day}</p>

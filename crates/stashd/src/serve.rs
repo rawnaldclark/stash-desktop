@@ -193,11 +193,14 @@ fn stream_from(addon: &Addon, id: &str, track: &str) -> std::result::Result<Loca
 
 /// What each add-on was found not to have, and when: (the song, the add-on). It is not asked again for a while, so a
 /// queue of songs it lacks does not spend the listener's allowance there on the same answers. And when each add-on
-/// last found a song: its "I don't have it" is believed only while it is finding others (an add-on whose allowance is
-/// spent, or of the wrong kind, may answer "nothing" to everything).
+/// last found a song it was asked for: its "I don't have it" is believed only while it is finding others (an add-on
+/// whose allowance is spent, or whose lookup is broken, may answer "nothing" to everything, and still play the names
+/// it gave before).
 #[derive(Default)]
 pub(crate) struct Lacks {
-    missed: Mutex<HashMap<(i64, String), Instant>>,
+    /// With whether that "no" was believed when it was said.
+    missed: Mutex<HashMap<(i64, String), (Instant, bool)>>,
+    /// Songs found by asking, not names given before.
     found: Mutex<HashMap<String, Instant>>,
     /// For the window: when each add-on last gave a song, and its last trouble (when, in words).
     found_at: Mutex<HashMap<String, i64>>,
@@ -213,15 +216,44 @@ impl Lacks {
             .retain(|(song, _), _| *song != id);
     }
 
-    fn found_by(&self, addon: &str) {
-        self.found
-            .lock()
-            .unwrap()
-            .insert(addon.to_string(), Instant::now());
+    /// Forgets what the add-on was found not to have (it was added again, or switched back on).
+    pub(crate) fn forget_addon(&self, addon: &str) {
+        self.missed.lock().unwrap().retain(|(_, a), _| a != addon);
+    }
+
+    /// The add-on gave a song (for the window).
+    fn gave(&self, addon: &str) {
         self.found_at
             .lock()
             .unwrap()
             .insert(addon.to_string(), now_ms());
+    }
+
+    /// The add-on found a song it was asked for: its "no"s are believed for a while.
+    fn found_when_asked(&self, addon: &str) {
+        self.found
+            .lock()
+            .unwrap()
+            .insert(addon.to_string(), Instant::now());
+        self.gave(addon);
+    }
+
+    /// The add-on said it does not have the song; `believed`: it said so while finding others.
+    fn missed(&self, id: i64, addon: &str, believed: bool) {
+        self.missed
+            .lock()
+            .unwrap()
+            .insert((id, addon.to_string()), (Instant::now(), believed));
+    }
+
+    /// A "no" from a little while ago, and whether it was believed.
+    fn remembered(&self, id: i64, addon: &str) -> Option<bool> {
+        self.missed
+            .lock()
+            .unwrap()
+            .get(&(id, addon.to_string()))
+            .filter(|(at, _)| at.elapsed() < MISS_MEMORY)
+            .map(|(_, believed)| *believed)
     }
 
     /// Notes the add-on's trouble (it could not be reached, its allowance is spent…), for the window.
@@ -295,8 +327,13 @@ pub(crate) fn through_addons<T>(
     // give it.
     let mut said_no: Vec<&str> = Vec::new();
     let mut had_it = false;
-    let found = |addon_id: &str| {
-        lacks.found_by(addon_id);
+    // A name the add-on gave before says nothing of how it answers when asked; a song it was asked for does.
+    let found = |addon_id: &str, asked: bool| {
+        if asked {
+            lacks.found_when_asked(addon_id);
+        } else {
+            lacks.gave(addon_id);
+        }
         let _ = library.lock().unwrap().found_again(id);
     };
     for loaded in &addons {
@@ -312,7 +349,7 @@ pub(crate) fn through_addons<T>(
         if let Some(track) = &known {
             match act(addon, addon_id, track) {
                 Ok(done) => {
-                    found(addon_id);
+                    found(addon_id, false);
                     return Ok((done, addon_id.to_string()));
                 }
                 // The add-on no longer knows that name: it is forgotten, and the add-on is asked for the song.
@@ -330,15 +367,11 @@ pub(crate) fn through_addons<T>(
                 }
             }
         }
-        let lacked = (id, addon_id.to_string());
-        if lacks
-            .missed
-            .lock()
-            .unwrap()
-            .get(&lacked)
-            .is_some_and(|at| at.elapsed() < MISS_MEMORY)
-        {
-            said_no.push(addon_id);
+        // A "no" from a little while ago counts only if it was believed when it was said.
+        if let Some(believed) = lacks.remembered(id, addon_id) {
+            if believed {
+                said_no.push(addon_id);
+            }
             continue;
         }
         let resolving = addon.offers_resource("resolve");
@@ -363,15 +396,16 @@ pub(crate) fn through_addons<T>(
             Ok(Some(track)) => track,
             // It does not have the song, or what it answered cannot be this song.
             Ok(None) => {
-                lacks.missed.lock().unwrap().insert(lacked, Instant::now());
+                lacks.missed(id, addon_id, lacks.finding(addon_id));
                 said_no.push(addon_id);
                 continue;
             }
             // A wrong answer to "do you have this song" (the host refused it as another song) is a no; a broken
             // search answer is not.
             Err(e) if e.is_miss() || e.code == Code::InvalidResponse => {
-                lacks.missed.lock().unwrap().insert(lacked, Instant::now());
-                if e.is_miss() || resolving {
+                let no = e.is_miss() || resolving;
+                lacks.missed(id, addon_id, no && lacks.finding(addon_id));
+                if no {
                     said_no.push(addon_id);
                 }
                 continue;
@@ -385,7 +419,7 @@ pub(crate) fn through_addons<T>(
         match act(addon, addon_id, &track.id) {
             Ok(done) => {
                 let _ = library.lock().unwrap().set_ref(id, addon_id, &track.id);
-                found(addon_id);
+                found(addon_id, true);
                 return Ok((done, addon_id.to_string()));
             }
             Err(e) if e.is_miss() => {
@@ -467,7 +501,7 @@ fn resolver(
             let addon_id = &loaded.stored.id;
             return match stream_from(addon, addon_id, &wanted.track) {
                 Ok(located) => {
-                    lacks.found_by(addon_id);
+                    lacks.gave(addon_id);
                     let _ = library.lock().unwrap().note_addon_use(
                         addon_id,
                         stash_core::usage::Given::Stream,
@@ -492,6 +526,7 @@ fn resolver(
         if let Some(located) = relays.copy_of(&library, id) {
             return Ok(located);
         }
+        relays.not_handed(id);
         let keeping = library.lock().unwrap().played_cap_bytes().unwrap_or(0) > 0;
         through_addons(
             &registry,
@@ -720,6 +755,15 @@ impl Core {
                             port,
                         )),
                         on_play: Some(keep_plays(Arc::clone(&library))),
+                        // A copy the engine cannot play is let go; the song comes from an add-on again.
+                        on_failed: Some({
+                            let (relays, library) = (Arc::clone(&relays), Arc::clone(&library));
+                            Arc::new(move |item: &QueueItem| {
+                                if let Some(id) = item.id {
+                                    relays.failed(&library, id);
+                                }
+                            })
+                        }),
                         counts_between_seconds: options
                             .play_counts_between_seconds
                             .unwrap_or(Settings::default().counts_between_seconds),
@@ -1511,6 +1555,7 @@ fn addons_route(
                 addon.link(),
                 &addon.manifest_json(),
             )?;
+            state.lacks.forget_addon(&addon.manifest.id);
         }
         "/api/addons/remove" => {
             state.library.lock().unwrap().remove_addon(id)?;
@@ -1522,6 +1567,9 @@ fn addons_route(
                 .lock()
                 .unwrap()
                 .set_addon_enabled(id, enabled)?;
+            if enabled {
+                state.lacks.forget_addon(id);
+            }
         }
         "/api/addons/order" => {
             let ids: Vec<String> = body

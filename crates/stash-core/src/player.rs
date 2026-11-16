@@ -94,6 +94,10 @@ pub type Resolver = Arc<dyn Fn(&QueueItem) -> std::result::Result<Located, Failu
 /// Told of a play that counted: the track, and when it started (milliseconds since 1970).
 pub type OnPlay = Arc<dyn Fn(&QueueItem, i64) + Send + Sync>;
 
+/// Told when the engine could not play a track, before the track is asked for once more: what it was given may be
+/// what failed.
+pub type OnFailed = Arc<dyn Fn(&QueueItem) + Send + Sync>;
+
 pub struct Settings {
     /// Without one, the queue can hold files only.
     pub resolver: Option<Resolver>,
@@ -101,6 +105,8 @@ pub struct Settings {
     pub ask_ahead_seconds: f64,
     /// Told when a play counts.
     pub on_play: Option<OnPlay>,
+    /// Told when the engine could not play a track.
+    pub on_failed: Option<OnFailed>,
     /// A play counts once half the track was really played, but never before the first of these seconds and always
     /// by the second: the rule the other Stashes (and Last.fm) use, 30 s and 4 minutes.
     pub counts_between_seconds: (f64, f64),
@@ -112,6 +118,7 @@ impl Default for Settings {
             resolver: None,
             ask_ahead_seconds: 30.0,
             on_play: None,
+            on_failed: None,
             counts_between_seconds: (30.0, 240.0),
         }
     }
@@ -206,6 +213,8 @@ pub struct PlayerState {
     pub error: Option<String>,
     /// That track's row in the library, when it is one.
     pub error_id: Option<i64>,
+    /// How many times a track could not be played: the window tells of each, the same one twice too.
+    pub errors: u64,
     /// Nothing plays and the player rests on `track` (`status` is "paused"): the queue ended there, the track
     /// could not be played, or the queue was brought back from last time. Play starts it.
     pub resting: bool,
@@ -257,6 +266,7 @@ struct Shared {
     accepted: Option<String>,
     error: Option<String>,
     error_id: Option<i64>,
+    errors: u64,
     /// A seek asked for while the next track was still loading; it is done when the track has loaded.
     pending_seek: Option<f64>,
     heard: Option<Heard>,
@@ -327,6 +337,7 @@ impl Shared {
     fn fail(&mut self, item: &QueueItem, why: &str) {
         self.error = Some(could_not(item, why));
         self.error_id = item.id;
+        self.errors += 1;
     }
 
     /// Where the player rests while nothing plays and nothing is starting: the queue place, and the seconds into it.
@@ -383,6 +394,7 @@ struct Ctx {
     resolver: Option<Resolver>,
     ask_ahead_seconds: f64,
     on_play: Option<OnPlay>,
+    on_failed: Option<OnFailed>,
     counts_between_seconds: (f64, f64),
 }
 
@@ -754,6 +766,7 @@ impl Player {
             resolver: settings.resolver,
             ask_ahead_seconds: settings.ask_ahead_seconds,
             on_play: settings.on_play,
+            on_failed: settings.on_failed,
             counts_between_seconds: settings.counts_between_seconds,
         };
         let stop = Arc::new(AtomicBool::new(false));
@@ -796,6 +809,7 @@ impl Player {
                                     .or(shared.starting)
                                     .and_then(|i| shared.queue.get(i));
                                 let failed_id = failed.and_then(|t| t.id);
+                                let failed_item = failed.cloned();
                                 let what = failed
                                     .map(|t| t.title.clone())
                                     .unwrap_or_else(|| "A track".into());
@@ -822,6 +836,7 @@ impl Player {
                                     said.join("; ")
                                 ));
                                 shared.error_id = failed_id;
+                                shared.errors += 1;
                                 // A stream that did not start is asked for once more: its link may have run out, or
                                 // the first try at its server failed. A file that cannot be played stays that way.
                                 let place = shared.index().or(shared.starting);
@@ -830,6 +845,12 @@ impl Player {
                                     && shared.retried.insert(place)
                                 {
                                     shared.retry = Some(place);
+                                }
+                                // Told before it is asked for again: what it was given may be what failed.
+                                drop(shared);
+                                if let (Some(item), Some(on_failed)) = (failed_item, &ctx.on_failed)
+                                {
+                                    on_failed(&item);
                                 }
                             }
                             // The engine only says its place when the number changes. A new playlist that starts on
@@ -1467,7 +1488,7 @@ impl Player {
             tier,
             served_by,
             accepted,
-            (error, error_id),
+            (error, error_id, errors),
             queue,
             resting,
             nothing_after,
@@ -1490,7 +1511,7 @@ impl Player {
                 shared.slot().and_then(|s| s.tier.clone()),
                 shared.slot().and_then(|s| s.addon.clone()),
                 shared.accepted.clone(),
-                (shared.error.clone(), shared.error_id),
+                (shared.error.clone(), shared.error_id, shared.errors),
                 (
                     shared.version,
                     shared.shuffle,
@@ -1614,6 +1635,7 @@ impl Player {
             signal,
             error,
             error_id,
+            errors,
             resting: resting.is_some(),
             nothing_after,
         }

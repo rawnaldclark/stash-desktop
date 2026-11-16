@@ -80,21 +80,24 @@
 		if (!measuring) document.title = docTitle;
 	});
 
-	// The last song that could not be played, and why: said once per new message.
+	// The last song that could not be played, and why: said each time one could not be (the same message twice too).
 	let lastError: string | null = null;
+	let lastErrors = 0;
 	$effect(() => {
 		const e = S.v.error;
-		if (e && e !== lastError) {
+		const n = S.v.errors ?? 0;
+		if (e && (e !== lastError || n !== lastErrors)) {
 			const said = /[.!?]$/.test(e) ? e : `${e}.`;
 			ui.toast(said);
 			// A song that could not be played may now be known not to play: then the message offers to find it.
 			const id = S.v.errorId;
 			void NF.refresh().then(() => {
 				if (id == null || !NF.marked.has(id) || ui.toastText !== said) return;
-				ui.toast(said, { label: 'Find it', run: () => void goto(`/library?tab=notfound&song=${id}`) });
+				ui.toast(said, { label: 'Find it', run: () => void NF.show(id) });
 			});
 		}
 		lastError = e;
+		lastErrors = n;
 	});
 	// The core has no audio engine: said once, with its reason (Settings › Sound keeps saying it).
 	let saidNoSound = false;

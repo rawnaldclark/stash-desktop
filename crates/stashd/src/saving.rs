@@ -120,8 +120,28 @@ fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<(), Troub
     // and its kind is known.
     std::fs::create_dir_all(&root)?;
     let part = root.join(format!(".stash-{id}.part"));
-    // A copy kept from playing the song is the song already: it is taken from there, and no add-on is asked.
-    let (head, addon, tier) = if let Some((kept, copy)) = state.relays.copy(&state.library, id) {
+    // A copy kept from playing the song is the song already: it is taken from there, and no add-on is asked. Only when
+    // the add-on it came from lets its songs be saved, and its download would not be better: an Eclipse add-on's
+    // download is its stream; another's may be a better file than the stream, unless the copy is lossless already.
+    let allowed = |copy: &stash_core::played::PlayedCopy| {
+        let Some(from) = copy.addon.as_deref() else {
+            return false;
+        };
+        let lossless = matches!(copy.tier.as_deref(), Some("lossless" | "hires"));
+        state.addons.read().unwrap().iter().any(|loaded| {
+            loaded.stored.id == from
+                && loaded.usable().is_some_and(|addon| {
+                    addon.offers_download()
+                        && (addon.manifest.dialect == stash_core::addons::Dialect::Eclipse
+                            || lossless)
+                })
+        })
+    };
+    let copy = state
+        .relays
+        .copy(&state.library, id)
+        .filter(|(_, copy)| allowed(copy));
+    let (head, addon, tier) = if let Some((kept, copy)) = copy {
         let copied = std::fs::copy(&kept, &part).and_then(|_| {
             let mut head = vec![0u8; 64];
             let n = std::fs::File::open(&part)?.read(&mut head)?;
@@ -220,7 +240,7 @@ fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<(), Troub
         Ok(true) => {
             let copy = state.library.lock().unwrap().drop_played_copy(id);
             if let Ok(Some(file)) = copy {
-                stash_core::played::delete_files(state.relays.folder(), &[file]);
+                state.relays.delete(vec![file]);
             }
             Ok(())
         }

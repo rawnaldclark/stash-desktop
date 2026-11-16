@@ -481,13 +481,15 @@ impl Library {
     }
 
     /// The listener picked the add-on's track `theirs` as the song `id`: it is kept as that add-on's name for the
-    /// song (so it plays from there from now on), the song leaves the list, and a save of it that failed is asked
-    /// again. `None` when there is no such song; `Some(true)` when a save was asked again.
+    /// song (so it plays from there from now on), the song leaves the list, and, with `save` (the add-on lets its
+    /// songs be saved), a save of it that failed is asked again. `None` when there is no such song; `Some(true)` when
+    /// a save was asked again.
     pub fn fix_unfound(
         &mut self,
         id: i64,
         addon: &str,
         theirs: &str,
+        save: bool,
         now_ms: i64,
     ) -> Result<Option<bool>> {
         let tx = self.conn.transaction()?;
@@ -505,7 +507,8 @@ impl Library {
             params![id, addon, theirs],
         )?;
         tx.execute("DELETE FROM unfound WHERE track_id = ?1", [id])?;
-        let saving = tx.execute(
+        let saving = save
+            && tx.execute(
             "UPDATE downloads SET state = 'queued', error = NULL, asked_at = ?2 WHERE track_id = ?1 AND state = 'failed'",
             params![id, now_ms],
         )? > 0;
@@ -516,13 +519,16 @@ impl Library {
     /// Sets songs aside (none of an add-on's results is the song): off the list, still known not to play. With
     /// `aside` false they are back on it. Answers how many changed.
     pub fn set_unfound_aside(&mut self, ids: &[i64], aside: bool, now_ms: i64) -> Result<usize> {
+        // In one go: one write to the disk, however many songs.
+        let tx = self.conn.transaction()?;
         let mut n = 0;
-        for id in ids {
-            n += self.conn.execute(
-                "UPDATE unfound SET aside_at = ?2 WHERE track_id = ?1",
-                params![id, aside.then_some(now_ms)],
-            )?;
+        {
+            let mut set = tx.prepare("UPDATE unfound SET aside_at = ?2 WHERE track_id = ?1")?;
+            for id in ids {
+                n += set.execute(params![id, aside.then_some(now_ms)])?;
+            }
         }
+        tx.commit()?;
         Ok(n)
     }
 

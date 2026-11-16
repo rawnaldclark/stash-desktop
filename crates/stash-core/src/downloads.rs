@@ -247,6 +247,8 @@ pub struct Upstream {
     pub range: Option<String>,
     /// The server answers ranges (the engine can seek in the stream).
     pub ranges: bool,
+    /// The server sent it compressed although it was asked not to: its length and ranges are not the bytes read.
+    pub encoded: bool,
     pub body: Box<dyn Read + Send>,
 }
 
@@ -265,7 +267,8 @@ pub fn open_stream(url: &str, range: Option<&str>) -> Result<Upstream, Trouble> 
         .https_only(!is_loopback(url))
         .build()
         .into();
-    let mut asked = agent.get(url);
+    // As it is: a compressed answer's length and ranges are not those of the bytes read from it.
+    let mut asked = agent.get(url).header("Accept-Encoding", "identity");
     if let Some(range) = range {
         asked = asked.header("Range", range);
     }
@@ -285,12 +288,15 @@ pub fn open_stream(url: &str, range: Option<&str>) -> Result<Upstream, Trouble> 
             "the file is larger than a song can be".into(),
         ));
     }
+    let encoded = text("content-encoding")
+        .is_some_and(|v| !v.trim().is_empty() && !v.trim().eq_ignore_ascii_case("identity"));
     Ok(Upstream {
         status: answer.status().as_u16(),
         content_type: text("content-type"),
-        length,
-        range: text("content-range"),
-        ranges: text("accept-ranges").is_some_and(|v| v.eq_ignore_ascii_case("bytes")),
+        length: length.filter(|_| !encoded),
+        range: text("content-range").filter(|_| !encoded),
+        ranges: !encoded && text("accept-ranges").is_some_and(|v| v.eq_ignore_ascii_case("bytes")),
+        encoded,
         body: Box::new(
             answer
                 .into_body()

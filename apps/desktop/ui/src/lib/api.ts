@@ -44,6 +44,8 @@ export interface PlayerState {
 	error: string | null;
 	/** The library row of the song the message is about, when it is one. */
 	errorId?: number | null;
+	/** How many times a song could not be played: each is told, the same message twice too. */
+	errors?: number;
 	/** What the queue is playing from (Up next's "Playing from ..."); null when unknown. */
 	from: string | null;
 	/** False when the core has no audio engine; `reason` says why. */

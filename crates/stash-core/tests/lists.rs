@@ -486,7 +486,7 @@ fn a_song_no_add_on_finds_waits_to_be_fixed_and_leaves_when_it_is() {
         .unwrap();
     assert_eq!(
         library
-            .fix_unfound(hotel, "demo.folder", "41", 7_000)
+            .fix_unfound(hotel, "demo.folder", "41", true, 7_000)
             .unwrap(),
         Some(true)
     );
@@ -501,7 +501,9 @@ fn a_song_no_add_on_finds_waits_to_be_fixed_and_leaves_when_it_is() {
     assert_eq!(library.download_counts().unwrap().queued, 1);
     assert_eq!(library.unfound_counts().unwrap().marked, [india]);
     assert_eq!(
-        library.fix_unfound(999, "demo.folder", "1", 7_000).unwrap(),
+        library
+            .fix_unfound(999, "demo.folder", "1", true, 7_000)
+            .unwrap(),
         None
     );
 
