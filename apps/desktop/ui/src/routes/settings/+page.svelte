@@ -158,6 +158,31 @@
 		}
 	}
 
+	// ---- Songs kept as they were played: how much room they may take.
+	const ROOMS: [number, string][] = [
+		[0, 'Off'],
+		[1024, '1 GB'],
+		[2048, '2 GB'],
+		[5120, '5 GB'],
+		[10240, '10 GB']
+	];
+	let room = $state<core.PlayedRoom | null>(null);
+	async function setRoom(cap_mb: number) {
+		try {
+			room = await core.setPlayedRoom(cap_mb);
+		} catch (e) {
+			ui.toast(core.said(e));
+		}
+	}
+	async function clearRoom() {
+		try {
+			room = await core.clearPlayed();
+		} catch (e) {
+			ui.toast(core.said(e));
+		}
+	}
+	const roomSize = (bytes: number) => (bytes >= 1_073_741_824 ? `${(bytes / 1_073_741_824).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1_048_576))} MB`);
+
 	let lrclib = $state<boolean | null>(null);
 	async function setLrclib(on: boolean) {
 		lrclib = on;
@@ -181,6 +206,10 @@
 		);
 		void core.autoplaySettings().then(
 			(s) => (autoplay = s.on),
+			() => {}
+		);
+		void core.playedRoom().then(
+			(r) => (room = r),
 			() => {}
 		);
 		void readOuts();
@@ -348,6 +377,25 @@
 				</div>
 				{#if fileNotice}<p class="set-sub" class:set-trouble={fileNotice.trouble} role="status">{fileNotice.text}</p>{/if}
 			</div>
+			{#if room}
+				<div class="set-row set-col">
+					<div class="set-lab">
+						<span class="set-name" id="kp-l">Keep songs you play</span>
+						<span class="set-sub">A song played from an add-on is kept on this computer as it plays, so next time it plays with no connection and without asking the add-on. When the room is full, the songs played longest ago make way.</span>
+					</div>
+					<div class="chips" role="group" aria-labelledby="kp-l">
+						{#each ROOMS as [mb, label] (mb)}
+							<button type="button" class="chip" class:on={room.cap_mb === mb} aria-pressed={room.cap_mb === mb} onclick={() => setRoom(mb)}>{label}</button>
+						{/each}
+					</div>
+					{#if room.songs}
+						<p class="set-sub" role="status">
+							{many(room.songs, 'song', 'songs')} kept, {roomSize(room.bytes)}.
+							<button type="button" class="btn ghost kp-clear" onclick={clearRoom}>Clear</button>
+						</p>
+					{/if}
+				</div>
+			{/if}
 		</div>
 	</section>
 

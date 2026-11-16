@@ -2625,3 +2625,92 @@ fn songs_no_add_on_finds_wait_to_be_fixed_by_hand() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_song_played_from_an_add_on_is_kept_and_plays_again_without_it() {
+    let Some(engine) = engine() else {
+        eprintln!("SKIPPED played copies: no libmpv found");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("stash-api-played-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let served = dir.join("Served");
+    std::fs::create_dir_all(&served).unwrap();
+    silence_for(&served.join("kilo.wav"), 3);
+    let addon = DemoAddon::bind(&served, 0, Duration::ZERO).unwrap();
+    let link = addon.link();
+    std::thread::spawn(move || addon.run());
+    let core = Core::bind(Options {
+        db: dir.join("library.db"),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: Some(Output::Silent),
+        mpv: Some(engine),
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    let until = |what: &str, wanted: &dyn Fn() -> Option<Value>| -> Value {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some(found) = wanted() {
+                return found;
+            }
+            assert!(Instant::now() < deadline, "waited for {what}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let file = json!({
+        "kind": "stash-web-library", "v": 1, "generator": "a test",
+        "likes": [{ "item": { "title": "kilo", "artist": "Unknown artist", "durationMs": 3000 }, "likedAt": 1_759_838_400_000i64 }]
+    })
+    .to_string();
+    assert_eq!(client.upload("/api/import", file.as_bytes()).0, 200);
+    client.post("/api/addons", json!({ "link": link }));
+    let kilo = client.get("/api/search?q=kilo&limit=1").1["rows"][0]["id"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(
+        client.get("/api/played").1,
+        json!({ "songs": 0, "bytes": 0, "cap_mb": 2048 })
+    );
+
+    // Played from the add-on: the engine reads it through the core, which keeps what passes.
+    client.post("/api/player/play", json!({ "items": [{ "id": kilo }] }));
+    let room = until("the copy to be kept", &|| {
+        let (_, room) = client.get("/api/played");
+        (room["songs"] == 1).then_some(room)
+    });
+    let size = std::fs::metadata(served.join("kilo.wav")).unwrap().len();
+    assert_eq!(room["bytes"].as_u64(), Some(size), "{room}");
+    let copy = dir.join("Played").join(format!("{kilo}.wav"));
+    assert_eq!(
+        std::fs::read(&copy).unwrap(),
+        std::fs::read(served.join("kilo.wav")).unwrap()
+    );
+
+    // With the add-on gone, it plays from the copy.
+    client.post("/api/addons/remove", json!({ "id": "demo.folder" }));
+    client.post("/api/player/stop", json!({}));
+    client.post("/api/player/play", json!({ "items": [{ "id": kilo }] }));
+    let state = until("it to play from the copy", &|| {
+        let (_, s) = client.get("/api/player");
+        (s["status"] == "playing").then_some(s)
+    });
+    assert!(state["served_by"].is_null(), "{state}");
+    assert!(state["error"].is_null(), "{state}");
+
+    // Cleared: the copy is gone.
+    client.post("/api/player/stop", json!({}));
+    assert_eq!(client.post("/api/played/clear", json!({}))["songs"], 0);
+    assert!(!copy.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -15,6 +15,7 @@ pub mod library;
 pub mod lists;
 pub mod lyrics;
 pub mod matching;
+pub mod played;
 pub mod player;
 pub mod scan;
 pub mod synth;

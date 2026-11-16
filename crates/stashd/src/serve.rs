@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
-use stash_core::addons::{Addon, AddonError, Code, StreamRequest, Track};
+use stash_core::addons::{Addon, AddonError, Code, Delivery, StreamRequest, Track};
 use stash_core::audio::{Output, find_library};
 use stash_core::import::ImportError;
 use stash_core::import::Song;
@@ -411,8 +411,16 @@ pub(crate) fn through_addons<T>(
 /// listener's add-ons in their order: the name an add-on gave the song before is tried first, else the add-on is
 /// asked whether it has the song (the contract's `resolve`: which of its tracks is the same song is the add-on's to
 /// say), and an add-on that can only search is searched for it ([`matching`]). The first add-on that gives a stream
-/// wins, and the name it gave is kept for next time.
-fn resolver(registry: Registry, library: Arc<Mutex<Library>>, lacks: Arc<Lacks>) -> Resolver {
+/// wins, and the name it gave is kept for next time. A song played before may have a copy kept from then: it plays
+/// from that, and no add-on is asked. A plain stream (not DASH or HLS, not encrypted) is relayed by the core, which
+/// keeps a copy of it as it plays ([`crate::relay`]).
+fn resolver(
+    registry: Registry,
+    library: Arc<Mutex<Library>>,
+    lacks: Arc<Lacks>,
+    relays: Arc<crate::relay::Relays>,
+    port: u16,
+) -> Resolver {
     Arc::new(move |item: &QueueItem| {
         let gone = |why: &str| Failure {
             message: why.to_string(),
@@ -438,6 +446,10 @@ fn resolver(registry: Registry, library: Arc<Mutex<Library>>, lacks: Arc<Lacks>)
         let Some(id) = item.id else {
             return Err(gone("it has nowhere to play from"));
         };
+        if let Some(located) = relays.copy_of(&library, id) {
+            return Ok(located);
+        }
+        let keeping = library.lock().unwrap().played_cap_bytes().unwrap_or(0) > 0;
         through_addons(
             &registry,
             &library,
@@ -445,9 +457,26 @@ fn resolver(registry: Registry, library: Arc<Mutex<Library>>, lacks: Arc<Lacks>)
             id,
             "it is not a file here, and there is no add-on to play it from",
             |addon| addon.offers_resource("stream"),
-            stream_from,
+            |addon, addon_id, track| {
+                addon.stream(track, &StreamRequest::default()).map(|info| {
+                    let plain =
+                        matches!(info.manifest, Delivery::None) && info.encrypted != Some(true);
+                    let located = Located {
+                        locator: info.url,
+                        tier: Some(info.tier.as_str().to_string()),
+                        addon: Some(addon_id.to_string()),
+                    };
+                    (plain, located)
+                })
+            },
         )
-        .map(|(located, _)| located)
+        .map(|((plain, located), _)| {
+            if plain && keeping {
+                relays.link(port, id, located)
+            } else {
+                located
+            }
+        })
     })
 }
 
@@ -532,6 +561,8 @@ pub(crate) struct State {
     pub(crate) lacks: Arc<Lacks>,
     /// Songs being saved as files.
     pub(crate) saving: crate::saving::Saving,
+    /// Add-on streams the engine reads through the core, and the copies kept of them.
+    pub(crate) relays: Arc<crate::relay::Relays>,
     /// The windows' owner, when the core runs inside one.
     window: Option<WindowShell>,
 }
@@ -616,6 +647,15 @@ impl Core {
             .map(|a| a.port())
             .unwrap_or(options.port);
         let addons: Registry = Arc::new(RwLock::new(load_addons(&library)?));
+        // Copies of songs as they were played sit next to the library, in a folder of their own.
+        let relays = Arc::new(crate::relay::Relays::new(
+            options
+                .db
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("Played"),
+            &library,
+        ));
         let library = Arc::new(Mutex::new(library));
         let lacks = Arc::new(Lacks::default());
         let player = match &options.audio {
@@ -628,6 +668,8 @@ impl Core {
                             Arc::clone(&addons),
                             Arc::clone(&library),
                             Arc::clone(&lacks),
+                            Arc::clone(&relays),
+                            port,
                         )),
                         on_play: Some(keep_plays(Arc::clone(&library))),
                         counts_between_seconds: options
@@ -672,6 +714,7 @@ impl Core {
                 scanning: Arc::new(Mutex::new(Scanning::default())),
                 lacks,
                 saving: crate::saving::Saving::default(),
+                relays,
                 window: None,
             },
         })
@@ -757,6 +800,11 @@ fn answer(state: &State, mut request: Request) -> bool {
     let origin = find(&request, "Origin").map(str::to_string);
     let origin_ok = origin.as_deref().is_none_or(|o| allowed_origin(o, port));
 
+    // The engine reading a stream the core relays: answered on a thread of its own, as long as the song plays.
+    if host_ok && request.url().starts_with("/relay/") {
+        state.relays.answer(Arc::clone(&state.library), request);
+        return false;
+    }
     let mut done = false;
     let mut response = if !host_ok {
         refuse(403, "this server answers only as 127.0.0.1 or localhost")
@@ -1652,6 +1700,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::unfound::route(state, request, &path, &param)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::relay::route(state, request, &path)? {
         return Ok((response, false));
     }
     // One album or one artist: /api/albums/{id}, /api/artists/{id}; the picture of a file: /api/art/track/{id}

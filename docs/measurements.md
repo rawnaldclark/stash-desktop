@@ -389,3 +389,19 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 
 - An add-on that can only resolve (no search) can't show results to pick from.
 - No real add-on has been asked: the owner's has a small daily allowance.
+
+## 16. Songs kept as they were played
+
+- **A song played from an add-on is kept as it plays.** The engine reads an add-on's plain stream (not DASH or HLS, not encrypted) of a library song through the core (`/relay/{token}` on the core's own address, a link that is hard to guess and answered for twelve hours), and the core writes what passes to a file in `Played` beside the library. Nothing is fetched twice: a copy is written only from the engine's own reading, from the stream's start to its end; a stream the engine seeks in before it has all of it is relayed and not kept, and a stream that is not audio by its first bytes is not kept.
+- **The next play comes from the copy**: no connection is needed and no add-on is asked (its allowance is the listener's). Saving the song as a file takes the copy too, and asks no add-on; once saved, the copy goes.
+- **Room**: Settings › Your library › Keep songs you play: off, or 1, 2 (unless changed), 5 or 10 GB. When the room is full the songs played longest ago make way; a smaller room keeps the most recently played; Clear deletes them all. A copy cut short (the program ended, the engine stopped reading) is deleted, and on start what a run before left half written is too: only files named the way copies are named (`<song>.<kind>`, `<song>-<n>.part`) are ever deleted there.
+
+### Checked
+
+- **By the tests:** `crates/stash-core/tests/lists.rs` (kept within the room, the least recently played go first, a new copy replaces the old file, one larger than the room is not kept, a smaller room and none at all), `crates/stash-core/src/played.rs` (tidying deletes only copies' names, never a path out of the folder), `crates/stashd/tests/api.rs` with the engine on the silent output: a song played from the demo add-on (which answers ranges, as a real server does) is kept byte for byte, plays again with the add-on removed (no add-on named, no error), and Clear deletes the file.
+- **In the real app on a scratch library** with the demo add-on (volume at 0): one play kept a 4.4 MB copy; with the add-on removed it played from the copy, "Lossless" still shown; Settings showed "1 song kept, 4 MB"; Clear emptied the folder. No errors in the window.
+
+### Not covered yet
+
+- No real add-on's stream has been relayed: a server that does not answer ranges, or one that sends the file slower than it plays, was not tried; neither was a long hi-res file larger than the engine's own buffer (the stream then stays open as long as the song plays, on a thread of its own).
+- A song kept is not marked in the lists, and the copies are not counted as offline songs anywhere yet.

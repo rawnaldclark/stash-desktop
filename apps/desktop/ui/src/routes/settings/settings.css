@@ -33,3 +33,4 @@
 .bk-pick[aria-disabled='true'] { opacity: .55; pointer-events: none; }
 .dev-rename { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; }
 .dev-input { flex: 1 1 220px; min-width: 0; height: 36px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--wp-line-2); background: var(--wp-field); color: var(--wp-text); font: 400 14px/1 var(--font-body); }
+.kp-clear { margin-left: 8px; padding: 4px 10px; }

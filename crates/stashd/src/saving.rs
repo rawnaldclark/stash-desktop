@@ -7,6 +7,7 @@
 //! plays. Taking it off the list again deletes the file and the song goes back to playing through the add-ons.
 
 use std::cell::Cell;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex};
@@ -115,46 +116,70 @@ fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<(), Troub
         };
         (song, art, folder(&library))
     };
-    let (info, addon) = through_addons(
-        &state.addons,
-        &state.library,
-        &state.lacks,
-        id,
-        "there is no add-on to save it from",
-        |addon| addon.offers_download(),
-        |addon, _, track| addon.download(track, &StreamRequest::default()),
-    )
-    .map_err(|failure| Trouble::Failed(failure.message))?;
-
     // It comes in under a name of its own at the top of the folder, and is moved where it belongs once it is whole
     // and its kind is known.
     std::fs::create_dir_all(&root)?;
     let part = root.join(format!(".stash-{id}.part"));
-    let (looked, wanted) = (Cell::new(Instant::now()), Cell::new(true));
-    let fetched = downloads::fetch(
-        &info.url,
-        &part,
-        &|| !wanted.get() || stop.load(Ordering::Relaxed),
-        &mut |bytes, of| {
-            *state.saving.now.lock().unwrap() = Some(Progress { id, bytes, of });
-            if looked.get().elapsed() >= LOOK_EVERY {
-                looked.set(Instant::now());
-                wanted.set(
-                    state
-                        .library
-                        .lock()
-                        .unwrap()
-                        .download_wanted(id)
-                        .unwrap_or(false),
-                );
+    // A copy kept from playing the song is the song already: it is taken from there, and no add-on is asked.
+    let (head, addon, tier) = if let Some((kept, copy)) = state.relays.copy(&state.library, id) {
+        let copied = std::fs::copy(&kept, &part).and_then(|_| {
+            let mut head = vec![0u8; 64];
+            let n = std::fs::File::open(&part)?.read(&mut head)?;
+            head.truncate(n);
+            Ok(head)
+        });
+        match copied {
+            Ok(head) if downloads::kind_of(&head).is_some() => {
+                (head, copy.addon.unwrap_or_default(), copy.tier)
             }
-        },
-    );
-    let (head, _) = match fetched {
-        Ok(done) => done,
-        Err(trouble) => {
-            let _ = std::fs::remove_file(&part);
-            return Err(trouble);
+            Ok(_) => {
+                let _ = std::fs::remove_file(&part);
+                return Err(Trouble::Failed(
+                    "the copy kept from playing it is not audio".into(),
+                ));
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&part);
+                return Err(e.into());
+            }
+        }
+    } else {
+        let (info, addon) = through_addons(
+            &state.addons,
+            &state.library,
+            &state.lacks,
+            id,
+            "there is no add-on to save it from",
+            |addon| addon.offers_download(),
+            |addon, _, track| addon.download(track, &StreamRequest::default()),
+        )
+        .map_err(|failure| Trouble::Failed(failure.message))?;
+        let (looked, wanted) = (Cell::new(Instant::now()), Cell::new(true));
+        let fetched = downloads::fetch(
+            &info.url,
+            &part,
+            &|| !wanted.get() || stop.load(Ordering::Relaxed),
+            &mut |bytes, of| {
+                *state.saving.now.lock().unwrap() = Some(Progress { id, bytes, of });
+                if looked.get().elapsed() >= LOOK_EVERY {
+                    looked.set(Instant::now());
+                    wanted.set(
+                        state
+                            .library
+                            .lock()
+                            .unwrap()
+                            .download_wanted(id)
+                            .unwrap_or(false),
+                    );
+                }
+            },
+        );
+        match fetched {
+            Ok((head, _)) => (head, addon, Some(info.tier.as_str().to_string())),
+            Err(trouble) => {
+                let _ = std::fs::remove_file(&part);
+                return Err(trouble);
+            }
         }
     };
     let kind = downloads::kind_of(&head).unwrap_or("audio");
@@ -174,7 +199,7 @@ fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<(), Troub
         let read = downloads::read(&file)?;
         let saved = SavedDownload {
             addon,
-            tier: Some(info.tier.as_str().to_string()),
+            tier,
             at_ms: now_ms(),
             cover_inside,
         };
@@ -186,7 +211,14 @@ fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<(), Troub
             .map_err(|e| Trouble::Failed(e.to_string()))
     })();
     match kept {
-        Ok(true) => Ok(()),
+        // A file now: a copy kept from playing it is not needed any more.
+        Ok(true) => {
+            let copy = state.library.lock().unwrap().drop_played_copy(id);
+            if let Ok(Some(file)) = copy {
+                stash_core::played::delete_files(state.relays.folder(), &[file]);
+            }
+            Ok(())
+        }
         // Taken off the list while its tags were written: nothing is kept.
         Ok(false) => {
             remove_saved(&file, &root);

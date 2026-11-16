@@ -237,6 +237,70 @@ pub fn fetch(
     Ok((head, got))
 }
 
+/// A stream as its server answers it, to be relayed to the engine: the status, the headers the engine reads, and the
+/// body.
+pub struct Upstream {
+    pub status: u16,
+    pub content_type: Option<String>,
+    pub length: Option<u64>,
+    /// `Content-Range`, for an answer to a range.
+    pub range: Option<String>,
+    /// The server answers ranges (the engine can seek in the stream).
+    pub ranges: bool,
+    pub body: Box<dyn Read + Send>,
+}
+
+/// Opens `url` to relay it, from `range` on ("bytes=N-") when one is asked for. The same rules as [`fetch`]: https
+/// only (http on this computer), redirects followed to https only, no file larger than a song can be.
+pub fn open_stream(url: &str, range: Option<&str>) -> Result<Upstream, Trouble> {
+    crate::addons::checked_url(url, "the stream's link")
+        .map_err(|e| Trouble::Failed(e.in_words()))?;
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_connect(Some(Duration::from_secs(15)))
+        .timeout_recv_response(Some(Duration::from_secs(30)))
+        // The engine reads as it plays once its own buffer is full: a long song keeps the stream open that long.
+        .timeout_recv_body(Some(Duration::from_secs(4 * 3600)))
+        .max_redirects(5)
+        .https_only(!is_loopback(url))
+        .build()
+        .into();
+    let mut asked = agent.get(url);
+    if let Some(range) = range {
+        asked = asked.header("Range", range);
+    }
+    let answer = asked
+        .call()
+        .map_err(|e| Trouble::Failed(format!("the stream could not be opened: {e}")))?;
+    let text = |name: &str| {
+        answer
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    };
+    let length = text("content-length").and_then(|v| v.parse::<u64>().ok());
+    if length.is_some_and(|n| n > MAX_FILE) {
+        return Err(Trouble::Failed(
+            "the file is larger than a song can be".into(),
+        ));
+    }
+    Ok(Upstream {
+        status: answer.status().as_u16(),
+        content_type: text("content-type"),
+        length,
+        range: text("content-range"),
+        ranges: text("accept-ranges").is_some_and(|v| v.eq_ignore_ascii_case("bytes")),
+        body: Box::new(
+            answer
+                .into_body()
+                .into_with_config()
+                .limit(MAX_FILE + 1)
+                .reader(),
+        ),
+    })
+}
+
 fn is_loopback(url: &str) -> bool {
     url::Url::parse(url).ok().is_some_and(|u| match u.host() {
         Some(url::Host::Domain(name)) => name == "localhost",

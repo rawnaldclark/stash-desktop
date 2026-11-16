@@ -386,6 +386,15 @@ export const setWindowSettings = (tray: boolean) => post<{ tray: boolean }>('/ap
 export const lyricsSettings = () => get<{ lrclib: boolean }>('/api/settings/lyrics');
 export const setLyricsSettings = (lrclib: boolean) => post<{ lrclib: boolean }>('/api/settings/lyrics', { lrclib });
 
+// ---- Songs kept as they were played from an add-on
+
+/** How many songs are kept, the room they take, and the room they may take (0: none are kept). */
+export type PlayedRoom = { songs: number; bytes: number; cap_mb: number };
+export const playedRoom = () => get<PlayedRoom>('/api/played');
+/** The room copies may take; the songs played longest ago go when it is smaller than what they take. */
+export const setPlayedRoom = (cap_mb: number) => post<PlayedRoom>('/api/played', { cap_mb });
+export const clearPlayed = () => post<PlayedRoom>('/api/played/clear', {});
+
 /** A sound output of the system: `name` is the engine's ("auto" for the system's own choice), `description` the system's. */
 export type Device = { name: string; description: string };
 /** The outputs, the one in use, and the one chosen last when it is not connected now. */

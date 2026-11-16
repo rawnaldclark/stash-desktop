@@ -509,3 +509,67 @@ fn a_song_no_add_on_finds_waits_to_be_fixed_and_leaves_when_it_is() {
     assert!(library.found_again(india).unwrap());
     assert_eq!(library.unfound_counts().unwrap(), Default::default());
 }
+
+#[test]
+fn copies_of_played_songs_are_kept_in_the_room_given_and_the_least_played_go_first() {
+    let mut library = Library::open_in_memory().unwrap();
+    let song = |title: &str| Song {
+        title: title.into(),
+        artist: "A".into(),
+        refs: vec![("some.addon".into(), title.into())],
+        ..Song::default()
+    };
+    let ids: Vec<i64> = ["a", "b", "c", "d"]
+        .iter()
+        .map(|t| library.adopt(&song(t)).unwrap())
+        .collect();
+    let (a, b, c, d) = (ids[0], ids[1], ids[2], ids[3]);
+    library.set_played_cap(1).unwrap();
+    let keep = |library: &mut Library, id: i64, file: &str, bytes: u64, at: i64| {
+        library
+            .keep_played_copy(id, file, bytes, Some("lossless"), Some("some.addon"), at)
+            .unwrap()
+    };
+    assert_eq!(keep(&mut library, a, "a.flac", 400_000, 1), (true, vec![]));
+    assert_eq!(keep(&mut library, b, "b.flac", 400_000, 2), (true, vec![]));
+    // Played again: a is the most recently used now, so b goes when room is short.
+    let copy = library.played_copy(a, 3).unwrap().unwrap();
+    assert_eq!(
+        (copy.file.as_str(), copy.tier.as_deref()),
+        ("a.flac", Some("lossless"))
+    );
+    assert_eq!(
+        keep(&mut library, c, "c.flac", 400_000, 4),
+        (true, vec!["b.flac".to_string()])
+    );
+    assert!(library.played_copy(b, 5).unwrap().is_none());
+    // A new copy of a song replaces its old file; one larger than the whole room is not kept.
+    assert_eq!(
+        keep(&mut library, a, "a.mp3", 300_000, 6),
+        (true, vec!["a.flac".to_string()])
+    );
+    assert_eq!(
+        keep(&mut library, d, "d.flac", 2_000_000, 7),
+        (false, vec!["d.flac".to_string()])
+    );
+    let room = library.played_room().unwrap();
+    assert_eq!((room.songs, room.bytes, room.cap_mb), (2, 700_000, 1));
+    let mut files = library.played_files().unwrap();
+    files.sort();
+    assert_eq!(files, ["a.mp3", "c.flac"]);
+    // A smaller room keeps the most recently played; none at all keeps nothing.
+    library.played_copy(c, 8).unwrap();
+    library.set_played_cap(0).unwrap();
+    assert_eq!(library.played_room().unwrap().songs, 0);
+    assert_eq!(
+        keep(&mut library, a, "a.flac", 10, 9),
+        (false, vec!["a.flac".to_string()])
+    );
+    library.set_played_cap(5).unwrap();
+    keep(&mut library, a, "a.flac", 10, 10);
+    assert_eq!(
+        library.drop_played_copy(a).unwrap().as_deref(),
+        Some("a.flac")
+    );
+    assert_eq!(library.played_room().unwrap().songs, 0);
+}
