@@ -106,6 +106,13 @@
 			/* said by the shell (the core's own words) */
 		}
 	}
+	/** Library › Songs lists only the songs on this computer. It follows offline (on while Stash is offline, as the phone's
+	 * Download mode hides what is not downloaded), and the chip changes it in between. */
+	let songsHere = $state(ui.offline);
+	$effect(() => {
+		songsHere = ui.offline;
+	});
+	let hereTotal = $state<number | null>(null);
 	/** The tabs that are searched from here: Songs asks the core; Liked, Playlists and History filter what is listed. */
 	const findable = $derived(tab === 'songs' ? (L.counts?.tracks ?? 0) > 0 : tab === 'likes' ? L.likes.length > 0 : tab === 'playlists' ? true : tab === 'history' ? L.history.length > 0 : false);
 </script>
@@ -126,14 +133,15 @@
 			{:else if tab === 'playlists'}
 				<div class="lib-sort" role="group" aria-label="Sort your playlists">{#each Object.entries(PL_SORTS) as [k, v] (k)}<button type="button" class="chip" class:on={plSort === k} aria-pressed={plSort === k} onclick={() => (plSort = k as PlSort)}>{v}</button>{/each}</div>
 			{:else if tab === 'songs' && L.counts}
-				<span class="lib-count">{L.counts.tracks.toLocaleString()} {L.counts.tracks === 1 ? 'song' : 'songs'}</span>
+				<div class="lib-sort" role="group" aria-label="Show"><button type="button" class="chip" class:on={songsHere} aria-pressed={songsHere} title="Only the songs that play with no connection" onclick={() => (songsHere = !songsHere)}><Icon name="download" />On this computer</button></div>
+				<span class="lib-count">{songsHere && hereTotal !== null ? `${hereTotal.toLocaleString()} of ` : ''}{L.counts.tracks.toLocaleString()} {L.counts.tracks === 1 ? 'song' : 'songs'}</span>
 			{/if}
 		</div>
 	{/if}
 
 	{#if tab === 'songs'}
 		<!-- While the window measures itself, the header's search box filters this list in place. -->
-		<Songs query={measuring ? ui.q : q} />
+		<Songs query={measuring ? ui.q : q} here={songsHere && !measuring} bind:hereTotal />
 	{:else if tab === 'likes'}
 		{#if L.likes.length}
 			<div class="lib-actions">

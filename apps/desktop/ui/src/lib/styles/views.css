@@ -59,6 +59,7 @@
 .rs .ic { width: 16px; height: 16px; }
 @media (hover: hover) and (pointer: fine) { .chip:hover, .rs:hover { background: var(--wp-hover); color: var(--wp-text); } }
 .chip.on { background: var(--acc-wash); color: var(--wp-text); border-color: transparent; }
+.wp .chip .ic { width: 16px; height: 16px; margin-left: -4px; }
 .rs-chips, .lib-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .lib-chips { margin: 0 0 16px; }
 

@@ -367,7 +367,7 @@ const player: PlayerAPI = {
 		if (!entries.length) return Promise.resolve();
 		return command(() => core.playEntries(entries, Math.min(start, entries.length - 1), opts?.from));
 	},
-	playLibrary: (offset, opts) => command(() => core.playLibrary(offset, opts?.from)),
+	playLibrary: (offset, opts) => command(() => core.playLibrary(offset, opts?.from, opts?.here)),
 	play: () => void command(() => core.setPaused(false)),
 	pause: () => void command(() => core.setPaused(true)),
 	toggle: () => {

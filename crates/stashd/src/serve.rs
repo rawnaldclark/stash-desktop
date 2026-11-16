@@ -1335,6 +1335,8 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
                     library.artist_track_ids(artist, offset, count)?
                 } else if body.get("liked").and_then(Value::as_bool) == Some(true) {
                     library.liked_ids_at(offset, count)?
+                } else if body.get("here").and_then(Value::as_bool) == Some(true) {
+                    library.here_track_ids_at(offset, count)?
                 } else {
                     library.track_ids_at(offset, count)?
                 };
@@ -2188,10 +2190,18 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
     }
     let response = match (request.method(), url.path()) {
         (Method::Get, "/api/counts") => reply_json(200, json!(library().counts()?)),
+        // `here=1`: only the songs that play with no connection (Library › Songs, "On this computer").
+        (Method::Get, "/api/tracks") if param("here").as_deref() == Some("1") => reply_json(
+            200,
+            json!({ "rows": library().tracks_here_at(number("offset", 0), limit(200))? }),
+        ),
         (Method::Get, "/api/tracks") => reply_json(
             200,
             json!({ "rows": library().tracks_at(number("offset", 0), limit(200))? }),
         ),
+        (Method::Get, "/api/tracks/here") => {
+            reply_json(200, json!({ "count": library().here_count()? }))
+        }
         (Method::Get, "/api/liked") => reply_json(
             200,
             json!({ "rows": library().liked_at(number("offset", 0), limit(200))? }),

@@ -520,6 +520,45 @@ impl Library {
         Ok(rows)
     }
 
+    /// The page of tracks that play with no connection (`here!()`) at `offset`, in title order: Library › Songs with
+    /// "On this computer" chosen.
+    pub fn tracks_here_at(&self, offset: usize, limit: usize) -> Result<Vec<TrackRow>> {
+        let sql = format!(
+            "SELECT {TRACK_COLUMNS}
+             FROM (SELECT t.id FROM tracks t WHERE {here} ORDER BY t.sort_key, t.id LIMIT ?1 OFFSET ?2) p
+             JOIN tracks t ON t.id = p.id {TRACK_JOINS}
+             ORDER BY t.sort_key, t.id",
+            here = here!()
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt
+            .query_map(params![limit as i64, offset as i64], track_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The ids of [`Library::tracks_here_at`]'s page: to play the songs on this computer from one of them.
+    pub fn here_track_ids_at(&self, offset: usize, limit: usize) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare_cached(concat!(
+            "SELECT t.id FROM tracks t WHERE ",
+            here!(),
+            " ORDER BY t.sort_key, t.id LIMIT ?1 OFFSET ?2"
+        ))?;
+        let ids = stmt
+            .query_map(params![limit as i64, offset as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?;
+        Ok(ids)
+    }
+
+    /// How many tracks play with no connection.
+    pub fn here_count(&self) -> Result<u64> {
+        Ok(self.conn.query_row(
+            concat!("SELECT COUNT(*) FROM tracks t WHERE ", here!()),
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as u64)
+    }
+
     /// The page after a row (`sort_key`, `id`), or the first page: what a list asks for while it scrolls on. The cost
     /// does not grow with the position.
     pub fn tracks_after(&self, after: Option<(&str, i64)>, limit: usize) -> Result<Vec<TrackRow>> {

@@ -1,6 +1,7 @@
 <!-- Library › Songs: the whole library in title order. It can be 100,000 songs and more, so it is never held in memory: the virtual
      list draws the rows on screen and reads their pages from the core as it scrolls. Each row is the web player's song row.
-     `query` filters in place (the core searches; the first hundred matches are listed).
+     `query` filters in place (the core searches; the first hundred matches are listed). `here` lists only the songs that play with
+     no connection ("On this computer"), and says how many there are in `hereTotal`.
      This is also the list the window measures itself on (`?bench`, see bench.ts). -->
 <script lang="ts">
 	import { onMount } from 'svelte';
@@ -11,7 +12,7 @@
 	import TrackRow from '../ui/TrackRow.svelte';
 	import { L, ui } from '../ui/state.svelte';
 
-	let { query = '' }: { query?: string } = $props();
+	let { query = '', here = false, hereTotal = $bindable(null) }: { query?: string; here?: boolean; hereTotal?: number | null } = $props();
 
 	/** The web player's song row with its cover. */
 	const ROW_HEIGHT = 56;
@@ -21,7 +22,27 @@
 	let scroller = $state<HTMLElement | null>(null);
 	/** How many songs the library has: the library's own count, or (measuring) the one this view asked for itself. */
 	let measuredCount = $state<number | null>(null);
-	const count = $derived(core.measuring ? measuredCount : (L.counts?.tracks ?? null));
+	const count = $derived(here ? hereTotal : core.measuring ? measuredCount : (L.counts?.tracks ?? null));
+	// How many are on this computer: read again when the library changes, and while the list is shown now and then (songs
+	// being saved arrive), but only when that number moved.
+	$effect(() => {
+		if (!here) return;
+		void L.changed;
+		let gone = false;
+		const read = () =>
+			core
+				.hereCount()
+				.then((n) => {
+					if (!gone && n !== hereTotal) hereTotal = n;
+				})
+				.catch(() => {});
+		void read();
+		const timer = setInterval(read, 5000);
+		return () => {
+			gone = true;
+			clearInterval(timer);
+		};
+	});
 	let failure = $state<string | null>(null);
 
 	// ---- the filter: what the core finds for the text, in place of the list
@@ -41,7 +62,7 @@
 		core
 			.searchTracks(text, 100, stop.signal)
 			.then((rows) => {
-				results = rows;
+				results = here ? rows.filter((r) => r.here) : rows;
 				resultsFor = text;
 			})
 			.catch(() => {});
@@ -90,7 +111,7 @@
 
 {#snippet songRow(track: core.TrackRow | undefined, index: number)}
 	{#if track}
-		<TrackRow item={itemOfRow(track)} album onplay={() => void player.playLibrary(index, { from: FROM })} />
+		<TrackRow item={itemOfRow(track)} album onplay={() => void player.playLibrary(index, { from: FROM, here })} />
 	{:else}
 		<div class="trk-row has-cv has-al" aria-hidden="true"><div class="trk-main"><span class="cv trk-cv"></span><span class="tr-t"><b class="ph"></b></span></div></div>
 	{/if}
@@ -101,7 +122,7 @@
 		<p class="s-hint" role="alert">{failure}</p>
 	{:else if resultsFor !== null}
 		{#if results.length === 0}
-			<p class="s-hint" role="status">Nothing in your library matches “{resultsFor.trim()}”.</p>
+			<p class="s-hint" role="status">Nothing {here ? 'on this computer' : 'in your library'} matches “{resultsFor.trim()}”.</p>
 		{:else}
 			<div class="trk-list">
 				{#each resultItems as it, i (it.refs.lib)}
@@ -109,11 +130,13 @@
 				{/each}
 			</div>
 		{/if}
+	{:else if here && count === 0}
+		<p class="s-hint">No songs are on this computer yet. Keep a playlist or your liked songs on this computer (the arrow on its page), or add a music folder in <a class="nl lnk" href="/settings#library">Settings</a>.</p>
 	{:else if count === 0}
 		<p class="s-hint">Your library has no songs yet. Add a music folder or import a library in <a class="nl lnk" href="/settings#library">Settings</a>.</p>
 	{:else if count !== null && scroller}
-		{#key L.changed}
-			<VirtualList bind:this={list} {count} rowHeight={ROW_HEIGHT} fetchPage={core.tracksAt} row={songRow} {scroller} onDrawn={noteDrawn} />
+		{#key `${L.changed}:${here}:${here ? count : ''}`}
+			<VirtualList bind:this={list} {count} rowHeight={ROW_HEIGHT} fetchPage={here ? core.tracksHereAt : core.tracksAt} row={songRow} {scroller} onDrawn={noteDrawn} />
 		{/key}
 	{/if}
 </div>

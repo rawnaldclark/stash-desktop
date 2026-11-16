@@ -115,6 +115,10 @@ const rows = <T>(path: string, signal?: AbortSignal) => get<Rows<T>>(path, signa
 export const counts = () => get<Counts>('/api/counts');
 /** The whole library in title order, a page at a time (`limit` at most 500). */
 export const tracksAt = (offset: number, limit: number, signal?: AbortSignal) => rows<TrackRow>(`/api/tracks?offset=${offset}&limit=${limit}`, signal);
+/** A page of the songs that play with no connection, in title order (Library › Songs, "On this computer"). */
+export const tracksHereAt = (offset: number, limit: number, signal?: AbortSignal) => rows<TrackRow>(`/api/tracks?here=1&offset=${offset}&limit=${limit}`, signal);
+/** How many songs play with no connection. */
+export const hereCount = async () => (await get<{ count: number }>('/api/tracks/here')).count;
 export const searchTracks = (query: string, limit: number, signal?: AbortSignal) => rows<TrackRow>(`/api/search?q=${encodeURIComponent(query)}&limit=${limit}`, signal);
 /** What the library has for the text: songs (at most `limit`), and the albums and artists it names (a dozen of each). */
 export const searchLibrary = (query: string, limit: number, signal?: AbortSignal) =>
@@ -408,7 +412,7 @@ export const player = (signal?: AbortSignal) => get<Partial<CorePlayer>>('/api/p
 /** Replaces the queue with these songs, in this order, and plays from `start`. */
 export const playEntries = (items: PlayEntry[], start: number, from?: string) => told('/api/player/play', { items, start, ...(from ? { from } : {}) });
 /** Plays the whole library (title order) from row `offset` on. */
-export const playLibrary = (offset: number, from?: string) => told('/api/player/play', { offset, ...(from ? { from } : {}) });
+export const playLibrary = (offset: number, from?: string, here = false) => told('/api/player/play', { offset, ...(from ? { from } : {}), ...(here ? { here: true } : {}) });
 export const setPaused = (paused: boolean) => told('/api/player/pause', { paused });
 export const nextTrack = () => told('/api/player/next', {});
 export const previousTrack = () => told('/api/player/previous', {});

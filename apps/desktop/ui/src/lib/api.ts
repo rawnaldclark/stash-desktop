@@ -17,7 +17,11 @@ export type QueueItem = LibraryItem & { qid: string };
 export type RepeatMode = 'off' | 'all' | 'one';
 
 /** How a list came to be playing ("Your likes", a playlist's name, "Search"...): shown as "Playing from ..." in Up next. */
-export type PlayOptions = { from?: string };
+export type PlayOptions = {
+	from?: string;
+	/** The library's songs that play with no connection only (Library › Songs, "On this computer"): `offset` counts among them. */
+	here?: boolean;
+};
 
 export interface PlayerState {
 	current: QueueItem | null;

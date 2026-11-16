@@ -4138,6 +4138,29 @@ fn a_list_kept_on_this_computer_saves_its_songs_and_those_that_come_later() {
     );
     assert!(saved.join("Unknown artist").join("foxtrot.wav").is_file());
 
+    // Library › Songs, "On this computer": the four saved, in title order, and a page of them anywhere.
+    assert_eq!(client.get("/api/tracks/here").1["count"], 4);
+    let (_, here) = client.get("/api/tracks?here=1&offset=0&limit=10");
+    let titles: Vec<&str> = here["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, ["echo", "foxtrot", "golf", "hotel"], "{here}");
+    assert!(
+        here["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["here"] == true)
+    );
+    let (_, page) = client.get("/api/tracks?here=1&offset=2&limit=1");
+    assert_eq!(page["rows"][0]["title"], "golf", "{page}");
+    // Without it, every song.
+    let (_, all) = client.get("/api/tracks?offset=0&limit=10");
+    assert_eq!(all["rows"].as_array().unwrap().len(), 6, "{all}");
+
     // Refused: a switch with no true or false, and a playlist there is not.
     assert_eq!(client.send(&road_kept, json!({ "on": "yes" })).0, 400);
     assert_eq!(client.get("/api/playlists/999999/download").0, 404);

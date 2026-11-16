@@ -627,3 +627,25 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 ### Not covered yet
 
 - A song kept for one list and also saved by hand is taken off the list with that list if it is still waiting.
+
+## 25. On this computer, in Library › Songs
+
+- **A chip on Library › Songs, "On this computer", lists only the songs that play with no connection:** files that are here (the listener's own or saved) and songs with a copy kept from playing them. The count beside it says "3 of 6 songs". Searching the list searches those songs only.
+- **It follows offline.** It turns on when Stash goes offline and off when it comes back, as the phone's Download mode hides what is not downloaded. The chip changes it in between.
+- **Playing from the filtered list** queues the songs on this computer from the one clicked, as the whole list does for the library.
+- While the filtered list is shown, how many songs are here is read again every 5 seconds, so songs being saved arrive in it.
+- The core: `GET /api/tracks?here=1` pages these songs in title order, `GET /api/tracks/here` counts them, and `POST /api/player/play {offset, here: true}` plays them.
+
+### Checked
+
+- **By the tests:** in `a_list_kept_on_this_computer_saves_its_songs_and_those_that_come_later`, the four songs saved were counted, and listed in title order. A page from the middle was the third, and without the filter all six songs were listed.
+- **On the built page served by the core:** a new scratch library with six made-up songs from an add-on on this computer. Every other one was saved by keeping a playlist, into a scratch downloads folder.
+  - The list showed 6 songs. With the chip on, it showed 3 rows and "3 of 6 songs"; off again, 6.
+  - Offline, after a reload, the chip was on by itself, with 3 rows.
+  - With the volume at 0, playing the second row played that song, and the queue held the two songs here from it.
+  - Back online, after a reload, the chip was off and all 6 songs were listed.
+  - No errors in the page.
+
+### Not covered yet
+
+- Albums, Artists and the playlists' pages have no such filter: offline, they dim what is not here.
