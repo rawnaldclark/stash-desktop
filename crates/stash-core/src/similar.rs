@@ -299,6 +299,15 @@ pub fn read(
             code => Err(Trouble::Away(format!("Last.fm answered error {code}"))),
         };
     }
+    // Last.fm says "not found" with a 400 or a 404 (and error 6 in the body), which Stash's proxy passes on as a 502
+    // that keeps only the status: Last.fm does not know what was asked. Any other status it passes on (a 403 is a key
+    // the proxy holds that Last.fm refuses) is trouble.
+    if status == 502
+        && json.get("error").and_then(Value::as_str) == Some("upstream_error")
+        && matches!(json.get("status").and_then(Value::as_u64), Some(400 | 404))
+    {
+        return Ok(Answer::NotFound);
+    }
     if !(200..=299).contains(&status) {
         return Err(Trouble::Away(format!("Last.fm answered {status}")));
     }
@@ -655,11 +664,22 @@ mod tests {
                 format!("Last.fm answered error {code}")
             );
         }
-        // The proxy's own refusals and Last.fm's troubles are trouble too, never "not found" (the proxy turns
-        // Last.fm's 4xx into a 502 it does not keep).
+        // Last.fm's "not found" comes as a 400 or a 404, which the proxy passes on as a 502 with that status.
+        for upstream in ["400", "404"] {
+            let body = format!(r#"{{"error":"upstream_error","status":{upstream}}}"#);
+            assert_eq!(read(&teardrop(), 502, None, &body), Ok(Answer::NotFound));
+        }
+        // The proxy's own refusals and Last.fm's troubles are trouble too, never "not found": a key Last.fm refuses
+        // (403), Last.fm down (5xx), or a 502 that says nothing of Last.fm's status.
         let not_found = error("6");
         for (status, body) in [
-            (502, r#"{"error":"upstream_error","status":400}"#),
+            (502, r#"{"error":"upstream_error","status":403}"#),
+            (502, r#"{"error":"upstream_error","status":503}"#),
+            (502, r#"{"error":"upstream_error"}"#),
+            (
+                502,
+                r#"{"error":"upstream_unreachable","message":"Upstream service unreachable"}"#,
+            ),
             (502, not_found.as_str()),
             (404, r#"{"error":"not_found"}"#),
             (405, r#"{"error":"method_not_allowed"}"#),

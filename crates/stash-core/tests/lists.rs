@@ -649,7 +649,7 @@ fn a_radio_finds_an_artists_songs_here_and_leaves_out_what_must_not_play() {
     for _ in 0..10 {
         let found = titles(
             library
-                .songs_by_artist(&artist_key("A"), &["Song".into()], &room, 10)
+                .songs_by_artist("A", &artist_key("A"), &["Song".into()], &room, 10)
                 .unwrap(),
         );
         // The title Last.fm named first (a release label is the same song; a live one is not), then the liked one.
@@ -662,24 +662,158 @@ fn a_radio_finds_an_artists_songs_here_and_leaves_out_what_must_not_play() {
     // "The xx" and "the xx" are one artist; at most `n`.
     let mut xx = titles(
         library
-            .songs_by_artist(&artist_key("The xx"), &[], &room, 10)
+            .songs_by_artist("The xx", &artist_key("The xx"), &[], &room, 10)
             .unwrap(),
     );
     xx.sort();
     assert_eq!(xx, ["One", "Two"]);
     assert_eq!(
         library
-            .songs_by_artist(&artist_key("A"), &[], &room, 2)
+            .songs_by_artist("A", &artist_key("A"), &[], &room, 2)
             .unwrap()
             .len(),
         2
     );
     assert!(
         library
-            .songs_by_artist(&artist_key("Nobody"), &[], &room, 10)
+            .songs_by_artist("Nobody", &artist_key("Nobody"), &[], &room, 10)
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn a_radio_takes_the_artist_named_and_one_copy_of_a_song() {
+    use stash_core::lists::Room;
+    use stash_core::shuffle::artist_key;
+    let mut library = Library::open_in_memory().unwrap();
+    let songs = [
+        ("Ground", "Earth"),
+        ("Duet", "Earth feat. Someone"),
+        ("September", "Earth, Wind & Fire"),
+        ("Boogie Wonderland", "Earth, Wind & Fire"),
+        ("Angel", "Massive Attack"),
+        ("Angel - 2006 Remaster", "Massive Attack"),
+        ("Teardrop", "Massive Attack, Elizabeth Fraser"),
+    ];
+    library
+        .add_tracks(
+            songs
+                .iter()
+                .enumerate()
+                .map(|(n, (title, artist))| file_track(title, artist, &format!("C:/e/{n}.flac"))),
+        )
+        .unwrap();
+    let room = Room {
+        not: Default::default(),
+        rested_since_ms: NOW_MS - 3 * 3_600_000,
+        here_only: false,
+    };
+    let titles = |name: &str| -> Vec<String> {
+        let mut found: Vec<String> = library
+            .songs_by_artist(name, &artist_key(name), &[], &room, 10)
+            .unwrap()
+            .into_iter()
+            .map(|id| library.describe(id).unwrap().unwrap().kept.title)
+            .collect();
+        found.sort();
+        found
+    };
+    // Both are counted under "earth", but each station gets its own artist's songs: "A feat. B" is A's, "A, B & C"
+    // may be one name.
+    assert_eq!(titles("Earth"), ["Duet", "Ground"]);
+    assert_eq!(
+        titles("Earth, Wind & Fire"),
+        ["Boogie Wonderland", "September"]
+    );
+    // A song and its remaster are one song; with no artist of that very name, a credit naming it first counts.
+    let angel = titles("Massive Attack");
+    assert_eq!(angel.len(), 1, "{angel:?}");
+    assert!(angel[0].starts_with("Angel"), "{angel:?}");
+    assert_eq!(titles("Elizabeth Fraser"), Vec::<String>::new());
+}
+
+#[test]
+fn a_radio_offline_or_with_nothing_to_stream_takes_only_songs_here() {
+    use stash_core::lists::Room;
+    use stash_core::shuffle::artist_key;
+    let mut library = Library::open_in_memory().unwrap();
+    library
+        .add_tracks([
+            file_track("On disk", "A", "C:/h/1.flac"),
+            file_track("Gone", "A", "C:/h/2.flac"),
+        ])
+        .unwrap();
+    library
+        .mark_missing(
+            "C:/h",
+            &["C:/h/1.flac".to_string()].into_iter().collect(),
+            NOW_MS,
+        )
+        .unwrap();
+    let described = |library: &mut Library, title: &str| {
+        library
+            .adopt(&Song {
+                title: title.into(),
+                artist: "A".into(),
+                refs: vec![("some.addon".into(), title.into())],
+                ..Song::default()
+            })
+            .unwrap()
+    };
+    let (kept, streamed, lost) = (
+        described(&mut library, "Kept copy"),
+        described(&mut library, "Streams"),
+        described(&mut library, "Never found"),
+    );
+    library
+        .keep_played_copy(
+            kept,
+            "kept.flac",
+            400_000,
+            Some("lossless"),
+            Some("some.addon"),
+            NOW_MS - 10 * 3_600_000,
+        )
+        .unwrap();
+    library.note_unfound(lost, NOW_MS).unwrap();
+    let titles = |library: &Library, here_only: bool| -> Vec<String> {
+        let room = Room {
+            not: Default::default(),
+            rested_since_ms: NOW_MS - 3 * 3_600_000,
+            here_only,
+        };
+        let mut found: Vec<String> = library
+            .songs_by_artist("A", &artist_key("A"), &[], &room, 10)
+            .unwrap()
+            .into_iter()
+            .map(|id| library.describe(id).unwrap().unwrap().kept.title)
+            .collect();
+        found.sort();
+        found
+    };
+    // Online: files here, and songs an add-on plays, but not one no add-on finds.
+    assert_eq!(titles(&library, false), ["Kept copy", "On disk", "Streams"]);
+    // Offline (or no add-on to stream from): files here and songs kept as they were played.
+    assert_eq!(titles(&library, true), ["Kept copy", "On disk"]);
+    // Autoplay keeps to the same rule.
+    let picked: Vec<String> = library
+        .autoplay_picks(
+            &[],
+            &["A".into()],
+            &Default::default(),
+            NOW_MS - 3 * 3_600_000,
+            true,
+            10,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|id| library.describe(id).unwrap().unwrap().kept.title)
+        .collect();
+    let mut picked = picked;
+    picked.sort();
+    assert_eq!(picked, ["Kept copy", "On disk"]);
+    let _ = streamed;
 }
 
 #[test]

@@ -128,7 +128,7 @@ pub fn same_title(a: &str, b: &str) -> bool {
 /// "Song [Deluxe Edition]"). A bracket or a dash part that says anything else stays: it names a version. In a bracket
 /// of parts joined by a slash, the parts that are labels go and the rest stays ("(Radio Edit / Remastered 2025)" is
 /// "(Radio Edit)").
-fn title_key(title: &str) -> String {
+pub fn title_key(title: &str) -> String {
     let unslashed = without_label_parts(&without_feat_tail(title.trim()));
     let mut rest = unslashed.as_str();
     loop {

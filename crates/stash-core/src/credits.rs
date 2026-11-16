@@ -41,6 +41,16 @@ static MAYBE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\s*,\s*|\s+(?:&|and|x|with|vs\.?)\s+").expect("a valid pattern")
 });
 
+/// The credit up to the first place it surely names another artist: "A feat. B" and "A; B" are A's, while "A, B" and
+/// "A & B" stay whole, as they may be one artist's name ("Earth, Wind & Fire").
+pub fn surely_first(credit: &str) -> &str {
+    let credit = credit.trim();
+    match SURE.find(credit) {
+        Some(m) if m.start() > 0 => credit[..m.start()].trim(),
+        _ => credit,
+    }
+}
+
 /// A credit with this many places it may be cut, or more, is left whole (a long list of names, or text that only
 /// looks like one).
 const MOST_PIECES: usize = 12;

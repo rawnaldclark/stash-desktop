@@ -179,13 +179,18 @@ impl Library {
         Ok(old + over)
     }
 
-    /// Up to `n` of the library's songs by the artist counted under `key` (`shuffle::artist_key`: the first artist a
-    /// credit names, folded), for a radio: those whose titles are among `titles` (what Last.fm named) first, in that
-    /// order, then liked songs, then the most played, then any. Only songs that can play (with `room.here_only`, only
-    /// those on this computer), none chosen not to be played, none heard since `room.rested_since_ms`, none of
-    /// `room.not`.
+    /// Up to `n` of the library's songs by the artist `name` (`key`: as songs are grouped, `shuffle::artist_key`, the
+    /// first artist a credit names, folded), for a radio: those whose titles are among `titles` (what Last.fm named)
+    /// first, in that order, then liked songs, then the most played, then any; one copy of each song ("Angel" and
+    /// "Angel - 2006 Remaster" are one). Only songs that can play (with `room.here_only`, only those on this computer),
+    /// none chosen not to be played, none heard since `room.rested_since_ms`, none of `room.not`.
+    ///
+    /// The artist is the library's artist of that very name when there is one ("The xx" and "the xx" are one), with
+    /// the credits that surely name it first ("A feat. B"); only when there is none, any credit that names it first
+    /// ("A & B"). So "Earth, Wind & Fire" is not "Earth"'s, though both are counted under "earth".
     pub fn songs_by_artist(
         &self,
+        name: &str,
         key: &str,
         titles: &[String],
         room: &Room,
@@ -194,19 +199,24 @@ impl Library {
         if key.is_empty() || n == 0 {
             return Ok(Vec::new());
         }
-        // The artists counted under the key: by their whole name ("The xx" and "the xx"), or by the first one a
-        // credit names ("A feat. B" is A's).
-        let mut artists: Vec<i64> = Vec::new();
+        // The artist by its whole name, and as a credit surely naming it first gives it ("A feat. B" is A).
+        let fold = crate::identity::fold;
+        let named = [fold(name), fold(crate::credits::surely_first(name))];
+        let (mut exact, mut first): (Vec<i64>, Vec<i64>) = (Vec::new(), Vec::new());
         {
             let mut stmt = self.conn.prepare_cached("SELECT id, name FROM artists")?;
             let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
             for row in rows {
-                let (id, name) = row?;
-                if crate::identity::fold(&name) == key || crate::shuffle::artist_key(&name) == key {
-                    artists.push(id);
+                let (id, artist) = row?;
+                let own = [fold(&artist), fold(crate::credits::surely_first(&artist))];
+                if own.iter().any(|n| named.contains(n)) {
+                    exact.push(id);
+                } else if crate::shuffle::artist_key(&artist) == key {
+                    first.push(id);
                 }
             }
         }
+        let artists = if exact.is_empty() { first } else { exact };
         if artists.is_empty() {
             return Ok(Vec::new());
         }
@@ -225,7 +235,7 @@ impl Library {
             "SELECT t.id, t.title, t.liked_at_ms IS NOT NULL, t.play_count FROM tracks t
              WHERE t.artist_id IN ({list}) AND {playable} AND NOT {blocked}
                AND NOT EXISTS (SELECT 1 FROM plays p WHERE p.track_id = t.id AND p.played_at_ms >= ?1)
-             ORDER BY random() LIMIT 2000",
+             ORDER BY random()",
             blocked = crate::blocks::blocked!()
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -251,12 +261,12 @@ impl Library {
                 (
                     (wanted, !liked, -plays, by_chance),
                     id,
-                    crate::identity::fold(&title),
+                    crate::matching::title_key(&title),
                 )
             })
             .collect();
         songs.sort_unstable_by_key(|s| s.0);
-        // One copy of a song: the first of those with the same title.
+        // One copy of a song: the first of those with the same title, release labels aside.
         let mut seen_titles: HashSet<String> = HashSet::new();
         Ok(songs
             .into_iter()

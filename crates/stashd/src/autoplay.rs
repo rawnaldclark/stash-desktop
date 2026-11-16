@@ -78,6 +78,7 @@ pub(crate) fn look(state: &State, player: &Player) {
     };
     if let Some(seed) = seed {
         radio.begin(
+            player,
             Kind::Autoplay,
             seed,
             (seed_ids, seed_artists),
@@ -107,6 +108,6 @@ pub(crate) fn look(state: &State, player: &Player) {
         items
     };
     if let Some(qids) = player.enqueue_onto(items, now.queue_id, Some(last)) {
-        radio.note_fill(qids, now.queue_id);
+        radio.note_fill(player, qids, now.queue_id);
     }
 }

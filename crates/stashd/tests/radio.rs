@@ -139,6 +139,9 @@ enum Mood {
     Unknown,
     /// Answering, a while later.
     Slow(Duration),
+    /// Songs unknown, as the real proxy passes on Last.fm's 404 for one (a 502 that keeps the status); artists
+    /// answered.
+    UnknownSongs,
 }
 
 /// One request the stand-in had.
@@ -242,6 +245,11 @@ impl LastFm {
                     (Some(status), _) => (status, json!({ "error": "refused" }), None),
                     (None, Mood::Busy(wait)) => (429, json!({ "error": "busy" }), Some(wait)),
                     (None, Mood::Away) => (502, json!({ "error": "upstream_error" }), None),
+                    (None, Mood::UnknownSongs) if get("method") == "track.getsimilar" => (
+                        502,
+                        json!({ "error": "upstream_error", "status": 404 }),
+                        None,
+                    ),
                     (None, Mood::Unknown) => (
                         200,
                         json!({ "error": 6, "message": "Track not found" }),
@@ -1020,6 +1028,141 @@ fn switching_similar_music_off_forgets_what_was_kept() {
     );
     client.station_settled("the radio's songs again");
     assert_eq!(rig.lastfm.count("track.getsimilar"), 2);
+}
+
+#[test]
+fn stop_or_switching_off_while_songs_are_found_adds_nothing_and_keeps_nothing() {
+    let rig = rig!("stop-finding", true);
+    let client = &rig.client;
+    client.post("/api/settings/autoplay", json!({ "on": false }));
+    rig.lastfm.be(Mood::Slow(Duration::from_millis(1_500)));
+    let started = client.post(
+        "/api/radio/start",
+        json!({ "song": { "id": rig.id("Teardrop") } }),
+    );
+    assert_eq!(started["station"]["finding"], true, "{started}");
+    std::thread::sleep(Duration::from_millis(400));
+    client.post("/api/radio/stop", json!({}));
+    std::thread::sleep(Duration::from_millis(2_500));
+    assert_eq!(named(&client.queue()), ["Massive Attack / Teardrop"]);
+    assert!(client.player()["station"].is_null());
+    assert_eq!(rig.lastfm.count("artist.getsimilar"), 0);
+
+    // Switched off while a question is out: its answer is not kept, no second question goes, nothing is added.
+    client.post(
+        "/api/radio/start",
+        json!({ "song": { "id": rig.id("Roads") } }),
+    );
+    std::thread::sleep(Duration::from_millis(400));
+    client.post("/api/settings/similar", json!({ "on": false }));
+    std::thread::sleep(Duration::from_millis(2_500));
+    assert_eq!(named(&client.queue()), ["Portishead / Roads"]);
+    assert!(client.player()["station"].is_null());
+    let roads = |rig: &Rig| {
+        rig.lastfm
+            .asked()
+            .iter()
+            .filter(|g| g.query.get("track").map(String::as_str) == Some("Roads"))
+            .count()
+    };
+    assert_eq!(
+        (roads(&rig), rig.lastfm.count("artist.getsimilar")),
+        (1, 0),
+        "{:?}",
+        rig.lastfm.asked()
+    );
+    // On again: nothing was kept of it, so it is asked again.
+    rig.lastfm.be(Mood::Answering);
+    client.post("/api/settings/similar", json!({ "on": true }));
+    client.post(
+        "/api/radio/start",
+        json!({ "song": { "id": rig.id("Roads") } }),
+    );
+    client.station_settled("the radio again");
+    assert_eq!(roads(&rig), 2, "{:?}", rig.lastfm.asked());
+}
+
+#[test]
+fn a_song_last_fm_does_not_know_goes_on_to_its_artist() {
+    let rig = rig!("unknown-song", true);
+    let client = &rig.client;
+    rig.lastfm.be(Mood::UnknownSongs);
+    client.post(
+        "/api/radio/start",
+        json!({ "song": { "id": rig.id("Teardrop") } }),
+    );
+    let now = client.station_settled("the radio from the artist's answer");
+    assert_eq!(now["station"]["via"], "lastfm", "{now}");
+    assert_eq!(
+        (
+            rig.lastfm.count("track.getsimilar"),
+            rig.lastfm.count("artist.getsimilar")
+        ),
+        (1, 1)
+    );
+    let rows = client.queue();
+    assert!(
+        rows[1..].iter().any(|r| r["artist"] == "Portishead"),
+        "{:?}",
+        named(&rows)
+    );
+    // Not Last.fm being away: the next station asks again at once.
+    client.post(
+        "/api/radio/start",
+        json!({ "song": { "id": rig.id("Glory Box") } }),
+    );
+    client.station_settled("the next radio");
+    assert_eq!(rig.lastfm.count("track.getsimilar"), 2);
+}
+
+#[test]
+fn songs_found_after_the_queue_ran_out_play_on() {
+    let rig = rig!("resting", true);
+    let client = &rig.client;
+    client.post("/api/settings/autoplay", json!({ "on": false }));
+    rig.lastfm.be(Mood::Slow(Duration::from_millis(2_500)));
+    client.post(
+        "/api/radio/start",
+        json!({ "song": { "id": rig.id("Teardrop") } }),
+    );
+    client.post(
+        "/api/player/seek",
+        json!({ "seconds": f64::from(SECONDS) - 0.5 }),
+    );
+    client.player_until("the queue ran out", |s| s["resting"] == true);
+    let now = client.player_until("the station's first song playing", |s| {
+        s["status"] == "playing" && s["track"]["title"] != "Teardrop"
+    });
+    assert_eq!(now["index"], 1, "{now}");
+}
+
+#[test]
+fn going_offline_mid_station_adds_only_songs_here() {
+    let rig = rig!("offline-mid", true);
+    let client = &rig.client;
+    client.post(
+        "/api/radio/start",
+        json!({ "song": { "id": rig.id("Teardrop") } }),
+    );
+    client.station_settled("the radio's songs");
+    let first = client.queue().len();
+    assert!(
+        client.queue().iter().any(|r| r["here"] == false),
+        "an add-on's song came online: {:?}",
+        named(&client.queue())
+    );
+    client.post("/api/offline", json!({ "offline": true }));
+    client.post("/api/player/jump", json!({ "index": first - 2 }));
+    let now = client.player_until("the station grew", |s| {
+        s["queue_len"].as_u64() > Some(first as u64)
+    });
+    let rows = client.queue();
+    assert!(
+        rows[first..].iter().all(|r| r["here"] == true),
+        "{now}: {:?}",
+        named(&rows[first..])
+    );
+    client.post("/api/offline", json!({ "offline": false }));
 }
 
 #[test]

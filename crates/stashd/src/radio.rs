@@ -18,7 +18,6 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use stash_core::Library;
 use stash_core::addons::Track;
-use stash_core::identity::words_key;
 use stash_core::lists::Room;
 use stash_core::matching::{names_other_version, same_title};
 use stash_core::player::{Player, QueueItem};
@@ -28,7 +27,8 @@ use stash_core::station::{self, Neighbor, Seed, Station};
 use tiny_http::{Method, Request};
 
 use crate::serve::{
-    Reply, State, addon_item, body_json, found_track, now_ms, offline, refuse, reply_json,
+    Reply, State, addon_item, body_json, can_stream, found_track, now_ms, offline, refuse,
+    reply_json,
 };
 
 /// The setting that switches similar music from Last.fm off ("0").
@@ -47,6 +47,10 @@ const KEPT_ROWS: usize = 5_000;
 const RING: usize = 1_000;
 /// How far back in the queue songs already there are looked at.
 const LOOKED_BACK: usize = 500;
+/// How often answers kept too long are let go of while Stash runs (and when the core starts).
+const PRUNE_EVERY: Duration = Duration::from_secs(24 * 3600);
+/// How many times one fill opens more artists when a batch comes back empty, before the station ends.
+const ATTEMPTS: usize = 3;
 /// How many tracks one add-on search asks for.
 const SEARCHED: u32 = 20;
 /// Searches made at once.
@@ -64,6 +68,9 @@ const OFFLINE: &str = "Offline";
 const UNREACHED: &str = "Last.fm could not be reached";
 const ENOUGH: &str = "Last.fm was asked enough for today";
 const SAYS_TOO_LITTLE: &str = "Its title and artist say too little to ask about";
+const NOTHING_HERE: &str = "Nothing by the artists Last.fm named can play here";
+/// The station was stopped, replaced or switched off while its songs were found (never shown: its songs are dropped).
+const STOPPED: &str = "Stopped";
 
 /// Whether a station was started by the listener (a radio) or by the queue's end (autoplay).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +90,8 @@ impl Kind {
 
 /// The station of the queue playing.
 struct Live {
+    /// Which station this is: songs found for another one (stopped, replaced, switched off) are dropped.
+    token: u64,
     kind: Kind,
     /// Whether Last.fm chose its songs (false: the library did, by the artists heard, likes and plays).
     lastfm: bool,
@@ -125,8 +134,10 @@ pub(crate) struct Radio {
     bell: Mutex<bool>,
     rung: Condvar,
     gate: Mutex<Gate>,
-    /// What the stations of this run added (their identities, `station::identities`), newest last.
+    /// What the stations of this run added (one identity a song, `station::song_identity`), newest last.
     ring: Mutex<VecDeque<String>>,
+    /// The last station's token.
+    tokens: AtomicU64,
     /// The song autoplay last acted on, by its queue number (0: none): it acts once a song, and not at all after a
     /// station was stopped on it.
     pub(crate) autoplay_after: AtomicU64,
@@ -153,6 +164,7 @@ impl Radio {
             rung: Condvar::new(),
             gate: Mutex::new(Gate::default()),
             ring: Mutex::new(VecDeque::new()),
+            tokens: AtomicU64::new(0),
             autoplay_after: AtomicU64::new(0),
         }
     }
@@ -172,9 +184,11 @@ impl Radio {
         self.rung.notify_all();
     }
 
-    /// Starts a station from `seed` for the queue `queue_id`: the radio thread finds its first songs.
+    /// Starts a station from `seed` for the queue `queue_id`: the radio thread finds its first songs. Nothing starts
+    /// when that queue was replaced meanwhile, nor autoplay while a station still grows it.
     pub(crate) fn begin(
         &self,
+        player: &Player,
         kind: Kind,
         seed: Seed,
         fallback: (Vec<i64>, Vec<String>),
@@ -182,32 +196,44 @@ impl Radio {
         after: Option<u64>,
     ) {
         let station = Station::new(seed.clone(), if kind == Kind::Radio { 3 } else { 2 });
-        *self.live.lock().unwrap() = Some(Live {
-            kind,
-            lastfm: true,
-            why: None,
-            label: station.label(),
-            link: Some(station.link()),
-            seed: Some(seed),
-            queue_id,
-            after,
-            fallback,
-            station: Some(station),
-            added: HashSet::new(),
-            wanted: true,
-            finding: true,
-            spent: false,
-        });
+        {
+            let mut live = self.live.lock().unwrap();
+            if !self.may_begin(&live, player, kind, queue_id) {
+                return;
+            }
+            *live = Some(Live {
+                token: self.tokens.fetch_add(1, Ordering::Relaxed) + 1,
+                kind,
+                lastfm: true,
+                why: None,
+                label: station.label(),
+                link: Some(station.link()),
+                seed: Some(seed),
+                queue_id,
+                after,
+                fallback,
+                station: Some(station),
+                added: HashSet::new(),
+                wanted: true,
+                finding: true,
+                spent: false,
+            });
+        }
         self.ring_bell();
     }
 
     /// Autoplay added `qids` from the library to the queue `queue_id`: the window shows where they begin, and Stop takes
     /// them out.
-    pub(crate) fn note_fill(&self, qids: Vec<u64>, queue_id: u64) {
+    pub(crate) fn note_fill(&self, player: &Player, qids: Vec<u64>, queue_id: u64) {
         if qids.is_empty() {
             return;
         }
-        *self.live.lock().unwrap() = Some(Live {
+        let mut live = self.live.lock().unwrap();
+        if !self.may_begin(&live, player, Kind::Autoplay, queue_id) {
+            return;
+        }
+        *live = Some(Live {
+            token: self.tokens.fetch_add(1, Ordering::Relaxed) + 1,
             kind: Kind::Autoplay,
             lastfm: false,
             why: None,
@@ -223,6 +249,26 @@ impl Radio {
             finding: false,
             spent: true,
         });
+    }
+
+    /// Whether a station of `kind` may begin on the queue `queue_id`: it is still the player's (a radio the listener
+    /// just started replaced it, else), and for autoplay, no station still grows it. Asked with the station's lock
+    /// held, so two cannot both begin.
+    fn may_begin(&self, live: &Option<Live>, player: &Player, kind: Kind, queue_id: u64) -> bool {
+        player.state().queue_id == queue_id
+            && !(kind == Kind::Autoplay
+                && live
+                    .as_ref()
+                    .is_some_and(|l| l.queue_id == queue_id && !l.spent))
+    }
+
+    /// Whether the station `token` is still the one playing (not stopped, replaced or switched off).
+    fn current(&self, token: u64) -> bool {
+        self.live
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|l| l.token == token)
     }
 
     /// Whether a station still grows the queue `queue_id`: autoplay leaves it to the station then.
@@ -332,7 +378,11 @@ impl Radio {
         state: &State,
         ask: &Ask,
         off: bool,
+        token: u64,
     ) -> std::result::Result<Answer, &'static str> {
+        if !self.current(token) {
+            return Err(STOPPED);
+        }
         if !askable(ask) {
             return Err(SAYS_TOO_LITTLE);
         }
@@ -371,8 +421,10 @@ impl Radio {
         {
             return stale().ok_or(UNREACHED);
         }
-        if !self.count_today(state) {
-            return stale().ok_or(ENOUGH);
+        match self.may_ask(state) {
+            Ok(()) => {}
+            Err(STOPPED) => return Err(STOPPED),
+            Err(words) => return stale().ok_or(words),
         }
         let Some(proxy) = &self.proxy else {
             return Err(UNREACHED);
@@ -384,11 +436,13 @@ impl Radio {
                     gate.trips = 0;
                     gate.closed_until = None;
                 }
-                let _ = state
-                    .library
-                    .lock()
-                    .unwrap()
-                    .keep_similar(&key, &answer, now_s);
+                // Kept only while similar music is still on: switched off meanwhile, what was kept was deleted,
+                // and this is not kept either.
+                let mut library = state.library.lock().unwrap();
+                if !self.on(&library) {
+                    return Err(STOPPED);
+                }
+                let _ = library.keep_similar(&key, &answer, now_s);
                 Ok(answer)
             }
             Err(trouble) => {
@@ -410,10 +464,14 @@ impl Radio {
         }
     }
 
-    /// Counts a question sent today; false when today's are spent.
-    fn count_today(&self, state: &State) -> bool {
+    /// Whether a question may go to Last.fm now, and counts it: not when similar music was switched off (asked under
+    /// the same hold of the library that switches it off), nor past today's questions.
+    fn may_ask(&self, state: &State) -> std::result::Result<(), &'static str> {
         let day = now_ms() / 86_400_000;
         let mut library = state.library.lock().unwrap();
+        if !self.on(&library) {
+            return Err(STOPPED);
+        }
         let sent = library
             .setting(DAY_SETTING)
             .ok()
@@ -425,45 +483,29 @@ impl Radio {
             .filter(|(on, _)| *on == day)
             .map_or(0, |(_, n)| n);
         if sent >= DAILY_CAP {
-            return false;
+            return Err(ENOUGH);
         }
         let _ = library.set_setting(DAY_SETTING, &format!("{day}:{}", sent + 1));
-        true
+        Ok(())
     }
 
-    /// The station's next songs: Last.fm's answers first (asked when the station wants them), then each artist's
-    /// songs from the library, then from an add-on. Why the library must pick instead, when Last.fm could not help.
+    /// The station's next songs: Last.fm's answers (asked when the station wants them, between rounds of finding
+    /// songs), then each artist's songs from the library, then from an add-on. Why the library must pick instead, when
+    /// Last.fm could not help. Nothing when the station `token` stops being the one playing meanwhile.
     fn fill(
         &self,
         state: &State,
         player: &Player,
         station: &mut Station,
+        token: u64,
     ) -> (Vec<QueueItem>, Option<&'static str>) {
         let off = offline(state);
-        let mut why = None;
-        while let Some(ask) = station.wants() {
-            let answer = match self.answer(state, &ask, off) {
-                Ok(answer) => Some(answer),
-                Err(words) => {
-                    why = Some(words);
-                    None
-                }
-            };
-            if matches!(answer, Some(Answer::NotFound)) {
-                why = Some(NOTHING_LIKE);
-            }
-            {
-                let library = state.library.lock().unwrap();
-                station.take(&ask, answer.as_ref(), &|name| {
-                    library.artist_blocked(name).unwrap_or(false)
-                });
-            }
-            if answer.is_none() {
-                break;
-            }
-        }
+        // Offline, or with no add-on to stream from, only songs on this computer can play.
+        let here_only = !can_stream(state);
+        let mut asked_why = None;
 
-        // What the queue holds already, and what the stations of this run added, is not added again.
+        // What the queue holds already, and what the stations of this run added, is not added again: such songs
+        // take no room in the station's hands.
         let now = player.state();
         let around = player.queue_at(now.queue_len.saturating_sub(LOOKED_BACK), LOOKED_BACK);
         let mut queued: HashSet<String> = around.iter().flat_map(station::identities).collect();
@@ -472,43 +514,95 @@ impl Radio {
         let room = Room {
             not: around.iter().filter_map(|t| t.id).collect(),
             rested_since_ms: now_ms() - RESTED_MS,
-            here_only: off,
+            here_only,
+        };
+        let fresh = |item: &QueueItem| {
+            station::identities(item)
+                .iter()
+                .all(|id| !queued.contains(id))
         };
 
-        loop {
-            let need = station.to_fill();
-            if need.is_empty() {
-                break;
-            }
-            // The library's own songs first: they cost nothing.
-            let mut short = Vec::new();
-            for neighbor in need {
-                // An add-on is searched when the library has fewer than half the artist's pool.
-                let pool = station.pool_size(&neighbor.key);
-                let few = pool / 2;
-                let items = {
+        let mut attempts = 0;
+        let batch = loop {
+            loop {
+                while let Some(ask) = station.wants() {
+                    let answer = match self.answer(state, &ask, off, token) {
+                        Ok(answer) => Some(answer),
+                        Err(STOPPED) => return (Vec::new(), None),
+                        Err(words) => {
+                            asked_why = Some(words);
+                            None
+                        }
+                    };
+                    if matches!(answer, Some(Answer::NotFound)) {
+                        asked_why = Some(NOTHING_LIKE);
+                    }
                     let library = state.library.lock().unwrap();
-                    library
-                        .songs_by_artist(&neighbor.key, &neighbor.titles, &room, pool)
-                        .and_then(|ids| library.queue_items(&ids))
-                        .unwrap_or_default()
-                };
-                if items.len() < few && !off {
-                    short.push((neighbor, items, pool));
-                } else {
+                    station.take(&ask, answer.as_ref(), &|name| {
+                        library.artist_blocked(name).unwrap_or(false)
+                    });
+                }
+                let need = station.to_fill();
+                if need.is_empty() {
+                    break;
+                }
+                if !self.current(token) {
+                    return (Vec::new(), None);
+                }
+                // The library's own songs first: they cost nothing.
+                let mut short = Vec::new();
+                for neighbor in need {
+                    // An add-on is searched when the library has fewer than half the artist's pool.
+                    let pool = station.pool_size(&neighbor.key);
+                    let few = pool / 2;
+                    let items: Vec<QueueItem> = {
+                        let library = state.library.lock().unwrap();
+                        library
+                            .songs_by_artist(
+                                &neighbor.name,
+                                &neighbor.key,
+                                &neighbor.titles,
+                                &room,
+                                pool * 2,
+                            )
+                            .and_then(|ids| library.queue_items(&ids))
+                            .unwrap_or_default()
+                    }
+                    .into_iter()
+                    .filter(|item| fresh(item))
+                    .take(pool)
+                    .collect();
+                    if items.len() < few && !here_only {
+                        short.push((neighbor, items, pool));
+                    } else {
+                        station.fill(&neighbor.key, items);
+                    }
+                }
+                // Then an add-on's, one search an artist.
+                for (neighbor, items) in self.search(state, short, &queued) {
                     station.fill(&neighbor.key, items);
                 }
             }
-            // Then an add-on's, one search an artist.
-            for (neighbor, items) in self.search(state, short) {
-                station.fill(&neighbor.key, items);
+            let batch = station.batch(&queued, last_artist.as_deref());
+            // Gone offline (or the add-ons gone) since its songs were found: only those here.
+            let batch = if here_only {
+                only_here(state, batch)
+            } else {
+                batch
+            };
+            attempts += 1;
+            if !batch.is_empty() || station.spent() || attempts >= ATTEMPTS {
+                break batch;
             }
-        }
-        let batch = station.batch(&queued, last_artist.as_deref());
-        if batch.is_empty() && why.is_none() {
-            why = Some(NOTHING_LIKE);
-        }
-        (batch, why)
+        };
+        let why = if !batch.is_empty() {
+            None
+        } else if station.found() {
+            Some(NOTHING_HERE)
+        } else {
+            Some(asked_why.unwrap_or(NOTHING_LIKE))
+        };
+        (batch, why.or(asked_why))
     }
 
     /// The artists' songs, with what one add-on (the first that searches and plays, and is not in trouble) finds of
@@ -517,6 +611,7 @@ impl Radio {
         &self,
         state: &State,
         short: Vec<(Neighbor, Vec<QueueItem>, usize)>,
+        queued: &HashSet<String>,
     ) -> Vec<(Neighbor, Vec<QueueItem>)> {
         if short.is_empty() {
             return Vec::new();
@@ -560,7 +655,9 @@ impl Radio {
                     Some(Ok(tracks)) => {
                         state.lacks.heard(&addon_id);
                         let library = state.library.lock().unwrap();
-                        add_found(&library, &addon_id, &neighbor, &tracks, &mut items, pool);
+                        add_found(
+                            &library, &addon_id, &neighbor, &tracks, queued, &mut items, pool,
+                        );
                     }
                     Some(Err(e)) => state.lacks.troubled(&addon_id, &e),
                     None => {}
@@ -593,15 +690,19 @@ impl Radio {
             (found, true)
         };
         let spent = !lastfm || items.is_empty() || station.spent();
-        let words: Vec<String> = items.iter().flat_map(station::identities).collect();
-        let added = player.enqueue_onto(items, job.queue_id, job.after);
+        let words: Vec<String> = items
+            .iter()
+            .map(|item| station::song_identity(&item.title, &item.artist))
+            .collect();
         let qids = {
+            // Stopped, switched off or replaced while they were found: they are not added. They are added with the
+            // station's lock held, so a Stop comes before (and they are not added) or after (and takes them out).
             let mut live = self.live.lock().unwrap();
-            let Some(l) = live.as_mut().filter(|l| l.queue_id == job.queue_id) else {
+            let Some(l) = live.as_mut().filter(|l| l.token == job.token) else {
                 return;
             };
             // The queue changed while they were found (another queue, or songs added after the last one).
-            let Some(qids) = added else {
+            let Some(qids) = player.enqueue_onto(items, job.queue_id, job.after) else {
                 *live = None;
                 return;
             };
@@ -643,6 +744,7 @@ impl Radio {
 
 /// A station's songs being found, and the queue they are for.
 struct Job {
+    token: u64,
     queue_id: u64,
     after: Option<u64>,
     first: bool,
@@ -693,6 +795,7 @@ fn add_found(
     addon_id: &str,
     neighbor: &Neighbor,
     tracks: &[Track],
+    queued: &HashSet<String>,
     items: &mut Vec<QueueItem>,
     pool: usize,
 ) {
@@ -709,15 +812,22 @@ fn add_found(
         })
         .collect();
     found.sort_by_key(|(wanted, place, _)| (*wanted, *place));
+    // One copy of a song ("Angel" and "Angel - 2006 Remaster" are one), and none the queue holds already.
     let mut seen: HashSet<String> = items
         .iter()
-        .map(|i| words_key(&i.title, &i.artist))
+        .map(|i| station::song_identity(&i.title, &i.artist))
         .collect();
     for (_, _, item) in found {
         if items.len() >= pool {
             break;
         }
-        if seen.insert(words_key(&item.title, &item.artist)) {
+        if station::identities(&item)
+            .iter()
+            .any(|id| queued.contains(id))
+        {
+            continue;
+        }
+        if seen.insert(station::song_identity(&item.title, &item.artist)) {
             items.push(item);
         }
     }
@@ -760,7 +870,12 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
     if !radio.available() {
         return;
     }
+    let mut pruned = Instant::now();
     while !stop.load(Ordering::Relaxed) {
+        if pruned.elapsed() >= PRUNE_EVERY {
+            pruned = Instant::now();
+            prune(&mut state.library.lock().unwrap());
+        }
         {
             let bell = radio.bell.lock().unwrap();
             let (mut rung, _) = radio
@@ -775,6 +890,7 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
             match live.as_mut() {
                 Some(l) if l.wanted && l.station.is_some() => l.station.take().map(|station| {
                     let job = Job {
+                        token: l.token,
                         queue_id: l.queue_id,
                         after: l.after,
                         first: l.finding,
@@ -788,7 +904,7 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
         let Some((job, mut station)) = taken else {
             continue;
         };
-        let (found, why) = radio.fill(state, player, &mut station);
+        let (found, why) = radio.fill(state, player, &mut station, job.token);
         radio.settle(state, player, job, station, found, why);
     }
 }
@@ -867,9 +983,10 @@ fn start(state: &State, request: &mut Request) -> Result<Reply> {
     let body = body_json(request)?;
     let off = offline(state);
 
-    if body.get("playing").and_then(Value::as_bool) == Some(true) {
-        let now = player.state();
-        let Some(track) = now.track.filter(|_| !now.resting) else {
+    let playing = body.get("playing").and_then(Value::as_bool) == Some(true);
+    let now = player.state();
+    if playing && !now.resting {
+        let Some(track) = now.track else {
             return Ok(refuse(409, NOTHING_PLAYS));
         };
         let seed = song_seed(&state.library.lock().unwrap(), &track);
@@ -878,11 +995,31 @@ fn start(state: &State, request: &mut Request) -> Result<Reply> {
             return Ok(refuse(409, NOTHING_PLAYS));
         }
         let fallback = (track.id.into_iter().collect(), vec![track.artist.clone()]);
-        radio.begin(Kind::Radio, seed, fallback, player.state().queue_id, None);
+        radio.begin(
+            player,
+            Kind::Radio,
+            seed,
+            fallback,
+            player.state().queue_id,
+            None,
+        );
         return Ok(reply_json(200, json!({ "station": radio.summary(player) })));
     }
 
-    let (item, seed) = if let Some(song) = body.get("song") {
+    let (item, seed) = if playing {
+        // The player rests on it (after a restart, or a queue that ran out): it plays again from its start.
+        let Some(item) = now.track else {
+            return Ok(refuse(409, NOTHING_PLAYS));
+        };
+        if off && !here(state, &item) {
+            return Ok(refuse(
+                409,
+                "Stash is offline, and this song is not on this computer",
+            ));
+        }
+        let seed = song_seed(&state.library.lock().unwrap(), &item);
+        (item, seed)
+    } else if let Some(song) = body.get("song") {
         let item = match song.get("id").and_then(Value::as_i64) {
             Some(id) => {
                 let library = state.library.lock().unwrap();
@@ -942,8 +1079,42 @@ fn start(state: &State, request: &mut Request) -> Result<Reply> {
     let label = Station::new(seed.clone(), 3).label();
     let fallback = (item.id.into_iter().collect(), vec![item.artist.clone()]);
     player.play_from(vec![item], 0, Some(label))?;
-    radio.begin(Kind::Radio, seed, fallback, player.state().queue_id, None);
+    radio.begin(
+        player,
+        Kind::Radio,
+        seed,
+        fallback,
+        player.state().queue_id,
+        None,
+    );
     Ok(reply_json(200, json!({ "station": radio.summary(player) })))
+}
+
+/// Of `items`, those on this computer (a file of the library, or a song kept as it was played).
+fn only_here(state: &State, items: Vec<QueueItem>) -> Vec<QueueItem> {
+    let ids: Vec<i64> = items.iter().filter_map(|item| item.id).collect();
+    let here = state
+        .library
+        .lock()
+        .unwrap()
+        .here_of(&ids)
+        .unwrap_or_default();
+    items
+        .into_iter()
+        .filter(|item| item.id.is_some_and(|id| here.contains(&id)))
+        .collect()
+}
+
+/// Whether `item` is on this computer: a file of the library, or a song kept as it was played.
+fn here(state: &State, item: &QueueItem) -> bool {
+    item.id.is_some_and(|id| {
+        state
+            .library
+            .lock()
+            .unwrap()
+            .here_of(&[id])
+            .is_ok_and(|here| here.contains(&id))
+    })
 }
 
 /// The song an artist's radio begins with: the library's the listener likes or plays most, else (online) the first an
@@ -954,12 +1125,12 @@ fn artist_song(state: &State, name: &str, off: bool) -> Option<QueueItem> {
         not: HashSet::new(),
         // Any song, however recently heard.
         rested_since_ms: i64::MAX,
-        here_only: off,
+        here_only: !can_stream(state),
     };
     {
         let library = state.library.lock().unwrap();
         if let Some(item) = library
-            .songs_by_artist(&key, &[], &room, 1)
+            .songs_by_artist(name, &key, &[], &room, 1)
             .and_then(|ids| library.queue_items(&ids))
             .ok()
             .and_then(|mut items| items.pop())
@@ -977,7 +1148,7 @@ fn artist_song(state: &State, name: &str, off: bool) -> Option<QueueItem> {
     };
     state
         .radio
-        .search(state, vec![(neighbor, Vec::new(), 1)])
+        .search(state, vec![(neighbor, Vec::new(), 1)], &HashSet::new())
         .into_iter()
         .next()
         .and_then(|(_, mut items)| items.pop())

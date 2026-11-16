@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use serde::Serialize;
 
 use crate::identity::{fold, words_key};
-use crate::matching::same_title;
+use crate::matching::{same_title, title_key};
 use crate::player::QueueItem;
 use crate::shuffle::{apart, artist_key};
 use crate::similar::{Answer, Ask};
@@ -131,6 +131,7 @@ impl Station {
         let mut had = HashSet::new();
         if let Seed::Song { title, artist } = &seed {
             had.insert(words_identity(title, artist));
+            had.insert(song_identity(title, artist));
         }
         let known = HashSet::from([seed_key.clone()]);
         Station {
@@ -361,8 +362,9 @@ impl Station {
     /// was given before. They come in an order where the same artist is not twice in a row when that can be helped,
     /// starting after `last_artist` (the credit of the song they follow). What is given is never given again.
     ///
-    /// The station is spent when a batch comes back empty, or when every artist named is used and no song is left
-    /// in hand, and no question is left for Last.fm that could name more.
+    /// The station is spent when every artist named is used and no song is left in hand (or a batch comes back empty
+    /// with no artist left to open), and no question is left for Last.fm that could name more. An empty batch with
+    /// artists still to open is not the end: the caller may open more and ask again.
     pub fn batch(&mut self, queued: &HashSet<String>, last_artist: Option<&str>) -> Vec<QueueItem> {
         self.rounds = 0;
         if self.spent {
@@ -393,8 +395,8 @@ impl Station {
             }
         }
         let items = apart(picked, last_artist.map(artist_key));
-        let used = self.neighbors.is_empty() && self.capacity() == 0;
-        if (items.is_empty() || used) && self.wants().is_none() {
+        let used = self.neighbors.is_empty() && (self.capacity() == 0 || items.is_empty());
+        if used && self.wants().is_none() {
             self.spent = true;
         }
         items
@@ -472,10 +474,11 @@ impl Station {
 }
 
 /// The ways a song in the queue is known, so it comes once however it is known: "id:N" for a song of the library,
-/// "addon:<add-on>:<track>" for an add-on's track, and always "words:<title|artist, folded>", so a library song and
-/// an add-on's track with the same words are one song.
+/// "addon:<add-on>:<track>" for an add-on's track, "words:<title|artist, folded>", so a library song and an add-on's
+/// track with the same words are one song, and always [`song_identity`]'s, so "Angel - 2006 Remaster" by "Massive
+/// Attack, Horace Andy" is "Angel" by Massive Attack.
 pub fn identities(item: &QueueItem) -> Vec<String> {
-    let mut ids = Vec::with_capacity(3);
+    let mut ids = Vec::with_capacity(4);
     if let Some(id) = item.id {
         ids.push(format!("id:{id}"));
     }
@@ -483,7 +486,14 @@ pub fn identities(item: &QueueItem) -> Vec<String> {
         ids.push(format!("addon:{}:{}", addon.addon, addon.track));
     }
     ids.push(words_identity(&item.title, &item.artist));
+    ids.push(song_identity(&item.title, &item.artist));
     ids
+}
+
+/// A song as it is heard: its title without a release label ("- 2011 Remaster", "(Mono)"), by the first artist its
+/// credit names. One per song, so this is what a run's stations remember of what they added.
+pub fn song_identity(title: &str, artist: &str) -> String {
+    format!("song:{}|{}", artist_key(artist), title_key(title))
 }
 
 /// A song's identity by its words.
@@ -827,9 +837,13 @@ mod tests {
         assert!(station.batch(&HashSet::new(), None).is_empty());
         assert!(station.to_fill().is_empty());
 
-        // A batch that comes back empty.
+        // A batch that comes back empty with artists still to open is not the end: more are opened, and once none
+        // is left, an empty batch is.
         let mut station = artist_station("A", &numbered(9), 3);
         while !station.to_fill().is_empty() {}
+        assert!(station.batch(&HashSet::new(), None).is_empty());
+        assert!(!station.spent());
+        assert_eq!(station.to_fill().len(), 1);
         assert!(station.batch(&HashSet::new(), None).is_empty());
         assert!(station.spent());
 
@@ -1045,7 +1059,11 @@ mod tests {
     fn a_song_is_known_by_its_row_its_add_on_track_and_its_words() {
         assert_eq!(
             identities(&row(7, "Teardrop", "Massive Attack")),
-            ["id:7", "words:teardrop|massive attack"]
+            [
+                "id:7",
+                "words:teardrop|massive attack",
+                "song:massive attack|teardrop"
+            ]
         );
         assert_eq!(
             identities(&track(
@@ -1053,13 +1071,31 @@ mod tests {
                 "Teardrop (feat. Elizabeth Fraser)",
                 "MASSIVE ATTACK"
             )),
-            ["addon:demo:t1", "words:teardrop|massive attack"]
+            [
+                "addon:demo:t1",
+                "words:teardrop|massive attack",
+                "song:massive attack|teardrop"
+            ]
         );
         let mut both = track("t1", "Teardrop", "Massive Attack");
         both.id = Some(7);
         assert_eq!(
             identities(&both),
-            ["id:7", "addon:demo:t1", "words:teardrop|massive attack"]
+            [
+                "id:7",
+                "addon:demo:t1",
+                "words:teardrop|massive attack",
+                "song:massive attack|teardrop"
+            ]
+        );
+        // A release label and a longer credit are the same song.
+        assert!(
+            identities(&row(
+                8,
+                "Teardrop - 2006 Remaster",
+                "Massive Attack, Elizabeth Fraser"
+            ))
+            .contains(&"song:massive attack|teardrop".to_string())
         );
     }
 
