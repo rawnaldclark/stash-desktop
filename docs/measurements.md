@@ -511,6 +511,7 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 - **Nothing streams and no add-on is asked.** A queue holds only songs that are here: playing a list from a song that is not here starts at the next one that is, and a list with none is refused in words. A queue made online and played offline passes over what is not here. In the window, songs that are not here are dimmed; clicking one says why and plays nothing, while liking it or adding it to a playlist still works. Search looks in the library only. Lyrics show what was found before, however old, and nothing new is looked up. Saving songs waits, autoplay does not ask, and scrobbles wait; all of it goes on once Stash is back online.
 - **The song playing when Stash goes offline plays to its end.** A seek in it may still reach the add-on. Anything the engine was already handed to follow it is taken back and looked up again, and offline that means passed over. Before, a song from an add-on that was about to start would still stream.
 - **A song being saved stops and waits**, at the front of the list as it was.
+- **Up next dims what will be passed over.** Each row of the queue says whether it plays with no connection. Offline, the others are dimmed in Up next, and clicking one says why instead of jumping to it.
 - **Dimmed, not hidden.** The phone's Download mode hides what is not downloaded. Here the lists keep every song, so a playlist reads the same online and off, and the songs that will play are the bright ones.
 
 ### Checked
@@ -524,12 +525,16 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
   - When it ended, the add-on's song was passed over and the other file played.
   - The add-on was not asked again.
 
-  `offline_plays_only_what_is_here_and_asks_no_add_on` now also shows that a scrobbling token is not checked while offline.
+  `offline_plays_only_what_is_here_and_asks_no_add_on` now also shows that a scrobbling token is not checked while offline. Offline, the queue's rows said here: yes, no, yes.
+- **Up next on the built page served by the core.** A queue was made online of three files and two songs known only by their description.
+  - Offline, Up next dimmed exactly the two described songs.
+  - Clicking one said "Not on this computer, and Stash is offline", and the song playing stayed.
+  - No errors in the page.
 
 ### Not covered yet
 
 - Stopping a song while it is being saved was reasoned through, not tried: it takes a slow download from an add-on.
-- Up next and the mini player do not dim what will be passed over.
+- The mini player shows only the song playing, so it has nothing to dim.
 - Covers from the web are still asked for (with no connection they just do not load).
 
 ## 23. Shortcuts that work in any app

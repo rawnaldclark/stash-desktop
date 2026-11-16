@@ -88,9 +88,10 @@
 			use:swipe={{ row: '.q-next', ignore: '.rd-h, .q-x, .more', onremove: swiped }}
 		>
 		{#each upcoming as { q, i } (q.qid)}
-			<div class="q-row q-next" class:has-rd={!s.shuffle} data-qid={q.qid} use:songMenu={menuOf(q, i)} role="presentation">
+			{@const away = ui.offline && q.here === false}
+			<div class="q-row q-next" class:has-rd={!s.shuffle} class:away data-qid={q.qid} use:songMenu={menuOf(q, i)} role="presentation" title={away ? 'Not on this computer: Stash is offline, and passes it over' : undefined}>
 				{#if !s.shuffle}<button type="button" class="rd-h" aria-label="Reorder {q.title}" title="Drag to reorder, or press Arrow Up or Down" aria-keyshortcuts="ArrowUp ArrowDown"><Icon name="drag_indicator" /></button>{/if}
-				<button type="button" class="q-main" onclick={() => player.jumpTo(i)} aria-label="Play {q.title} by {q.artist}">
+				<button type="button" class="q-main" onclick={() => (away ? ui.toast('Not on this computer, and Stash is offline') : player.jumpTo(i))} aria-label="Play {q.title} by {q.artist}{away ? ' (not on this computer)' : ''}">
 					<Cover artwork={q.artwork} seed={q.title} min={88} class="cv" />
 					<span class="tr-t"><b dir="auto">{q.title}</b><i dir="auto">{q.artist}</i></span>
 					<span class="tr-d">{q.durationMs ? mmss(q.durationMs) : ''}</span>

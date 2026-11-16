@@ -3973,6 +3973,15 @@ fn offline_takes_back_the_song_handed_ahead() {
     // Offline: it is taken back. The song playing plays on; when it ends, the add-on's song is passed over (the add-on
     // is not asked again) and the next file plays.
     client.post("/api/offline", json!({ "offline": true }));
+    // The queue says which of its songs play with no connection (the window dims the others).
+    let (_, queue) = client.get("/api/player/queue");
+    let here: Vec<(&str, bool)> = queue["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["title"].as_str().unwrap(), r["here"].as_bool().unwrap()))
+        .collect();
+    assert_eq!(here, [("first", true), ("bravo", false), ("second", true)]);
     let (_, still) = client.get("/api/player");
     assert_eq!(
         (still["track"]["title"].as_str(), still["status"].as_str()),

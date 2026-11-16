@@ -254,6 +254,8 @@
 .q-hint { text-transform: none; letter-spacing: 0; font-weight: 400; }
 /* swipe to remove (touch): a vertical move stays a scroll */
 .q-next { touch-action: pan-y; }
+/* Offline: a song that is not on this computer is passed over. */
+.q-next.away .q-main { opacity: .45; }
 .q-next.sw-on { z-index: 2; background: var(--wp-field); }
 .q-next.sw-settle { transition: transform 150ms var(--ease-standard), opacity 150ms var(--ease-standard); }
 @media (prefers-reduced-motion: reduce) { .q-next.sw-settle { transition: none; } }

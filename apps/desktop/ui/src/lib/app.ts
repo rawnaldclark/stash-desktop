@@ -109,7 +109,7 @@ export async function goOffline(on: boolean): Promise<void> {
 	offline.set(await core.setOffline(on));
 }
 
-type Queued = Pick<core.QueueRow, 'id' | 'title' | 'artist' | 'album' | 'art' | 'duration_ms' | 'addon' | 'qid'>;
+type Queued = Pick<core.QueueRow, 'id' | 'title' | 'artist' | 'album' | 'art' | 'duration_ms' | 'addon' | 'qid' | 'here'>;
 
 /** A song as the player or the queue names it. */
 function itemOfQueued(q: Queued): LibraryItem {
@@ -122,6 +122,7 @@ function itemOfQueued(q: Queued): LibraryItem {
 	if (q.id !== null) refs[LIB_REF] = String(q.id);
 	if (q.addon && q.addon.addon !== LIB_REF) refs[q.addon.addon] = q.addon.track;
 	const item: LibraryItem = { ...d, key: descriptorKey(d), refs, addedAt: 0 };
+	if (q.here === false) item.here = false;
 	const art = core.artUrl(q.art);
 	if (art) item.artwork = [{ url: art }];
 	return item;

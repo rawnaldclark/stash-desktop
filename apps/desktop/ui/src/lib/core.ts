@@ -501,7 +501,7 @@ export const removeFromQueue = (index: number) => told('/api/player/remove', { i
 export const moveInQueue = (from: number, to: number) => told('/api/player/move', { from, to });
 
 /** A track of the queue, with its place in it. */
-export type QueueRow = { place: number; id: number | null; title: string; artist: string; album: string | null; art: string | null; duration_ms: number | null; addon: { addon: string; track: string } | null; qid?: number };
+export type QueueRow = { place: number; id: number | null; title: string; artist: string; album: string | null; art: string | null; duration_ms: number | null; addon: { addon: string; track: string } | null; qid?: number; /** It plays with no connection (offline, the others are passed over). */ here?: boolean };
 /** A page of the queue (`limit` at most 500). */
 export const queueAt = (offset: number, limit: number, signal?: AbortSignal) => rows<QueueRow>(`/api/player/queue?offset=${offset}&limit=${limit}`, signal);
 

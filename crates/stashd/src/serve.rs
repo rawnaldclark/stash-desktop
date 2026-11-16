@@ -1181,8 +1181,7 @@ fn offline_queue(
     }
     let ids: Vec<i64> = items.iter().filter_map(|i| i.id).collect();
     let here = state.library.lock().unwrap().here_of(&ids)?;
-    let plays =
-        |item: &QueueItem| item.addon.is_none() && item.id.is_some_and(|id| here.contains(&id));
+    let plays = |item: &QueueItem| plays_here(item, &here);
     let Some(first) = items
         .iter()
         .enumerate()
@@ -1203,6 +1202,12 @@ fn offline_queue(
         }
     }
     Ok(Some((kept, begins)))
+}
+
+/// Whether a queued song plays with no connection, given which of the library's songs do (`Library::here_of`): a
+/// song of the library that is a file here or has a copy kept. An add-on's own track never does.
+fn plays_here(item: &QueueItem, here: &std::collections::HashSet<i64>) -> bool {
+    item.addon.is_none() && item.id.is_some_and(|id| here.contains(&id))
 }
 
 /// /api/offline: whether Stash is offline; POST {offline} says so, and it holds next time.
@@ -1264,16 +1269,22 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
             number("limit", PAGE_CAP).clamp(1, PAGE_CAP),
         );
         let rows: Vec<Value> = match player {
-            Ok(playing) => playing
-                .queue_at(offset, limit)
-                .iter()
-                .enumerate()
-                .map(|(n, item)| {
-                    let mut row = json!(item);
-                    row["place"] = json!(offset + n);
-                    row
-                })
-                .collect(),
+            Ok(playing) => {
+                let items = playing.queue_at(offset, limit);
+                let ids: Vec<i64> = items.iter().filter_map(|item| item.id).collect();
+                let here = state.library.lock().unwrap().here_of(&ids)?;
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(n, item)| {
+                        let mut row = json!(item);
+                        row["place"] = json!(offset + n);
+                        // It plays with no connection: offline, the others are passed over.
+                        row["here"] = json!(plays_here(item, &here));
+                        row
+                    })
+                    .collect()
+            }
             Err(_) => Vec::new(),
         };
         return Ok(Some(reply_json(200, json!({ "rows": rows }))));
