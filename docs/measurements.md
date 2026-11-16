@@ -1388,7 +1388,7 @@ Settings › Sound › Equalizer, right after Play through. Each output keeps it
 
 - **Off, or nothing set: no filter at all.** The engine's filter list is empty. A chain set flat is not the same: measured, 983,341 of 5,292,000 samples came out 1 LSB off through filters at 0 dB. So Bit-perfect still means bit-perfect, and the bar's Bit-perfect needs the equalizer off.
 - **On: one chain, in 64-bit floats.** A preamp, the correction's filters in the file's order, Bass (a low shelf at 105 Hz, ±4 dB, Q 0.71), Treble (a high shelf at 6 kHz, ±3 dB, Q 0.71), then float out. Only `equalizer`, `lowshelf`, `highshelf`, `volume`, `asetnsamples` and `aformat` are used; FFmpeg's own `bass` and `treble` give a different Q.
-- **Room for the boosts, inside the chain.** Stash plays the curve's highest point plus 1 dB softer, worked out at 44.1, 48, 96 and 192 kHz, so the level is the same for every song. A file's own preamp is used when it asks for more (a positive one is not applied). The window says how much: "Stash plays it 5.0 dB softer to leave room for the boosts".
+- **Room for the boosts, inside the chain.** Stash plays the curve's highest point plus 1 dB softer, worked out at 44.1, 48, 96 and 192 kHz, so the level is the same for every song. The highest point is sought from 0 Hz up to half the rate (a high shelf keeps rising past what is heard, and what is played above 20 kHz clips as well), each high point of a 1/48-octave grid then sought out between its neighbours (a steep shelf's bump falls between them). A file of another rate whose own curve rises higher, because the rate leaves out a cut above it, gets the room it needs. A file's own preamp is used when it asks for more (a positive one is not applied). The window says how much: "Stash plays it 5.0 dB softer to leave room for the boosts".
   - Measured: +12 dB at 441 Hz on a tone at 0.6 of full scale comes out at 0.5348 (+12 − 13 dB), with no sample at full scale. Without the room, 74% of the samples were at full scale.
   - The volume and ReplayGain come after, as before.
 - **A filter a song's rate cannot hold is left out for that song**: at or above 0.49 of its sample rate (a 16 kHz filter in a 32 kHz file).
@@ -1398,24 +1398,28 @@ Settings › Sound › Equalizer, right after Play through. Each output keeps it
 - **Never a rebuild of the chain.** Rebuilding it mid-song clicks (measured: steps of 0.219, 0.090 and 0.251 against the tone's own 0.038). A change goes by commands to the running filters instead:
   - the preamp glides (4.0 of linear gain a second, ending exactly on its target);
   - the steps come in an order that never boosts past the room: a preamp that falls goes first and is waited for, filters that fall go before those that rise, and a preamp that rises goes last;
-  - another correction goes through flat: down to flat, the new chain written at flat (which passes the music through unchanged), then up to it.
+  - another correction goes through flat: down to flat, the new chain written at flat (which passes the music through unchanged), then up to it;
+  - a steep shelf (a Q above 0.72, or a slope above 1) has a bump on its far side that grows as its gain falls, so a moment between two curves can rise above both: the preamp goes lower still while such filters change, as low as the highest of those moments needs;
+  - a change that would write the list while a glide is still to be heard waits for it.
 - **The chain is written whole only at seams**, where the audio queued is dropped or the graph is built again anyway:
   - when the engine opens the next song (its `on_preloaded` hook): every song starts with the whole curve;
   - before Stash's own seeks, and before the output or exclusive mode is changed;
   - after a seek the engine makes itself (Repeat one's loop);
   - when the engine opens another output by itself (Windows' default changed under "The system's choice").
-- **Each output its own.** The output in use is the one the engine says it opened, else the one chosen. Choosing another output puts its equalizer in as it opens.
+- **Each output its own.** The output in use is the one the engine says it opened, else the one chosen. For "The system's choice" while nothing plays, it is the output Windows says it would choose, asked as the engine asks when it opens one (measured: the same output, by the same name). An equalizer set for the system's choice before it could be named goes to the output that opens, when that has none of its own. The same output opened again by the engine (a format the system changed) glides from what was written to the curve. Choosing another output puts its equalizer in as it opens.
 - **If the engine cannot use it**, the equalizer of that output is turned off, the window says why, and the song plays again without it. It is not counted as the song's failure.
+  - The engine sends its log lines only when no event waits, so "Audio filter initialized failed!" can come after the song has ended and the next has begun (traced: 3 runs in 10). So the song's end decides: a song that ends with nothing to play before it started, while the equalizer's filters are in the list, is opened again once without them. If it plays, the equalizer was at fault and is turned off, with the engine's words when they came. If it fails again, it is the song's own failure, said and counted as before, and the equalizer stays on.
+  - Once a song plays, those words (or "Disabling filter … because it has failed.") turn the equalizer off at once.
 
 ### What is kept
 
-- One setting, `eq`, in the library: for each output, the switch, the two tones, and the correction's name, file name and whole text. The filters are read again from the text at every start, so a fix to the reader reaches kept corrections. A correction that no longer reads turns that output off and says so.
+- One setting, `eq`, in the library (written by the player's thread too, reading the newest book only once it holds the library: a change the listener made meanwhile is never overwritten): for each output, the switch, the two tones, and the correction's name, file name and whole text. The filters are read again from the text at every start, so a fix to the reader reaches kept corrections. A correction that no longer reads turns that output off and says so, and its text is kept as it was (a later Stash may read it) until the listener changes that output's equalizer.
 - Not part of a library file: outputs belong to this computer, like the other sound settings.
 
 ### The reader
 
 - Equalizer APO's own rules: `Preamp:` lines add up, `Filter n: ON PK|LSC|HSC|LS|HS …` with Q, a slope or a bandwidth in octaves, commas read as points, `OFF` filters counted and left out, notes and other programs' headers (Room EQ Wizard's) passed over. A UTF-8 mark, UTF-16 and Windows-1252 are read.
-- **Refused in words, naming the line, and nothing taken in part**: a filter Stash does not play exactly (high-pass, low-pass, notch…), a graphic EQ ("on autoeq.app, download it for Equalizer APO as ParametricEQ"), a line that changes what the file means (Channel, Device, Include, Convolution…), a missing value, a value out of range, more than 31 filters, more than 24 dB of boost, or a file over 64 KiB.
+- **Refused in words, naming the line, and nothing taken in part**: a filter Stash does not play exactly (high-pass, low-pass, notch…) or a type it does not know, a graphic EQ ("on autoeq.app, download it for Equalizer APO as ParametricEQ"), a line that changes what the file means (Channel, Device, Include, Convolution…), a missing value, a value out of range, a preamp beyond −60 dB to +30 dB, more than 31 filters, more than 24 dB of boost, or a file over 64 KiB. A line quoted in a refusal is cut short at 60 characters.
 
 ### Gapless joins
 
@@ -1425,7 +1429,7 @@ Settings › Sound › Equalizer, right after Play through. Each output keeps it
 ### Checked
 
 - **Unit tests in `eq.rs`**: the filters' response against an independent port of Equalizer APO's formulas, the reader on made-up files (every refusal's words), the room, the plan, the strings handed to the engine, every kind of change checked step by step on paper against the room, the kept book, and the output line.
-- **Core tests with the real engine** (`crates/stash-core/tests/eq.rs`, 16), playing to a file and measuring the samples:
+- **Core tests with the real engine** (`crates/stash-core/tests/eq.rs`, 17), playing to a file and measuring the samples:
   - off, or on with nothing set: the songs come out sample for sample, gapless, in their own format;
   - a −6 dB cut at 441 Hz: −6.00 dB ±0.02, 663 Hz as the formula says, float out, no sample added or dropped;
   - a made-up file with each kind of filter: each frequency's level as the filters say, ±0.05 dB;
@@ -1436,15 +1440,17 @@ Settings › Sound › Equalizer, right after Play through. Each output keeps it
   - the next song, and a seek, start with the whole curve: the next song is sample for sample the song played with that curve from its start;
   - Repeat one: the whole curve is written when the song starts over;
   - the gapless join (above), a filter above a song's rate, rates from 8 to 192 kHz, mono and 6 channels (each channel filtered);
-  - a chain the engine cannot build: all three songs play whole, the equalizer is off and says why, and no song is counted as failed;
+  - a chain the engine cannot build: all three songs play whole, the equalizer is off and says why, and no song is counted as failed (twelve runs in a row; before, one in three lost the first song);
+  - a song that cannot be played, with the equalizer on: it is said and counted, the next plays whole, and the equalizer stays on;
   - on the silent output, in real time: the signal says "equalized" within 1.5 s of a change, never "scaled"; turned off while paused, it goes once the song plays on;
   - each output keeps its own.
   - The songs changed mid-song are served from a local server at 8 times their pace, so a play to a file runs long enough to be changed in the middle.
-- **API tests** (`crates/stashd/tests/equalizer.rs`, 4): Bass and Treble set, heard and kept for the next run; twenty changes in a row, the last kept; every refusal in its words, with nothing kept; a correction from a file (and Room EQ Wizard's headers passed over), kept, then removed; a kept setting that cannot be used leaves the equalizer off and songs play.
+- **API tests** (`crates/stashd/tests/equalizer.rs`, 4, among them a body that is not an object and a folder given as the file): Bass and Treble set, heard and kept for the next run; twenty changes in a row, the last kept; every refusal in its words, with nothing kept; a correction from a file (and Room EQ Wizard's headers passed over), kept, then removed; a kept setting that cannot be used leaves the equalizer off and songs play.
 - **The window**: unit tests for the words (the signal's "Lossless + your EQ", the Settings lines, the Ctrl+K entry).
 
 ### Not covered yet
 
 - A real sound card. Exclusive mode with the equalizer on, the output line under "The system's choice", and what is heard: by hand, before release. Turning the equalizer off does not reopen the output: in exclusive mode the bar then says Lossless, not Bit-perfect, until the output is opened again.
 - A filter that fails while it runs (the engine then passes the music by it): not seen, so not tested.
+- A format change in the middle of a file (the engine builds its graph again from the list as written): not a seam yet; the curve as written plays until the next song or seek.
 - Bass and Treble's amounts are to be tuned by ear before release.

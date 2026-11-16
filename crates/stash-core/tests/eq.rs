@@ -990,7 +990,7 @@ fn a_list_the_engine_cannot_build_turns_the_equalizer_off_and_the_queue_plays_on
     let settings = Settings {
         on_equalizers: Some({
             let heard = Arc::clone(&heard);
-            Arc::new(move |book: &Book| heard.lock().unwrap().push(book.clone()))
+            Arc::new(move |book: &dyn Fn() -> Book| heard.lock().unwrap().push(book()))
         }),
         ..Settings::default()
     };
@@ -1022,15 +1022,44 @@ fn a_list_the_engine_cannot_build_turns_the_equalizer_off_and_the_queue_plays_on
         "and says why: {:?}",
         played.last.eq.trouble
     );
-    assert!(
-        played.last.errors <= 1,
-        "the songs were not at fault: {} errors",
-        played.last.errors
+    assert_eq!(
+        played.last.errors, 0,
+        "the songs were not at fault (the engine says why only after a song has ended, and that decides nothing)"
     );
     let heard = heard.lock().unwrap();
     assert!(
         heard.last().is_some_and(|book| !book.get("auto").on),
         "the book kept says it is off"
+    );
+}
+
+#[test]
+fn a_song_that_cannot_be_played_is_its_own_fault_and_the_equalizer_stays_on() {
+    let Some(library) = library() else { return };
+    let dir = scratch("eq-broken");
+    let broken = dir.join("broken.wav");
+    std::fs::write(&broken, b"RIFF this is not a song at all").unwrap();
+    let song = dir.join("song.wav");
+    write_wav(&song, RATE, &signal(RATE as usize));
+    let deep = with(None, Tilt::More, Tilt::AsIs);
+    let played = play_with(
+        &library,
+        &dir.join("out.wav"),
+        &[here(&broken), here(&song)],
+        Settings::default(),
+        &|p: &Player| p.set_eq(deep.clone()).unwrap(),
+        &[],
+    );
+    assert_eq!(
+        frames(&played),
+        RATE as usize,
+        "the good song played, whole"
+    );
+    assert_eq!(played.last.errors, 1, "the broken one is said");
+    assert!(
+        played.last.eq.on && played.last.eq.trouble.is_none(),
+        "the equalizer stays on: {:?}",
+        played.last.eq.trouble
     );
 }
 

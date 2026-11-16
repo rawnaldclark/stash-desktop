@@ -118,9 +118,14 @@ pub type OnPlay = Arc<dyn Fn(&QueueItem, i64) + Send + Sync>;
 /// what failed.
 pub type OnFailed = Arc<dyn Fn(&QueueItem) + Send + Sync>;
 
+/// The engine's end of a track with nothing to play (`MPV_ERROR_NOTHING_TO_PLAY`): what it says when the filters for a
+/// track's audio cannot be built.
+const NOTHING_TO_PLAY: i32 = -16;
+
 /// Told when what each output keeps changed by itself (an output opened for the first time, or an equalizer the engine
-/// could not use and turned off), to keep it.
-pub type OnEqualizers = Arc<dyn Fn(&eq::Book) + Send + Sync>;
+/// could not use and turned off), to keep it. The book is read by calling the function given, once the place it is
+/// kept in is held: a change the listener made meanwhile is never overwritten by an older book.
+pub type OnEqualizers = Arc<dyn Fn(&dyn Fn() -> eq::Book) + Send + Sync>;
 
 pub struct Settings {
     /// Without one, the queue can hold files only.
@@ -315,8 +320,13 @@ struct Shared {
     retried: std::collections::HashSet<usize>,
     /// A queue place to ask for again: its stream did not start.
     retry: Option<usize>,
-    /// The engine could not build the equalizer for the track it was opening: that track plays again without it.
-    eq_failed: bool,
+    /// The queue place that could not be opened with the equalizer on, played again without it: if it plays, the
+    /// equalizer was at fault.
+    eq_suspect: Option<usize>,
+    /// What the engine said when it could not build the equalizer (it may say it only after the track has ended).
+    eq_said: Option<String>,
+    /// The track opened has started to play (the engine said so).
+    started: bool,
     /// Goes up whenever the queue is edited while it plays; a track located for an earlier number is dropped.
     edits: u64,
     next_qid: u64,
@@ -456,8 +466,16 @@ impl Ctx {
     }
 
     /// The engine opens a file (its `on_preloaded` hook): its equalizer goes in from its first sample. The engine
-    /// waits until this is done, so it is quick: a property read and one write.
+    /// waits until this is done, so it is quick: a property read and one write (and, for the system's choice before
+    /// the engine said which output it opened, a question to the system). The engine is let go whatever happens here.
     fn preloaded(&self, id: u64) {
+        struct Continue<'a>(&'a Engine, u64);
+        impl Drop for Continue<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.mpv().hook_continue(self.1);
+            }
+        }
+        let _continue = Continue(&self.engine, id);
         let rate = self
             .engine
             .mpv()
@@ -471,42 +489,86 @@ impl Ctx {
             })
             .and_then(|rate| u32::try_from(rate).ok());
         let chosen = self.chosen();
-        self.eq
+        let mut run = self
+            .eq
             .lock()
-            .unwrap()
-            .preloaded(&self.engine, &chosen, rate);
-        let _ = self.engine.mpv().hook_continue(id);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if run.asks_system(&chosen) && run.opened.is_none() {
+            run.system_said(crate::audio::system_output());
+        }
+        run.preloaded(&self.engine, &chosen, rate);
+    }
+
+    /// Asks the system which output it would choose, when that is what is chosen and nothing plays (the engine's
+    /// output is closed then, and the next song opens what the system chooses at that moment). While a song plays,
+    /// the output the engine said it opened is the one in use.
+    fn ask_system(&self, run: &mut EqRun, chosen: &str, playing: bool) {
+        if !run.asks_system(chosen) || playing && run.opened.is_some() {
+            return;
+        }
+        if !playing {
+            run.opened = None;
+        }
+        if run.system_due() {
+            run.system_said(crate::audio::system_output());
+        }
+    }
+
+    /// The queue place being opened, when its failure may be the equalizer's: it had not started, the equalizer's
+    /// filters are in the engine's list, it is not being tried without them already, and it was not tried again
+    /// before.
+    fn equalizer_suspect(&self) -> Option<usize> {
+        let place = {
+            let shared = self.shared.lock().unwrap();
+            if shared.started || shared.eq_suspect.is_some() {
+                return None;
+            }
+            let place = shared.index().or(shared.starting)?;
+            (!shared.retried.contains(&place)).then_some(place)
+        }?;
+        self.engine.filters().contains("@eq:").then_some(place)
+    }
+
+    /// A track is playing, or being opened.
+    fn playing(&self) -> bool {
+        let shared = self.shared.lock().unwrap();
+        shared.slot().is_some() || shared.starting.is_some()
+    }
+
+    /// Hands the book to be kept, read when the keeper is ready for it.
+    fn keep_equalizers(&self) {
+        if let Some(on_equalizers) = &self.on_equalizers {
+            on_equalizers(&|| self.eq.lock().unwrap().book.clone());
+        }
     }
 
     /// The engine says it opened `device`: its equalizer goes in, and a new output opened last is kept.
     fn opened_output(&self, device: Device) {
         let chosen = self.chosen();
-        let (changed, book) = {
-            let mut run = self.eq.lock().unwrap();
-            let changed = run.opened_output(&self.engine, &chosen, device);
-            (changed, run.book.clone())
-        };
-        if let (true, Some(on_equalizers)) = (changed, &self.on_equalizers) {
-            on_equalizers(&book);
+        let changed = self
+            .eq
+            .lock()
+            .unwrap()
+            .opened_output(&self.engine, &chosen, device);
+        if changed {
+            self.keep_equalizers();
         }
     }
 
     /// The engine could not use the equalizer: the list is cleared, the output's equalizer turned off and kept so.
     fn equalizer_failed(&self, why: &str) {
         let chosen = self.chosen();
-        let book = {
+        {
             let mut run = self.eq.lock().unwrap();
-            let description = self.description(&run.output_key(&chosen));
+            let key = run.output_key(&chosen);
+            let description = self.description(&key, &run.book);
             run.fail(&self.engine, &chosen, &description, why);
-            run.book.clone()
-        };
-        if let Some(on_equalizers) = &self.on_equalizers {
-            on_equalizers(&book);
         }
+        self.keep_equalizers();
     }
 
-    /// What the system calls the output `name`.
-    fn description(&self, name: &str) -> String {
+    /// What the system calls the output `name`; for one it lists no longer (unplugged), what was kept of it.
+    fn description(&self, name: &str, book: &eq::Book) -> String {
         self.engine
             .mpv()
             .get("audio-device-list")
@@ -516,12 +578,33 @@ impl Ctx {
                     .find(|d| d["name"] == name)
                     .and_then(|d| d["description"].as_str().map(tidy))
             })
+            .or_else(|| {
+                book.outputs
+                    .get(name)
+                    .map(|kept| kept.description.clone())
+                    .filter(|d| !d.is_empty())
+            })
             .unwrap_or_else(|| {
                 if name == "auto" {
                     "Autoselect device".into()
                 } else {
                     name.to_string()
                 }
+            })
+    }
+
+    /// The output in use (`run` held): the one the engine said it opened, else the one chosen, else what the system
+    /// would choose.
+    fn output_in_use(&self, run: &mut EqRun, playing: bool) -> Device {
+        let chosen = self.chosen();
+        self.ask_system(run, &chosen, playing);
+        let name = run.output_key(&chosen);
+        run.opened
+            .clone()
+            .filter(|d| d.name == name)
+            .unwrap_or_else(|| Device {
+                description: self.description(&name, &run.book),
+                name,
             })
     }
     /// Called a few times a second: adds the time since `last` to the listening of the current track when the engine
@@ -953,23 +1036,46 @@ impl Player {
                                     });
                                 }
                             }
-                            // The equalizer could not be built for a file, or a filter of it failed while running (the
-                            // engine then passes the audio by it).
+                            // The engine could not build the filters, or one failed while running (it then passes the
+                            // audio by it). The engine sends its log only when no event waits, so these words can come
+                            // after the track they are about has ended: while a track opens they decide nothing (its end
+                            // does, below) and are kept for the listener. Once a track plays, they are about a list
+                            // written while it played, or a filter that failed: the equalizer is turned off.
                             Event::Log { text, .. }
-                                if (text.trim() == "Audio filter initialized failed!"
+                                if text.trim() == "Audio filter initialized failed!"
                                     || text.starts_with("Disabling filter")
-                                        && text.trim_end().ends_with("because it has failed."))
-                                    && ctx.engine.filters().contains("@eq:") =>
+                                        && text.trim_end().ends_with("because it has failed.") =>
                             {
-                                if text.starts_with("Audio filter") {
-                                    ctx.shared.lock().unwrap().eq_failed = true;
+                                let opening = {
+                                    let mut shared = ctx.shared.lock().unwrap();
+                                    shared.eq_said = Some(text.trim().to_string());
+                                    !shared.started
+                                };
+                                if !opening && ctx.engine.filters().contains("@eq:") {
+                                    ctx.equalizer_failed(text.trim());
                                 }
-                                ctx.equalizer_failed(text.trim());
                             }
                             // A seek the engine made itself (Repeat one's loop) built the graph again from the list
                             // as written: a seam, so the whole curve is written now. After Stash's own seeks and a
                             // file's start the list is in place already, and nothing is written.
                             Event::PlaybackRestart => {
+                                // The track that could not be opened with the equalizer plays without it: the
+                                // equalizer was at fault, and is turned off.
+                                let blamed = {
+                                    let mut shared = ctx.shared.lock().unwrap();
+                                    shared.started = true;
+                                    let place = shared.index().or(shared.starting);
+                                    let suspect = shared.eq_suspect.take();
+                                    let said = shared.eq_said.take();
+                                    (suspect.is_some() && suspect == place).then(|| {
+                                        said.unwrap_or_else(|| {
+                                            "the engine could not build its filters".into()
+                                        })
+                                    })
+                                };
+                                if let Some(why) = blamed {
+                                    ctx.equalizer_failed(&why);
+                                }
                                 let chosen = ctx.chosen();
                                 ctx.eq.lock().unwrap().commit(&ctx.engine, &chosen);
                             }
@@ -995,19 +1101,20 @@ impl Player {
                                     shared.complaints.push(format!("{prefix}: {}", text.trim()));
                                 }
                             }
-                            // The equalizer could not be built for the track: the track is not at fault. It plays
-                            // again, without it (the equalizer was turned off), and nothing is said of the track.
-                            Event::EndFile(EndReason::Error(_))
-                                if ctx.shared.lock().unwrap().eq_failed =>
+                            // A track that could not be opened, with nothing to play, while the equalizer's filters
+                            // were in the engine's list: the filters may be at fault, not the track. It is opened
+                            // again once, without them, and nothing is said of it yet: if it plays, the equalizer was
+                            // at fault (above); if not, the track is (below).
+                            Event::EndFile(EndReason::Error(NOTHING_TO_PLAY))
+                                if ctx.equalizer_suspect().is_some() =>
                             {
-                                let mut shared = ctx.shared.lock().unwrap();
-                                shared.eq_failed = false;
-                                shared.complaints.clear();
-                                let place = shared.index().or(shared.starting);
-                                if let Some(place) = place
-                                    && shared.retried.insert(place)
-                                {
+                                if let Some(place) = ctx.equalizer_suspect() {
+                                    ctx.eq.lock().unwrap().hold(&ctx.engine);
+                                    let mut shared = ctx.shared.lock().unwrap();
+                                    shared.complaints.clear();
+                                    shared.retried.insert(place);
                                     shared.retry = Some(place);
+                                    shared.eq_suspect = Some(place);
                                 }
                             }
                             Event::EndFile(EndReason::Error(code)) => {
@@ -1046,6 +1153,8 @@ impl Player {
                                 ));
                                 shared.error_id = failed_id;
                                 shared.errors += 1;
+                                shared.eq_suspect = None;
+                                shared.eq_said = None;
                                 // A stream that did not start is asked for once more: its link may have run out, or
                                 // the first try at its server failed. A file that cannot be played stays that way.
                                 let place = shared.index().or(shared.starting);
@@ -1076,6 +1185,7 @@ impl Player {
                                 let mut shared = ctx.shared.lock().unwrap();
                                 shared.pos = pos;
                                 shared.complaints.clear();
+                                shared.started = false;
                                 if shared.slot().is_some() {
                                     shared.starting = None;
                                 }
@@ -1804,33 +1914,29 @@ impl Player {
     }
 
     /// The output in use: the one the engine said it opened, else the one chosen (for the system's choice, the one
-    /// it opened last).
+    /// the system says it would choose).
     pub fn output_in_use(&self) -> Device {
-        let chosen = self.ctx.chosen();
-        let name = self.ctx.eq.lock().unwrap().output_key(&chosen);
-        let opened = self.ctx.eq.lock().unwrap().opened.clone();
-        opened.filter(|d| d.name == name).unwrap_or_else(|| Device {
-            description: self.ctx.description(&name),
-            name,
-        })
+        let playing = self.ctx.playing();
+        let mut run = self.ctx.eq.lock().unwrap();
+        self.ctx.output_in_use(&mut run, playing)
     }
 
     /// The equalizer of the output in use.
     pub fn eq(&self) -> eq::Eq {
+        let playing = self.ctx.playing();
         let chosen = self.ctx.chosen();
-        self.ctx.eq.lock().unwrap().eq(&chosen)
+        let mut run = self.ctx.eq.lock().unwrap();
+        self.ctx.ask_system(&mut run, &chosen, playing);
+        run.eq(&chosen)
     }
 
     /// Sets the equalizer of the output in use and keeps it in what each output keeps. While a song plays it glides
     /// there; when that starts with a new list and the engine refuses it, this answers the refusal and nothing changes.
     pub fn set_eq(&self, eq: eq::Eq) -> Result<()> {
-        let output = self.output_in_use();
+        let playing = self.ctx.playing();
         let chosen = self.ctx.chosen();
-        let playing = {
-            let shared = self.ctx.shared.lock().unwrap();
-            shared.slot().is_some() || shared.starting.is_some()
-        };
         let mut run = self.ctx.eq.lock().unwrap();
+        let output = self.ctx.output_in_use(&mut run, playing);
         let before = run.book.clone();
         run.book.put(&output.name, &output.description, eq);
         if let Err(e) = run.change(&self.ctx.engine, &chosen, playing) {
@@ -2014,9 +2120,9 @@ impl Player {
         };
         let resting_length = track.as_ref().and_then(|t| t.duration_ms).unwrap_or(0);
         let chosen = self.ctx.chosen();
-        let output = self.output_in_use();
         let (eq, failed) = {
-            let run = self.ctx.eq.lock().unwrap();
+            let mut run = self.ctx.eq.lock().unwrap();
+            let output = self.ctx.output_in_use(&mut run, playing);
             (run.state(output, chosen == "auto"), run.failed)
         };
         let equalized = playing && !failed && self.ctx.engine.filters().contains("@eq:");

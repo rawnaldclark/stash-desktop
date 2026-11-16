@@ -10,6 +10,7 @@
 //! engine opens another output by itself, and after a seek it made itself (Repeat one's loop).
 
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use crate::Result;
 use crate::audio::{Engine, Output};
@@ -21,12 +22,15 @@ use super::Device;
 /// sound card or the silent output queue about 0.2 s (mpv's `audio-buffer`) plus the device's own.
 const LEAD: f64 = 0.35;
 
+/// How long the system's answer to which output it would choose is taken as it is.
+const SYSTEM_FOR: Duration = Duration::from_secs(2);
+
 /// What the window is told of the equalizer of the output in use (`eq` in the player's state).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct EqState {
     /// The output in use: the one the engine opened, else the one chosen.
     pub output: Device,
-    /// "The system's choice" is chosen (`output` is what it opened, or the last it opened).
+    /// "The system's choice" is chosen (`output` is what it opened, or what it would open now).
     pub system_choice: bool,
     pub on: bool,
     pub bass: eq::Tilt,
@@ -72,6 +76,8 @@ pub(super) struct EqRun {
     rate: Option<u32>,
     /// The engine could not use the equalizer for the file playing: it plays without it.
     pub(super) failed: bool,
+    /// The next file opened plays without the equalizer (its failure may have been the equalizer's: see `hold`).
+    hold_next: bool,
     /// Why the equalizer of an output was turned off by itself: the output, and the words (not kept).
     trouble: Option<(String, String)>,
     /// Tests only: a list written as it is at every seam, until a change or a failure.
@@ -79,6 +85,12 @@ pub(super) struct EqRun {
     /// How long a change takes to be heard past its glide (see `LEAD`); below 0 for a file output, whose queue
     /// depends on the file's rate.
     lead: f64,
+    /// The engine plays to the system's outputs (not to a file, or nowhere).
+    device_output: bool,
+    /// The output the system would choose now ("wasapi/{id}"), as last asked, and when.
+    system: Option<(Option<String>, Instant)>,
+    /// The room of the equalizer last shown, so it is not worked out again at every look.
+    shown_room: Option<(Eq, f64)>,
 }
 
 impl EqRun {
@@ -93,6 +105,7 @@ impl EqRun {
             ready_at: None,
             rate: None,
             failed: false,
+            hold_next: false,
             trouble: None,
             forced: None,
             // A file output writes as fast as the decoder goes and queues 65536 frames (1.5 s at 44.1 kHz, measured).
@@ -100,7 +113,27 @@ impl EqRun {
                 Output::PcmFile(_) => -1.0,
                 _ => LEAD,
             },
+            device_output: matches!(output, Output::Device { .. }),
+            system: None,
+            shown_room: None,
         }
+    }
+
+    /// "The system's choice" is chosen for the system's outputs: which one that is, the system says.
+    pub(super) fn asks_system(&self, chosen: &str) -> bool {
+        self.device_output && chosen == "auto"
+    }
+
+    /// The system's answer is older than `SYSTEM_FOR`, or was never given.
+    pub(super) fn system_due(&self) -> bool {
+        self.system
+            .as_ref()
+            .is_none_or(|(_, at)| at.elapsed() >= SYSTEM_FOR)
+    }
+
+    /// What the system says it would choose now.
+    pub(super) fn system_said(&mut self, output: Option<String>) {
+        self.system = Some((output, Instant::now()));
     }
 
     /// The lead for the file playing.
@@ -112,14 +145,17 @@ impl EqRun {
         }
     }
 
-    /// The name of the output in use: the one opened, else the one chosen; for "the system's choice", the one it
-    /// opened last (until the engine says which it opened now).
+    /// The name of the output in use: the one opened, else the one chosen; for "the system's choice", the one the
+    /// system says it would choose, else the one opened last (until the engine says which it opened now).
     pub(super) fn output_key(&self, chosen: &str) -> String {
         if let Some(opened) = &self.opened {
             return opened.name.clone();
         }
         if chosen == "auto" {
-            return self.book.last.clone().unwrap_or_else(|| "auto".into());
+            let system = self.system.as_ref().and_then(|(output, _)| output.clone());
+            return system
+                .or_else(|| self.book.last.clone())
+                .unwrap_or_else(|| "auto".into());
         }
         chosen.to_string()
     }
@@ -159,7 +195,9 @@ impl EqRun {
         // An equalizer glided out leaves `@frames` in the list (it holds audio): a seam clears it.
         let lingering = plan.is_none() && !engine.filters().is_empty();
         if plan == self.instance && plan == self.live && self.steps.is_empty() && !lingering {
+            // The audio queued was dropped: no glide is still to be heard.
             self.target = plan;
+            self.ready_at = None;
             return;
         }
         let _ = self.write(engine, plan);
@@ -168,12 +206,14 @@ impl EqRun {
     /// The engine opens a file (its `on_preloaded` hook): its sample rate, and the list for it.
     pub(super) fn preloaded(&mut self, engine: &Engine, chosen: &str, rate: Option<u32>) {
         self.rate = rate;
-        self.failed = false;
+        self.failed = std::mem::take(&mut self.hold_next);
+        self.ready_at = None;
         self.commit(engine, chosen);
     }
 
     /// The equalizer of the output in use changed. Nothing playing: the list is written. Playing: it glides there; a
-    /// first step that rebuilds the list runs here, so the engine's refusal answers the change.
+    /// first step that rebuilds the list runs here, so the engine's refusal answers the change, unless a glide sent
+    /// before is still to be heard (it would be cut short): then it waits its turn, as every step does.
     pub(super) fn change(&mut self, engine: &Engine, chosen: &str, playing: bool) -> Result<()> {
         self.forced = None;
         if self
@@ -189,7 +229,15 @@ impl EqRun {
             return self.write(engine, plan);
         }
         let mut steps: VecDeque<Step> = eq::transition(self.live.as_ref(), plan.as_ref()).into();
-        if let Some(Step::Write(list)) = steps.front() {
+        let heard = self.live.is_none()
+            || self.ready_at.is_none_or(|at| {
+                engine
+                    .mpv()
+                    .get("time-pos")
+                    .and_then(|p| p.parse::<f64>().ok())
+                    .is_some_and(|now| now >= at)
+            });
+        if let Some(Step::Write(list)) = steps.front().filter(|_| heard) {
             let list = list.clone();
             engine.set_filters(Some(list.as_str()).filter(|l| !l.is_empty()))?;
             steps.pop_front();
@@ -257,6 +305,19 @@ impl EqRun {
         }
     }
 
+    /// A file could not be opened with the equalizer: the list is cleared and the next file opened (that one again)
+    /// plays without it, the equalizer kept as it is, until it is known whose fault it was.
+    pub(super) fn hold(&mut self, engine: &Engine) {
+        let _ = engine.set_filters(None);
+        self.instance = None;
+        self.live = None;
+        self.target = None;
+        self.steps.clear();
+        self.ready_at = None;
+        self.forced = None;
+        self.hold_next = true;
+    }
+
     /// The engine could not use the equalizer (a list it could not build, or a filter that failed while running): the
     /// list is cleared and the equalizer of the output in use turned off, with `why`.
     pub(super) fn fail(&mut self, engine: &Engine, chosen: &str, description: &str, why: &str) {
@@ -291,17 +352,33 @@ impl EqRun {
     }
 
     /// The engine says it opened `device`. True when the book changed (a new output opened last), for it to be kept.
-    /// Its own equalizer is written at once when it differs: the reopen dropped the audio queued.
+    /// The audio queued is gone and the graph was built again from the list as written: another output gets its own
+    /// equalizer written at once; the same one opened again (the system changed its format, or lost it and found it)
+    /// glides from what was written to the plan, as a change does.
     pub(super) fn opened_output(&mut self, engine: &Engine, chosen: &str, device: Device) -> bool {
-        if self.opened.as_ref() == Some(&device) {
-            return false;
+        let again = self.opened.as_ref() == Some(&device);
+        let mut changed = self.book.last.as_deref() != Some(device.name.as_str());
+        // An equalizer set for "the system's choice" before the system said which output that is goes to the one
+        // it opened, when that has none of its own.
+        if !again
+            && self.device_output
+            && !self.book.outputs.contains_key(&device.name)
+            && let Some(mut kept) = self.book.outputs.remove("auto")
+        {
+            kept.description = device.description.clone();
+            self.book.outputs.insert(device.name.clone(), kept);
+            changed = true;
         }
-        let changed = self.book.last.as_deref() != Some(device.name.as_str());
         self.book.last = Some(device.name.clone());
         self.opened = Some(device);
-        // The output was opened again (the audio queued is gone): a seam. Its list is written unless what is written
-        // and what runs are the plan already (a reopen builds the graph from what is written).
         let plan = self.plan(chosen);
+        if again {
+            self.live = self.instance.clone();
+            self.ready_at = None;
+            self.steps = eq::transition(self.instance.as_ref(), plan.as_ref()).into();
+            self.target = plan;
+            return changed;
+        }
         if plan != self.instance || plan != self.live || !self.steps.is_empty() {
             self.failed = false;
             let _ = self.write(engine, plan);
@@ -310,9 +387,17 @@ impl EqRun {
     }
 
     /// What the window is told: the output in use is `output`.
-    pub(super) fn state(&self, output: Device, system_choice: bool) -> EqState {
+    pub(super) fn state(&mut self, output: Device, system_choice: bool) -> EqState {
         let eq = self.book.get(&output.name);
         let flat = eq.is_flat();
+        let room = match &self.shown_room {
+            Some((shown, room)) if *shown == eq => *room,
+            _ => {
+                let room = eq.room_db();
+                self.shown_room = Some((eq.clone(), room));
+                room
+            }
+        };
         EqState {
             system_choice,
             on: eq.on,
@@ -329,7 +414,7 @@ impl EqRun {
             softer_db: if flat {
                 0.0
             } else {
-                (eq.room_db() * 10.0).round() / 10.0
+                (room * 10.0).round() / 10.0
             },
             describe: eq.describe(),
             reopen_at_pause: false,

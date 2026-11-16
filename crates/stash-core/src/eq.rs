@@ -39,6 +39,8 @@ pub const FRAMES: &str = "@frames:lavfi=%22%asetnsamples=n=256:p=0";
 const LINES_MOST: usize = 2000;
 /// The most a correction may raise the sound anywhere, in dB.
 const BOOST_MOST: f64 = 24.0;
+/// The most a file's preamp may lower the sound, in dB (its Preamp lines added up).
+const PREAMP_MOST: f64 = 60.0;
 /// The slope Equalizer APO gives a shelf that names neither a Q nor a slope.
 const SHELF_SLOPE: f64 = 0.9;
 /// The rates the room is worked out at; the largest need is taken, so the level is the same for every file.
@@ -289,6 +291,26 @@ impl Eq {
         for_boosts.max(preamp).max(0.0)
     }
 
+    /// The room in a file of `rate` Hz: the room every song gets (`room_db`, the same level at every usual rate), or
+    /// more in a file of another rate whose own curve rises higher (a low rate leaves out a cut above it that held a
+    /// boost down).
+    fn room_for(&self, rate: Option<u32>) -> f64 {
+        let room = self.room_db();
+        let Some(rate) = rate.map(f64::from) else {
+            return room;
+        };
+        if self.is_flat() || RATES.contains(&rate) {
+            return room;
+        }
+        let bands: Vec<Band> = self.slots().into_iter().map(|s| s.band).collect();
+        let peak = peak_at(&bands, rate);
+        if peak > 0.05 {
+            room.max(peak + MARGIN_DB)
+        } else {
+            room
+        }
+    }
+
     /// The equalizer in a few words, for the badge: "Sennheiser HD 650, more bass". None when flat.
     pub fn describe(&self) -> Option<String> {
         if self.is_flat() {
@@ -342,9 +364,7 @@ fn tone(kind: Kind, (hz, q, more): (f64, f64, f64), tilt: Tilt) -> Band {
     }
 }
 
-/// The highest point, in dB, of all these filters together, at each of `RATES`, the largest taken: at 0 Hz (where a
-/// low shelf has its whole gain), on a grid of 1/48 octave from 20 Hz up to 20 kHz, and at each filter's own
-/// frequency. A filter a rate cannot hold is left out there, as it is when played.
+/// The highest point, in dB, of all these filters together, at each of `RATES`, the largest taken (see `peak_at`).
 fn peak_of(bands: &[Band]) -> f64 {
     RATES
         .iter()
@@ -352,18 +372,59 @@ fn peak_of(bands: &[Band]) -> f64 {
         .fold(f64::NEG_INFINITY, f64::max)
 }
 
+/// The highest point, in dB, of all these filters together in a file of `rate` Hz: at 0 Hz (where a low shelf has its
+/// whole gain), at half the rate (where a high shelf has its whole gain, above what is heard but not above what is
+/// played), at each filter's own frequency, and on a grid of 1/48 octave from 2 Hz up, each high point of the grid
+/// then sought out between its neighbours (a narrow shelf's bump falls between them). A filter the rate cannot hold
+/// is left out, as it is when played.
 fn peak_at(bands: &[Band], rate: f64) -> f64 {
     let held: Vec<&Band> = bands.iter().filter(|b| holds(rate, b.hz)).collect();
     let filters: Vec<Biquad> = held.iter().map(|b| b.biquad(rate)).collect();
-    let top = 20_000f64.min(NYQUIST_SHARE * rate);
-    let steps = (48.0 * (top / 20.0).log2()).floor() as i32;
-    let grid = (0..=steps).map(|k| 20.0 * 2f64.powf(f64::from(k) / 48.0));
-    std::iter::once(0.0)
-        .chain(grid)
-        .chain([top])
+    let at = |hz: f64| filters.iter().map(|f| f.db_at(hz, rate)).sum::<f64>();
+    let top = rate / 2.0;
+    let steps = (48.0 * (top / 2.0).log2()).floor() as i32;
+    let mut points: Vec<f64> = (0..=steps)
+        .map(|k| 2.0 * 2f64.powf(f64::from(k) / 48.0))
         .chain(held.iter().map(|b| b.hz))
-        .map(|hz| filters.iter().map(|f| f.db_at(hz, rate)).sum::<f64>())
-        .fold(f64::NEG_INFINITY, f64::max)
+        .chain([top])
+        .filter(|hz| *hz <= top)
+        .collect();
+    points.sort_by(f64::total_cmp);
+    points.dedup();
+    let values: Vec<f64> = points.iter().map(|&hz| at(hz)).collect();
+    let mut peak = values.iter().copied().fold(at(0.0), f64::max);
+    for i in 1..values.len().saturating_sub(1) {
+        if values[i] >= values[i - 1] && values[i] >= values[i + 1] {
+            peak = peak.max(highest_between(&at, points[i - 1], points[i + 1]));
+        }
+    }
+    peak
+}
+
+/// The highest value of `at` between `low` and `high` Hz, sought by golden section on a log scale (one high point
+/// there, as between a grid point's neighbours).
+fn highest_between(at: &impl Fn(f64) -> f64, low: f64, high: f64) -> f64 {
+    let golden = (5f64.sqrt() - 1.0) / 2.0;
+    let (mut a, mut b) = (low.ln(), high.ln());
+    let mut c = b - golden * (b - a);
+    let mut d = a + golden * (b - a);
+    let (mut fc, mut fd) = (at(c.exp()), at(d.exp()));
+    for _ in 0..40 {
+        if fc >= fd {
+            b = d;
+            d = c;
+            fd = fc;
+            c = b - golden * (b - a);
+            fc = at(c.exp());
+        } else {
+            a = c;
+            c = d;
+            fc = fd;
+            d = a + golden * (b - a);
+            fd = at(d.exp());
+        }
+    }
+    fc.max(fd)
 }
 
 /// Whether a file of `rate` Hz holds a filter at `hz`: it is below 0.49 of the rate. (FFmpeg passes over only a filter
@@ -483,7 +544,7 @@ impl Chain {
             .filter(|s| rate.is_none_or(|rate| holds(f64::from(rate), s.band.hz)))
             .collect();
         Some(Chain {
-            gain: 10f64.powf(-eq.room_db() / 20.0),
+            gain: 10f64.powf(-eq.room_for(rate) / 20.0),
             slots,
         })
     }
@@ -592,22 +653,40 @@ fn to_flat(a: &Chain) -> Vec<Step> {
 }
 
 /// From `a` to `b` of the same shape: a preamp that falls goes first and is waited for; then the filters, those whose
-/// gain falls before those whose gain rises; then, after a wait, a preamp that rises. A filter's dB only grows with
-/// its gain and the dBs add, so every moment between stays at or below the higher of the two curves while the preamp
-/// is at the lower of the two gains.
+/// gain falls before those whose gain rises; then, after a wait, a preamp that rises. A peak's dB, and a gentle
+/// shelf's, only grows with its gain and the dBs add, so every moment between stays at or below the higher of the two
+/// curves while the preamp is at the lower of the two gains. A steep shelf (a Q above 1/√2, a slope above 1) has a
+/// bump on its far side that grows as its gain falls, so a moment between can rise above both curves: the preamp
+/// then goes lower still while the filters change, as low as the highest of those moments needs.
 fn steps(a: &Chain, b: &Chain) -> Vec<Step> {
-    let moved = fixed(a.gain, 9) != fixed(b.gain, 9);
+    let changes = filter_changes(a, b);
+    let mut low = a.gain.min(b.gain);
+    if changes.iter().any(|(_, y)| bumpy(&y.band)) {
+        let mut slots = a.slots.clone();
+        let mut worst = f64::NEG_INFINITY;
+        for (x, y) in &changes {
+            if let Some(slot) = slots.iter_mut().find(|s| s.id == x.id) {
+                slot.band.db = y.band.db;
+            }
+            let bands: Vec<Band> = slots.iter().map(|s| s.band).collect();
+            worst = worst.max(peak_of(&bands));
+        }
+        if worst > 0.05 {
+            low = low.min(10f64.powf(-(worst + MARGIN_DB) / 20.0));
+        }
+    }
     let mut out = Vec::new();
-    if moved && b.gain < a.gain {
-        out.push(Step::Send(vec![preamp_to(b.gain)]));
-        out.push(Step::Wait(glide_seconds(a.gain, b.gain)));
+    if fixed(low, 9) != fixed(a.gain, 9) && low < a.gain {
+        out.push(Step::Send(vec![preamp_to(low)]));
+        out.push(Step::Wait(glide_seconds(a.gain, low)));
     }
-    let filters = filter_changes(a, b);
-    let sent = !filters.is_empty();
+    let sent = !changes.is_empty();
     if sent {
-        out.push(Step::Send(filters));
+        out.push(Step::Send(
+            changes.iter().map(|(_, y)| gain_to(y)).collect(),
+        ));
     }
-    if moved && b.gain > a.gain {
+    if fixed(b.gain, 9) != fixed(low, 9) && b.gain > low {
         if sent {
             out.push(Step::Wait(0.0));
         }
@@ -616,8 +695,19 @@ fn steps(a: &Chain, b: &Chain) -> Vec<Step> {
     out
 }
 
-/// The commands for the filters whose gain changes from `a` to `b`: those that fall, then those that rise.
-fn filter_changes(a: &Chain, b: &Chain) -> Vec<Cmd> {
+/// A shelf steep enough to have a bump (a Q above 1/√2 by more than Bass's and Treble's 0.71, a slope above 1, or a
+/// width in octaves): its dB does not only grow with its gain.
+fn bumpy(band: &Band) -> bool {
+    band.kind != Kind::Peak
+        && match band.width {
+            Width::Q(q) => q > 0.72,
+            Width::Slope(s) => s > 1.0,
+            Width::Octaves(_) => true,
+        }
+}
+
+/// The filters whose gain changes from `a` to `b`, as they are in each: those that fall, then those that rise.
+fn filter_changes<'a>(a: &'a Chain, b: &'a Chain) -> Vec<(&'a Slot, &'a Slot)> {
     let changed: Vec<(&Slot, &Slot)> = a
         .slots
         .iter()
@@ -626,7 +716,7 @@ fn filter_changes(a: &Chain, b: &Chain) -> Vec<Cmd> {
         .collect();
     let falling = changed.iter().filter(|(x, y)| y.band.db < x.band.db);
     let rising = changed.iter().filter(|(x, y)| y.band.db > x.band.db);
-    falling.chain(rising).map(|(_, y)| gain_to(y)).collect()
+    falling.chain(rising).copied().collect()
 }
 
 fn preamp_to(gain: f64) -> Cmd {
@@ -676,6 +766,9 @@ pub struct Kept {
     pub eq: Eq,
     /// Why this equalizer was turned off on its own; not kept across starts.
     pub trouble: Option<String>,
+    /// A kept correction whose text no longer reads: kept as it was, so a later Stash that reads it brings it back,
+    /// until the listener changes this output's equalizer.
+    unread: Option<StoredCorrection>,
 }
 
 /// The book as kept: `{"v":1,"last":…,"outputs":{name:{…}}}`.
@@ -702,7 +795,7 @@ struct StoredOutput {
     correction: Option<StoredCorrection>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct StoredCorrection {
     name: String,
     file: String,
@@ -755,7 +848,8 @@ impl Book {
     }
 
     /// Keeps `eq` for `output` (`description` is its name for the listener). An equalizer that is off with nothing in
-    /// it removes the entry, so the book stays small.
+    /// it removes the entry, so the book stays small. A correction that could not be read again goes: the listener
+    /// has changed this output's equalizer since being told.
     pub fn put(&mut self, output: &str, description: &str, eq: Eq) {
         if eq == Eq::default() {
             self.outputs.remove(output);
@@ -765,6 +859,7 @@ impl Book {
             description: description.to_string(),
             eq,
             trouble: None,
+            unread: None,
         };
         self.outputs.insert(output.to_string(), kept);
     }
@@ -779,8 +874,9 @@ impl Kept {
             correction: None,
         };
         let mut trouble = None;
+        let mut unread = None;
         if let Some(kept) = stored.correction {
-            match read_text(kept.source, &kept.file) {
+            match read_text(kept.source.clone(), &kept.file) {
                 Ok(correction) => {
                     eq.correction = Some(Correction {
                         name: kept.name,
@@ -795,6 +891,7 @@ impl Kept {
                         kept.name,
                         why.trim_end_matches('.')
                     ));
+                    unread = Some(kept);
                 }
             }
         }
@@ -802,6 +899,7 @@ impl Kept {
             description: stored.description,
             eq,
             trouble,
+            unread,
         }
     }
 
@@ -811,11 +909,16 @@ impl Kept {
             on: self.eq.on,
             bass: self.eq.bass,
             treble: self.eq.treble,
-            correction: self.eq.correction.as_ref().map(|c| StoredCorrection {
-                name: c.name.clone(),
-                file: c.file.clone(),
-                source: c.source.clone(),
-            }),
+            correction: self
+                .eq
+                .correction
+                .as_ref()
+                .map(|c| StoredCorrection {
+                    name: c.name.clone(),
+                    file: c.file.clone(),
+                    source: c.source.clone(),
+                })
+                .or_else(|| self.unread.clone()),
         }
     }
 }
@@ -853,13 +956,18 @@ impl Reading {
                 FilterLine::Off => self.switched_off += 1,
                 FilterLine::Over => self.passed_over += 1,
             },
-            "Channel" if value == "all" => {}
+            "Channel" | "Device" if value == "all" => {}
             _ => match command(key) {
                 Some((does, why)) => {
                     let said = if value.is_empty() {
                         key.to_string()
                     } else {
                         format!("{key}: {value}")
+                    };
+                    // The line as the file has it, cut short: a refusal is a sentence, not the file.
+                    let said = match said.char_indices().nth(60) {
+                        Some((at, _)) => format!("{}…", &said[..at]),
+                        None => said,
                     };
                     return refused(format!(
                         "Line {n} {does} ({said}). {why}, so the file was not brought in."
@@ -883,6 +991,17 @@ impl Reading {
         if count == 0 {
             // A preamp alone changes only the level, which is the volume's job.
             return refused(NOTHING);
+        }
+        if !(-PREAMP_MOST..=30.0).contains(&self.preamp_db) {
+            let shown = if self.preamp_db.is_finite() {
+                format!(" of {} dB", words_of(self.preamp_db))
+            } else {
+                String::new()
+            };
+            return refused(format!(
+                "This file's preamp{shown} is beyond what Stash takes (−{} dB to +30 dB).",
+                words_of(PREAMP_MOST)
+            ));
         }
         let boost = peak_of(&self.bands);
         if boost > BOOST_MOST + 1e-9 {
@@ -930,12 +1049,14 @@ fn filter(n: usize, value: &str) -> Result<FilterLine> {
     match kind {
         "PK" | "PEQ" | "Modal" => peak(n, rest).map(FilterLine::Band),
         "LSC" | "HSC" | "LS" | "HS" => shelf(n, kind, rest).map(FilterLine::Band),
-        _ => match unplayable(kind) {
-            Some(what) => refused(format!(
+        "None" => Ok(FilterLine::Over),
+        _ => {
+            let what = unplayable(kind).unwrap_or("a filter type Stash does not know");
+            let kind: String = kind.chars().take(20).collect();
+            refused(format!(
                 "Line {n} has {what} ({kind}). Stash's equalizer reads peaking (PK) and shelf (LS, HS, LSC, HSC) filters."
-            )),
-            None => Ok(FilterLine::Over),
-        },
+            ))
+        }
     }
 }
 
@@ -1088,7 +1209,7 @@ fn with_unit<'a>(words: &[&'a str], unit: &str) -> Option<&'a str> {
 fn frequency(text: &str) -> Option<f64> {
     let hz = number(text)?;
     let chars: Vec<char> = text.chars().collect();
-    let thousands = chars.len() >= 5 && !text.contains('e') && chars[chars.len() - 4] == '.';
+    let thousands = chars.len() >= 5 && !text.contains(['e', 'E']) && chars[chars.len() - 4] == '.';
     Some(if thousands { hz * 1000.0 } else { hz })
 }
 
@@ -1791,13 +1912,13 @@ mod tests {
 
     #[test]
     fn the_strings_mpv_reads_are_exact() {
-        // More bass alone: its shelf's whole +4 dB is reached at 0 Hz, so the room is 4 + 1 = 5 dB and the preamp
-        // 10^(−5/20) = 0.5623413251…, "0.562341325" to nine places. The graph after "%306%" is 306 bytes: the preamp
+        // More bass alone: its shelf's whole +4 dB is reached at 0 Hz, and its Q of 0.71 (a hair above 1/√2) rises a
+        // hair above that just past the corner, so the room is 5.00007 dB and the preamp "0.562337116". The graph after "%306%" is 306 bytes: the preamp
         // 19 + 123 (the glide with an 11-character gain) + 29, the shelves 50 and 54, aformat 28, and 3 commas.
         let more_bass = Chain::plan(&on(None, Tilt::More, Tilt::AsIs), Some(44_100)).unwrap();
         assert_eq!(
             more_bass.af(),
-            "@frames:lavfi=%22%asetnsamples=n=256:p=0,@eq:lavfi=%306%volume@pre=volume='if(isnan(volume)+lte(abs(0.562341325-volume),1024/sample_rate),0.562341325,volume+1024/sample_rate*sgn(0.562341325-volume))':eval=frame:precision=double,lowshelf@bass=f=105.000:t=q:w=0.7100:g=4.000:r=f64,highshelf@treble=f=6000.000:t=q:w=0.7100:g=0.000:r=f64,aformat@out=sample_fmts=fltp"
+            "@frames:lavfi=%22%asetnsamples=n=256:p=0,@eq:lavfi=%306%volume@pre=volume='if(isnan(volume)+lte(abs(0.562337116-volume),1024/sample_rate),0.562337116,volume+1024/sample_rate*sgn(0.562337116-volume))':eval=frame:precision=double,lowshelf@bass=f=105.000:t=q:w=0.7100:g=4.000:r=f64,highshelf@treble=f=6000.000:t=q:w=0.7100:g=0.000:r=f64,aformat@out=sample_fmts=fltp"
         );
         // A cut alone needs no room: the preamp is 1. Its graph is 358 bytes (the peak's 51 and one more comma).
         let cut = made_up(vec![pk(1000.0, -3.0, 1.41)], 0.0);
@@ -2127,10 +2248,10 @@ mod tests {
         assert_eq!(
             opened_output(
                 "ao/wasapi",
-                "Selecting device '{0.0.0.00000000}.{made-up-id}' (Headphones (USB Audio))\n"
+                "Selecting device '{made-up-guid}' (Headphones (USB Audio))\n"
             ),
             Some((
-                "wasapi/{0.0.0.00000000}.{made-up-id}".to_string(),
+                "wasapi/{made-up-guid}".to_string(),
                 "Headphones (USB Audio)".to_string()
             ))
         );
@@ -2146,5 +2267,168 @@ mod tests {
         ] {
             assert_eq!(opened_output(prefix, text), None, "{text}");
         }
+    }
+
+    /// The highest point by brute force: every 1/2000 octave from 1 Hz to half the rate, and 0 Hz.
+    fn brute_peak(bands: &[Band], rate: f64) -> f64 {
+        let held: Vec<&Band> = bands.iter().filter(|b| holds(rate, b.hz)).collect();
+        let at = |hz: f64| held.iter().map(|b| b.response_db(hz, rate)).sum::<f64>();
+        let steps = (2000.0 * (rate / 2.0).log2()).floor() as i32;
+        (0..=steps)
+            .map(|k| at(2f64.powf(f64::from(k) / 2000.0)))
+            .chain([at(0.0), at(rate / 2.0)])
+            .fold(f64::NEG_INFINITY, f64::max)
+    }
+
+    #[test]
+    fn the_peak_is_found_wherever_it_is() {
+        let shelf = |kind, hz, width, db| Band::new(kind, hz, width, db).unwrap();
+        // A high shelf keeps rising to half the rate, past what is heard: +12 dB at 19 kHz reaches 12 at 22.05 kHz.
+        let high = [shelf(Kind::HighShelf, 19_000.0, Width::Q(0.71), 12.0)];
+        let at_44 = peak_at(&high, 44_100.0);
+        assert!((at_44 - 12.0).abs() < 0.01, "{at_44}");
+        // So +30 dB at 20 kHz is refused: it boosts 30, not the 15 heard at 20 kHz.
+        let said = refusal(read_apo(
+            b"Filter 1: ON HSC Fc 20000 Hz Gain 30 dB Q 0.71\n",
+            "x.txt",
+        ));
+        assert!(said.starts_with("This file boosts up to 30"), "{said}");
+        // A steep shelf's bump falls between the grid's points; it is sought out there, within 0.01 dB of a search
+        // forty times finer, at every rate.
+        for bands in [
+            vec![shelf(Kind::LowShelf, 1000.0, Width::Q(30.0), 1.0)],
+            vec![
+                shelf(Kind::LowShelf, 1000.0, Width::Q(30.0), 1.0),
+                shelf(Kind::LowShelf, 1000.0, Width::Q(30.0), 1.0),
+            ],
+            vec![shelf(Kind::HighShelf, 3000.0, Width::Q(12.0), -6.0)],
+            vec![pk(1000.0, 6.0, 30.0), pk(1013.0, 6.0, 30.0)],
+        ] {
+            for rate in RATES {
+                let (found, brute) = (peak_at(&bands, rate), brute_peak(&bands, rate));
+                assert!(
+                    found >= brute - 0.01,
+                    "{bands:?} at {rate}: {found} against {brute}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_rate_that_leaves_a_cut_out_gets_its_own_room() {
+        // At 22.05 kHz the cut at 11.5 kHz is left out (0.49 of the rate is 10,804 Hz) while the boost below it
+        // stays: that file's curve rises higher than the room every song gets, so it gets more.
+        let c = made_up(vec![pk(10_000.0, 10.0, 0.7), pk(11_500.0, -10.0, 0.7)], 0.0);
+        let eq = on(Some(c), Tilt::AsIs, Tilt::AsIs);
+        let usual = Chain::plan(&eq, Some(44_100)).unwrap();
+        assert_eq!(usual.gain, 10f64.powf(-eq.room_db() / 20.0));
+        let low = Chain::plan(&eq, Some(22_050)).unwrap();
+        assert_eq!(low.slots.len(), 3, "the cut is left out");
+        let bands: Vec<Band> = low.slots.iter().map(|s| s.band).collect();
+        let peak = peak_at(&bands, 22_050.0);
+        assert!(peak > eq.room_db(), "{peak} against {}", eq.room_db());
+        assert!(peak + 20.0 * low.gain.log10() <= -MARGIN_DB + 1e-9);
+        // An unknown rate, and the usual ones, keep the one room.
+        assert_eq!(Chain::plan(&eq, None).unwrap().gain, usual.gain);
+        assert_eq!(Chain::plan(&eq, Some(96_000)).unwrap().gain, usual.gain);
+    }
+
+    #[test]
+    fn a_steep_shelf_s_bump_is_given_room_while_the_filters_change() {
+        // Two exact opposites: flat together, so no room and a preamp of 1. Sent one at a time, the first alone (the
+        // falling one) has a bump of several dB: the preamp goes down for the filters' change and back up after.
+        let steep = |db| Band::new(Kind::LowShelf, 1000.0, Width::Q(5.0), db).unwrap();
+        let c = made_up(vec![steep(-6.0), steep(6.0)], 0.0);
+        let b = Chain::plan(&on(Some(c), Tilt::AsIs, Tilt::AsIs), Some(44_100)).unwrap();
+        assert_eq!(fixed(b.gain, 9), fixed(1.0, 9));
+        for (from, to) in [(None, Some(&b)), (Some(&b), None)] {
+            let steps = transition(from, to);
+            play_on_paper(from, to, &steps);
+            let preamps = steps
+                .iter()
+                .filter(|s| matches!(s, Step::Send(cmds) if cmds[0].target == "volume@pre"))
+                .count();
+            assert_eq!(preamps, 2, "{steps:?}");
+        }
+        // Bass and Treble (Q 0.71) are taken as gentle: no dip for them.
+        let plain = Chain::plan(&on(None, Tilt::More, Tilt::More), Some(44_100)).unwrap();
+        let less = Chain::plan(&on(None, Tilt::Less, Tilt::More), Some(44_100)).unwrap();
+        let steps = transition(Some(&plain), Some(&less));
+        play_on_paper(Some(&plain), Some(&less), &steps);
+        assert!(!bumpy(&plain.slots[0].band));
+    }
+
+    #[test]
+    fn what_a_file_says_past_what_stash_takes_is_refused() {
+        // "E" is an exponent as "e" is: 1.5E1 Hz is 15 Hz, never 15 kHz by the thousands rule.
+        assert_eq!(frequency("1.5E1"), Some(15.0));
+        assert_eq!(frequency("1.5e1"), Some(15.0));
+        assert_eq!(frequency("1.000"), Some(1000.0));
+        // A preamp beyond −60 dB (or one that adds up past what a number holds) is refused.
+        let filter = "Filter 1: ON PK Fc 1000 Hz Gain -2 dB Q 1\n";
+        assert_eq!(
+            refusal(read_apo(
+                format!("Preamp: -61 dB\n{filter}").as_bytes(),
+                "x.txt"
+            )),
+            "This file's preamp of −61 dB is beyond what Stash takes (−60 dB to +30 dB)."
+        );
+        let huge = format!("Preamp: -1e308 dB\nPreamp: -1e308 dB\n{filter}");
+        assert_eq!(
+            refusal(read_apo(huge.as_bytes(), "x.txt")),
+            "This file's preamp is beyond what Stash takes (−60 dB to +30 dB)."
+        );
+        assert!(read_apo(format!("Preamp: -60 dB\n{filter}").as_bytes(), "x.txt").is_ok());
+        // A filter type Stash does not know is refused, not passed over (nothing is taken in part); "None" is
+        // passed over, as APO does.
+        assert_eq!(
+            refusal(read_apo(
+                b"Filter 1: ON pk Fc 1000 Hz Gain 2 dB Q 1\n",
+                "x.txt"
+            )),
+            "Line 1 has a filter type Stash does not know (pk). Stash's equalizer reads peaking (PK) and shelf (LS, HS, LSC, HSC) filters."
+        );
+        let none = read_apo(format!("Filter 2: ON None\n{filter}").as_bytes(), "x.txt").unwrap();
+        assert_eq!((none.bands.len(), none.passed_over), (1, 1));
+        // "Device: all" is every device, as "Channel: all" is every channel: nothing to refuse.
+        assert!(read_apo(format!("Device: all\n{filter}").as_bytes(), "x.txt").is_ok());
+        // A refused line is quoted cut short.
+        let long = format!("Include: {}\n{filter}", "a".repeat(5000));
+        let said = refusal(read_apo(long.as_bytes(), "x.txt"));
+        assert!(said.chars().count() < 200 && said.contains("…)"), "{said}");
+    }
+
+    #[test]
+    fn a_correction_that_cannot_be_read_again_is_kept_until_the_listener_changes_it() {
+        let source = "Filter 1: ON HP Fc 30 Hz\nFilter 2: ON PK Fc 1000 Hz Gain -2 dB Q 1\n";
+        let kept = serde_json::json!({
+            "v": 1,
+            "last": "wasapi/{a}",
+            "outputs": {
+                "wasapi/{a}": {
+                    "description": "Headphones (Test)",
+                    "on": true,
+                    "bass": "more",
+                    "treble": "as-is",
+                    "correction": {"name": "Old Phones", "file": "Old Phones.txt", "source": source}
+                }
+            }
+        })
+        .to_string();
+        let book = Book::from_json(&kept);
+        let here = &book.outputs["wasapi/{a}"];
+        assert!(!here.eq.on && here.eq.correction.is_none() && here.trouble.is_some());
+        // Kept again as it was (an automatic save: the output opened last, say), and said again at the next start.
+        let mut again = Book::from_json(&book.to_json());
+        assert_eq!(again, book);
+        assert!(again.to_json().contains("Old Phones"));
+        // Once the listener changes this output's equalizer, it goes.
+        let eq = Eq {
+            on: true,
+            bass: Tilt::Less,
+            ..again.get("wasapi/{a}")
+        };
+        again.put("wasapi/{a}", "Headphones (Test)", eq);
+        assert!(!again.to_json().contains("Old Phones"));
     }
 }

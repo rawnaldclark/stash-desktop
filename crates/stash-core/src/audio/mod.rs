@@ -29,6 +29,51 @@ pub enum Output {
 /// The environment variable that names the libmpv file to load.
 pub const LIBRARY_ENV: &str = "STASH_MPV_LIBRARY";
 
+/// The output the system would choose now for "the system's choice", by the engine's name for it ("wasapi/{id}"), as
+/// the engine finds it when it opens one: Windows' default output for music. None elsewhere, or when it cannot say.
+pub fn system_output() -> Option<String> {
+    #[cfg(windows)]
+    {
+        windows_default_output()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn windows_default_output() -> Option<String> {
+    use windows::Win32::Media::Audio::{
+        IMMDeviceEnumerator, MMDeviceEnumerator, eMultimedia, eRender,
+    };
+    use windows::Win32::System::Com::{
+        CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
+        CoUninitialize,
+    };
+    // SAFETY: COM is started for this thread for the call alone (and left as it was when it was started already in
+    // another mode); the interfaces are released before it is stopped, and the id the system wrote is freed once copied.
+    unsafe {
+        let started = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
+        let id = (|| {
+            let devices: IMMDeviceEnumerator =
+                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+            let device = devices.GetDefaultAudioEndpoint(eRender, eMultimedia).ok()?;
+            let id = device.GetId().ok()?;
+            let text = id.to_string().ok();
+            CoTaskMemFree(Some(id.0 as *const _));
+            text
+        })();
+        if started {
+            CoUninitialize();
+        }
+        // The engine names an output by the system's id without its "{0.0.0.00000000}." (measured).
+        let id = id?;
+        let id = id.strip_prefix("{0.0.0.00000000}.").unwrap_or(&id);
+        Some(format!("wasapi/{id}"))
+    }
+}
+
 /// The libmpv to load: the one [`LIBRARY_ENV`] names, else one beside the running program.
 pub fn find_library() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os(LIBRARY_ENV).map(PathBuf::from) {

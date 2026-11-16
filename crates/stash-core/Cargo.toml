@@ -19,5 +19,8 @@ url = "2.5.8"
 walkdir = "2.5.0"
 zip = { version = "9.6.0", default-features = false, features = ["deflate"] }
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Media_Audio", "Win32_System_Com"] }
+
 [dev-dependencies]
 flate2 = "1.1.11"

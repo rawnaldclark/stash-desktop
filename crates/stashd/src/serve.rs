@@ -996,11 +996,12 @@ impl Core {
                         // kept as the listener's own changes are.
                         on_equalizers: Some({
                             let library = Arc::clone(&library);
-                            Arc::new(move |book: &stash_core::eq::Book| {
+                            Arc::new(move |book: &dyn Fn() -> stash_core::eq::Book| {
+                                // Held first, then read: the same order as a request's change (library, then the
+                                // equalizer), so the newest book is the one kept.
+                                let mut library = library.lock().unwrap();
                                 let _ = library
-                                    .lock()
-                                    .unwrap()
-                                    .set_setting(crate::equalizer::SETTING, &book.to_json());
+                                    .set_setting(crate::equalizer::SETTING, &book().to_json());
                             })
                         }),
                         ..Settings::default()
