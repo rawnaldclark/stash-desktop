@@ -135,6 +135,9 @@ pub enum Trouble {
     Cancelled,
     /// In words, for the list.
     Failed(String),
+    /// Not the song's own trouble: the add-on's allowance is spent, or it (or the file's server) could not be reached
+    /// or is overwhelmed. The song waits its turn again, and saving waits a while before it asks again.
+    Held(String),
 }
 
 impl From<std::io::Error> for Trouble {
@@ -166,8 +169,14 @@ pub fn fetch(
     let mut answer = agent
         .get(url)
         .call()
-        .map_err(|e| Trouble::Failed(format!("the file could not be fetched: {e}")))?;
+        .map_err(|e| Trouble::Held(format!("the file could not be fetched: {e}")))?;
     let status = answer.status().as_u16();
+    // Too many asks, or a server in trouble: asked again later. Anything else is this file's own answer.
+    if status == 429 || status >= 500 {
+        return Err(Trouble::Held(format!(
+            "the file's server answered {status}"
+        )));
+    }
     if !(200..300).contains(&status) {
         return Err(Trouble::Failed(format!(
             "the file's server answered {status}"
@@ -197,7 +206,7 @@ pub fn fetch(
         }
         let n = body
             .read(&mut buffer)
-            .map_err(|e| Trouble::Failed(format!("the file stopped coming in: {e}")))?;
+            .map_err(|e| Trouble::Held(format!("the file stopped coming in: {e}")))?;
         if n == 0 {
             break;
         }

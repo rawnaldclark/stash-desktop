@@ -1225,7 +1225,7 @@ fn offline_route(state: &State, request: &mut Request, path: &str) -> Result<Opt
             .lock()
             .unwrap()
             .set_setting(OFFLINE_SETTING, if on { "1" } else { "0" })?;
-        state.offline.store(on, Ordering::Relaxed);
+        let was = state.offline.swap(on, Ordering::Relaxed);
         // Offline: what the engine was handed after the song playing is asked for again, so a song streamed from an
         // add-on that was about to start does not. The song playing plays to its end.
         if on && let Ok(player) = &state.player {
@@ -1235,6 +1235,11 @@ fn offline_route(state: &State, request: &mut Request, path: &str) -> Result<Opt
         if !on {
             state.scrobbling.ring(None);
             state.saving.ring();
+        }
+        // Every window reads its lists again: which songs are on this computer may have changed since it last did
+        // (songs saved in the meantime), and offline that decides what plays.
+        if was != on {
+            state.edited();
         }
     } else if *request.method() != Method::Get {
         return Ok(None);
@@ -2189,7 +2194,18 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((reply_json(200, json!({ "rows": rows })), false));
     }
     let response = match (request.method(), url.path()) {
-        (Method::Get, "/api/counts") => reply_json(200, json!(library().counts()?)),
+        (Method::Get, "/api/counts") => {
+            let library = library();
+            let mut counts = json!(library.counts()?);
+            // Whether the liked songs are kept on this computer (a playlist's row says so of itself).
+            counts["liked_kept"] = json!(
+                library
+                    .setting(stash_core::lists::DOWNLOAD_LIKED)?
+                    .as_deref()
+                    == Some("1")
+            );
+            reply_json(200, counts)
+        }
         // `here=1`: only the songs that play with no connection (Library › Songs, "On this computer").
         (Method::Get, "/api/tracks") if param("here").as_deref() == Some("1") => reply_json(
             200,

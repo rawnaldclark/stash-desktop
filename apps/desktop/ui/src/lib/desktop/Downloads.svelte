@@ -101,8 +101,11 @@
 		<div class="lib-actions">
 			<button type="button" class="act-play" aria-label="Play your downloads" disabled={!items.length} onclick={() => play(0)}><Icon name="play_arrow" /></button>
 			<span class="lib-count">{summary}</span>
-			{#if d.counts.failed}<button type="button" class="btn ghost" onclick={retry}>Try again</button>{/if}
+			{#if d.counts.failed || d.held}<button type="button" class="btn ghost" onclick={retry}>Try again</button>{/if}
 		</div>
+		{#if d.held}
+			<ul class="dl-why" role="status"><li>Saving waits: {d.held.why}. It tries again at {new Date(d.held.until_ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}, or now with Try again.</li></ul>
+		{/if}
 		{#if failed.length}
 			<ul class="dl-why">
 				{#each failed.slice(0, 3) as r (r.id)}<li><b>{r.title}</b> was not saved: {r.error ?? 'no reason was given'}.</li>{/each}

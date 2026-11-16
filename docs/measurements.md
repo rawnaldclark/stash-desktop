@@ -599,12 +599,12 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
   - the list's songs are saved as files;
   - so are songs that come onto the list later: added to it, liked, or picked by a smart playlist's rules.
 
-  The kept lists are looked at whenever the likes or the playlists change, and every 30 seconds while nothing is being saved. Next to the switch, the list says how far it is: "Saving: 3 of 40 on this computer", "On this computer", and how many could not be saved.
-- **A song that could not be saved is not tried again on its own.** Each try may spend an add-on's allowance. The listener can ask for it again in Library › Downloads.
+  The kept lists are looked at whenever the likes or the playlists change, and every 30 seconds while a smart playlist is kept. Next to the switch, the list says how far it is: "Saving: 3 of 40 on this computer", "On this computer", and how many could not be saved.
+- **A song that could not be saved, or that the listener took off this computer, is not tried again on its own.** Each try may spend an add-on's allowance. The listener can ask for it again (Library › Downloads, or the song's menu).
 - **Turning the switch off saves no more of the list.** Its songs still waiting are taken off the list, unless another kept list holds them; the one coming in finishes, since what it cost is spent. Songs already saved stay; Library › Downloads takes them off. Offline, nothing is fetched and the list waits.
 - **A kept list is marked** with a small arrow in the sidebar and on its card (Library and Home).
 - **A song that already plays from a copy kept from playing it** is saved from that copy, and no add-on is asked (as before for any save).
-- **Schema 15** adds `playlists.download`. The liked songs' choice is the setting `download.liked`.
+- **Schema 15** adds `playlists.download`. The liked songs' choice is the setting `download.liked`. Schema 16 adds `download_declined` and `downloads.by_list` (see the review fixes below).
 
 ### Checked
 
@@ -624,9 +624,28 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
   - Turned off, the playlist said "Trip is no longer kept on this computer. Songs saved stay (Library › Downloads)", its mark left the sidebar, and the four files saved were still there.
   - No errors in the page.
 
+### Review fixes
+
+A review of the work above found these, all fixed:
+
+- **A song the listener took off came back.** "Remove from this computer" or "Don't save" on a kept list's song deleted its row, and the next look at the lists queued it again, spending the allowance each time. A song taken off is now remembered (`download_declined`, schema 16). Kept lists leave it be, and the list's line says "2 taken off by you". Asking for it by hand clears that.
+- **Trouble with an add-on failed every waiting song.** An allowance used up, a rate limit, an add-on that could not be reached, or a file server's 429 or 5xx each marked the song "not saved", and saving went straight on to ask for the next one. Now none of these is the song's fault. The song waits its turn again, first in line, and saving waits 1 minute, then twice as long each time it is held again, up to an hour. Library › Downloads says "Saving waits: your allowance with the add-on is used up. It tries again at 14:05, or now with Try again". A song saved, or Try again, ends the wait.
+- **Songs that left a kept list were still saved.** This happened when a kept playlist was deleted, a song was taken off it, a song was unliked, or a smart playlist's rules changed. A song a list put on the downloads now says so (`downloads.by_list`, schema 16). After any change to the likes or the playlists, the lists are looked at before the next song is fetched, and waiting songs that no kept list holds are taken off. Songs asked for by hand stay whatever the lists hold.
+- **The look at the lists cost one statement per song.** With 50,000 liked songs that was 50,000 statements under the library's lock, every 30 seconds. It is now a few set-wise statements, and the 30-second look runs only while a smart playlist is kept: other lists change only through an edit, which looks at once. How far a list is comes from one query, however long the list. Whether the liked songs are kept rides with the library's counts.
+- **Songs saved since the window read its lists showed as not on this computer when offline.** Going offline now has every window read its lists again. Up next takes the queue's word on each song over the window's older copy.
+- **Each flip of the switch had the window read every like again.** The answer now carries the core's count of changes, so the window that flipped it updates its own marks.
+
+Checked:
+
+- **By the tests:**
+  - In the first test above, a song saved for the kept playlist was taken off this computer. It did not come back after another change, and the list said `declined: 1`. Asked for by hand, it was saved again.
+  - In the second, the playlist was kept again and deleted while its songs waited. The one coming in finished and the other was taken off: three songs saved in all, not four.
+  - `an_add_on_whose_allowance_is_spent_holds_saving_and_fails_nothing`: the demo add-on refused every download as `quota_exceeded`. Saving said it waited because the allowance is used up. Half a second later all three songs were still waiting, none "not saved". With the allowance back and Try again pressed, all three were saved and the wait was gone.
+- **On the built page:** the check above was run again with a fifth song, liked, which was saved only after the page had read the likes. Turned offline from Settings, without a reload, the Liked list dimmed 0 of its 2 songs.
+
 ### Not covered yet
 
-- A song kept for one list and also saved by hand is taken off the list with that list if it is still waiting.
+- A smart playlist whose songs change by themselves (random order, or rules by date) saves the new songs each time it changes. Keeping the daily mix saves up to its length in new songs a day, until every song it can pick is saved. Songs that leave it stay saved.
 
 ## 25. On this computer, in Library › Songs
 

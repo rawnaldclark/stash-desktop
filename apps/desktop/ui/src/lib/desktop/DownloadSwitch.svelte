@@ -3,7 +3,7 @@
      songs saved stay (Library › Downloads takes them off). -->
 <script lang="ts">
 	import { onDestroy } from 'svelte';
-	import { likedKept } from '../app';
+	import { keptFlipped, likedKept } from '../app';
 	import * as core from '../core';
 	import Icon from '../ui/Icon.svelte';
 	import { ui } from '../ui/state.svelte';
@@ -30,8 +30,8 @@
 		if (gone || mine !== asked) return;
 		kept = now;
 		if (of === 'liked') likedKept.set(now.on);
-		// While songs are coming in, how far is read again now and then.
-		if (now.on && now.waiting > 0) timer = setTimeout(() => void read(), 2000);
+		// While songs are coming in, how far is read again now and then (offline, nothing comes in).
+		if (now.on && now.waiting > 0 && !ui.offline) timer = setTimeout(() => void read(), 2000);
 	}
 	$effect(() => {
 		void list;
@@ -50,7 +50,7 @@
 			const on = !kept.on;
 			const of = list;
 			const now = await core.setListDownload(of, on);
-			if (of === 'liked') likedKept.set(now.on);
+			keptFlipped(of, now.on, now.edits);
 			if (gone || of !== list) return;
 			kept = now;
 			ui.toast(on ? `${name} is kept on this computer: its songs are being saved, and songs added later will be too` : `${name} is no longer kept on this computer. Songs saved stay (Library › Downloads)`);
@@ -67,7 +67,8 @@
 		const of = `${kept.here} of ${kept.songs}`;
 		if (kept.waiting > 0) return `Saving: ${of} on this computer`;
 		const done = kept.here >= kept.songs ? 'On this computer' : `${of} on this computer`;
-		return kept.failed > 0 ? `${done} · ${kept.failed} could not be saved` : done;
+		const notes = [kept.failed > 0 ? `${kept.failed} could not be saved` : '', kept.declined > 0 ? `${kept.declined} taken off by you` : ''].filter(Boolean);
+		return [done, ...notes].join(' · ');
 	});
 </script>
 

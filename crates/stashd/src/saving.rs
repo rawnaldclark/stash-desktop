@@ -38,7 +38,23 @@ pub(crate) struct Saving {
     bell: (Mutex<bool>, Condvar),
     /// The lists kept on this computer are to be looked at again.
     lists: AtomicBool,
+    /// Saving waits after trouble that is not a song's own (see [`Held`]).
+    held: Mutex<Option<Held>>,
 }
+
+/// Saving waits: the add-on's allowance is spent, or it (or a file's server) could not be reached. Nothing is asked
+/// until `until`; then the song first in line is tried again. Each time it is held again it waits twice as long, up to
+/// an hour; a song saved ends it, and so does the listener's "Try again".
+struct Held {
+    why: String,
+    until: Instant,
+    until_ms: i64,
+    wait: Duration,
+}
+
+/// How long saving first waits after trouble with an add-on, and the longest it waits.
+const HELD_FIRST: Duration = Duration::from_secs(60);
+const HELD_MOST: Duration = Duration::from_secs(3600);
 
 #[derive(Clone, Copy, serde::Serialize)]
 struct Progress {
@@ -53,6 +69,43 @@ impl Saving {
         self.lists.store(true, Ordering::Relaxed);
         *self.bell.0.lock().unwrap() = true;
         self.bell.1.notify_all();
+    }
+
+    /// Saving waits after trouble that is not the song's own; held again, twice as long.
+    fn hold(&self, why: String) {
+        let mut held = self.held.lock().unwrap();
+        let wait = held
+            .as_ref()
+            .map_or(HELD_FIRST, |h| (h.wait * 2).min(HELD_MOST));
+        *held = Some(Held {
+            why,
+            until: Instant::now() + wait,
+            until_ms: now_ms() + wait.as_millis() as i64,
+            wait,
+        });
+    }
+
+    /// The trouble is over (a song was saved, or the listener asked to try again).
+    fn release(&self) {
+        *self.held.lock().unwrap() = None;
+    }
+
+    /// How long saving still waits, if it does.
+    fn held_for(&self) -> Option<Duration> {
+        self.held
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|h| h.until.checked_duration_since(Instant::now()))
+            .filter(|left| !left.is_zero())
+    }
+
+    /// For the list: why saving waits, and until when (null when it does not).
+    fn held_json(&self) -> Value {
+        match &*self.held.lock().unwrap() {
+            Some(h) if h.until > Instant::now() => json!({ "why": h.why, "until_ms": h.until_ms }),
+            _ => Value::Null,
+        }
     }
 
     fn wait(&self, at_most: Duration) {
@@ -93,26 +146,30 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
             state.saving.wait(Duration::from_secs(2));
             continue;
         }
-        let next = state.library.lock().unwrap().next_download().ok().flatten();
-        if let Some(id) = next {
-            save(state, id, stop);
+        // After trouble with an add-on, nothing is asked until it is time.
+        if let Some(left) = state.saving.held_for() {
+            state.saving.wait(left.min(Duration::from_secs(2)));
             continue;
         }
-        // Nothing to save: songs that came onto a list kept on this computer are put on the list.
+        // The downloads are brought into line with the lists kept on this computer: first of all, after any change to
+        // the likes or the playlists (before the next song is fetched, so a song that left them is not), and now and
+        // then while a smart playlist is kept (its songs change as songs are played).
         let changed = state.saving.lists.swap(false, Ordering::Relaxed);
-        if changed || looked.is_none_or(|at| at.elapsed() >= LISTS_EVERY) {
-            looked = Some(Instant::now());
+        let due = looked.is_none_or(|at| at.elapsed() >= LISTS_EVERY);
+        if changed || due {
             let mut library = state.library.lock().unwrap();
-            let asked = library
-                .kept_downloaded_ids()
-                .and_then(|ids| library.ask_new_downloads(&ids, now_ms()));
-            match asked {
-                Ok(0) => {}
-                Ok(_) => continue,
-                Err(e) => eprintln!("the lists kept on this computer were not read: {e:#}"),
+            if (changed || looked.is_none() || library.kept_smart_lists().unwrap_or(false))
+                && let Err(e) = library.reconcile_kept(now_ms())
+            {
+                eprintln!("the lists kept on this computer were not read: {e:#}");
             }
+            looked = Some(Instant::now());
         }
-        state.saving.wait(Duration::from_secs(2));
+        let next = state.library.lock().unwrap().next_download().ok().flatten();
+        match next {
+            Some(id) => save(state, id, stop),
+            None => state.saving.wait(Duration::from_secs(2)),
+        }
     }
 }
 
@@ -120,8 +177,15 @@ fn save(state: &State, id: i64, stop: &AtomicBool) {
     let outcome = fetch_and_keep(state, id, stop);
     *state.saving.now.lock().unwrap() = None;
     match outcome {
+        Ok(()) => state.saving.release(),
         Err(Trouble::Failed(why)) => {
             let _ = state.library.lock().unwrap().download_failed(id, &why);
+        }
+        // Not the song's own trouble: it waits its turn again, and saving waits before it asks again (an add-on whose
+        // allowance is spent is not asked for every song on the list).
+        Err(Trouble::Held(why)) => {
+            let _ = state.library.lock().unwrap().download_held(id);
+            state.saving.hold(why);
         }
         // Stopped because Stash went offline: it waits for the connection, first on the list as it was.
         Err(Trouble::Cancelled) if crate::serve::offline(state) => {
@@ -207,7 +271,13 @@ fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<(), Troub
             |addon| addon.offers_download(),
             |addon, _, track| addon.download(track, &StreamRequest::default()),
         )
-        .map_err(|failure| Trouble::Failed(failure.message))?;
+        .map_err(|failure| {
+            if failure.miss {
+                Trouble::Failed(failure.message)
+            } else {
+                Trouble::Held(failure.message)
+            }
+        })?;
         let _ = state.library.lock().unwrap().note_addon_use(
             &addon,
             stash_core::usage::Given::Download,
@@ -357,7 +427,7 @@ pub(crate) fn kept_route(
             Some(id) => library.playlist_track_ids(id, 0, usize::MAX >> 1),
         }
     };
-    let kept = match on {
+    let changed = match on {
         Some(on) if on != kept => {
             match playlist {
                 None => library.set_setting(
@@ -368,28 +438,22 @@ pub(crate) fn kept_route(
                     library.set_playlist_download(id, on)?;
                 }
             }
-            let songs = ids(&library)?;
-            if on {
-                library.ask_new_downloads(&songs, now_ms())?;
-            } else {
-                let still: std::collections::HashSet<i64> =
-                    library.kept_downloaded_ids()?.into_iter().collect();
-                let waiting: Vec<i64> =
-                    songs.into_iter().filter(|id| !still.contains(id)).collect();
-                library.unask_downloads(&waiting)?;
-            }
-            on
+            // Kept: its songs are put on the list at once. Let go: its songs still waiting leave (unless another kept
+            // list holds them, or they were asked for by hand).
+            library.reconcile_kept(now_ms())?;
+            Some(on)
         }
-        _ => kept,
+        _ => None,
     };
     let progress = library.download_progress(&ids(&library)?)?;
     drop(library);
-    if on.is_some() {
-        // The playlists' rows say which are kept: every window reads them again.
-        state.edited();
-    }
     let mut answer = json!(progress);
-    answer["on"] = json!(kept);
+    answer["on"] = json!(changed.unwrap_or(kept));
+    if changed.is_some() {
+        // The playlists' rows say which are kept: other windows read them again; this one has its answer.
+        state.edited();
+        answer["edits"] = json!(state.edits.load(std::sync::atomic::Ordering::Relaxed));
+    }
     Ok(Some(reply_json(200, answer)))
 }
 
@@ -408,6 +472,7 @@ pub(crate) fn route(
             "rows": library.downloads_at(offset, limit)?,
             "counts": library.download_counts()?,
             "now": *state.saving.now.lock().unwrap(),
+            "held": state.saving.held_json(),
             "folder": folder(&library).to_string_lossy(),
         }))
     };
@@ -473,6 +538,8 @@ pub(crate) fn route(
                 .lock()
                 .unwrap()
                 .retry_downloads(&ids, now_ms())?;
+            // The listener asks to try again: saving does not wait out trouble it had with an add-on.
+            state.saving.release();
             state.saving.ring();
             Ok(Some(reply_json(200, listed(state, 0, 0)?)))
         }

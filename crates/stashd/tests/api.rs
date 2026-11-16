@@ -166,7 +166,7 @@ fn a_client_reads_the_library_and_drives_the_player_over_http() {
         client.get("/api/counts"),
         (
             200,
-            json!({ "tracks": 5, "albums": 0, "artists": 1, "liked": 0, "playlists": 0 })
+            json!({ "tracks": 5, "albums": 0, "artists": 1, "liked": 0, "playlists": 0, "liked_kept": false })
         )
     );
     let (_, page) = client.get("/api/tracks?offset=1&limit=2");
@@ -4071,14 +4071,14 @@ fn a_list_kept_on_this_computer_saves_its_songs_and_those_that_come_later() {
     // Not kept: nothing is saved.
     assert_eq!(
         kept(&road_kept),
-        json!({ "on": false, "songs": 1, "here": 0, "waiting": 0, "failed": 0 })
+        json!({ "on": false, "songs": 1, "here": 0, "waiting": 0, "failed": 0 , "declined": 0 })
     );
     // Kept: its song is saved, and its row says so.
     let on = client.post(&road_kept, json!({ "on": true }));
     assert_eq!(on["on"], true);
     assert_eq!(
         settled(&road_kept),
-        json!({ "on": true, "songs": 1, "here": 1, "waiting": 0, "failed": 0 })
+        json!({ "on": true, "songs": 1, "here": 1, "waiting": 0, "failed": 0 , "declined": 0 })
     );
     let (_, lists) = client.get("/api/playlists");
     let row = lists["rows"]
@@ -4097,6 +4097,23 @@ fn a_list_kept_on_this_computer_saves_its_songs_and_those_that_come_later() {
     );
     assert_eq!(settled(&road_kept)["here"], 2);
 
+    // Taken off this computer by the listener: the kept list does not put it back (each try may cost the add-on's
+    // allowance), though the lists are looked at again after any change. Asked for by hand, it comes back.
+    client.post("/api/downloads/remove", json!({ "ids": [foxtrot] }));
+    assert!(!saved.join("Unknown artist").join("foxtrot.wav").exists());
+    client.post("/api/tracks/like", json!({ "id": echo, "liked": true }));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        kept(&road_kept),
+        json!({ "on": true, "songs": 2, "here": 1, "waiting": 0, "failed": 0, "declined": 1 })
+    );
+    client.post("/api/downloads", json!({ "ids": [foxtrot] }));
+    assert_eq!(
+        settled(&road_kept),
+        json!({ "on": true, "songs": 2, "here": 2, "waiting": 0, "failed": 0, "declined": 0 })
+    );
+    client.post("/api/tracks/like", json!({ "id": echo, "liked": false }));
+
     // The liked songs, kept: the liked ones are saved, and a song liked later.
     client.post("/api/tracks/like", json!({ "id": golf, "liked": true }));
     assert_eq!(
@@ -4107,7 +4124,7 @@ fn a_list_kept_on_this_computer_saves_its_songs_and_those_that_come_later() {
     client.post("/api/tracks/like", json!({ "id": hotel, "liked": true }));
     assert_eq!(
         settled("/api/liked/download"),
-        json!({ "on": true, "songs": 2, "here": 2, "waiting": 0, "failed": 0 })
+        json!({ "on": true, "songs": 2, "here": 2, "waiting": 0, "failed": 0 , "declined": 0 })
     );
 
     // A song that cannot be saved (the add-on has lost it) is said so, and is not tried again on its own: keeping the
@@ -4134,7 +4151,7 @@ fn a_list_kept_on_this_computer_saves_its_songs_and_those_that_come_later() {
     std::thread::sleep(Duration::from_millis(600));
     assert_eq!(
         kept(&road_kept),
-        json!({ "on": false, "songs": 4, "here": 2, "waiting": 0, "failed": 1 })
+        json!({ "on": false, "songs": 4, "here": 2, "waiting": 0, "failed": 1 , "declined": 0 })
     );
     assert!(saved.join("Unknown artist").join("foxtrot.wav").is_file());
 
@@ -4250,7 +4267,7 @@ fn letting_a_list_go_takes_its_waiting_songs_off_the_list() {
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
         client.get(&slow_kept).1,
-        json!({ "on": false, "songs": 4, "here": 2, "waiting": 0, "failed": 0 })
+        json!({ "on": false, "songs": 4, "here": 2, "waiting": 0, "failed": 0 , "declined": 0 })
     );
     let (_, list) = client.get("/api/downloads");
     let mut states: Vec<(i64, String)> = list["rows"]
@@ -4270,6 +4287,129 @@ fn letting_a_list_go_takes_its_waiting_songs_off_the_list() {
         vec![(alpha, "saved".to_string()), (delta, "saved".to_string())],
         "{list}"
     );
+
+    // Kept again, then deleted while its songs wait: they are taken off the list too (the one coming in finishes).
+    let again = client.post(&slow_kept, json!({ "on": true }));
+    assert_eq!(again["waiting"], 2, "{again}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while client.get("/api/downloads").1["counts"]["saving"] != 1 {
+        assert!(Instant::now() < deadline, "nothing came in");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    client.post(&format!("/api/playlists/{slow}/delete"), json!({}));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let (_, list) = client.get("/api/downloads");
+        if list["counts"]["queued"] == 0 && list["counts"]["saving"] == 0 {
+            // Alpha and delta from before, and the one that was coming in.
+            assert_eq!(list["counts"]["saved"], 3, "{list}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "still saving: {list}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let _ = (bravo, charlie);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_add_on_whose_allowance_is_spent_holds_saving_and_fails_nothing() {
+    let dir = std::env::temp_dir().join(format!("stash-api-held-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (served, saved) = (dir.join("Served"), dir.join("Saved"));
+    std::fs::create_dir_all(&served).unwrap();
+    for name in ["alpha", "bravo", "charlie"] {
+        silence(&served.join(format!("{name}.wav")));
+    }
+    let addon = DemoAddon::bind(&served, 0, Duration::ZERO).unwrap();
+    let (link, spent) = (addon.link(), addon.allowance_spent());
+    std::thread::spawn(move || addon.run());
+    let core = Core::bind(Options {
+        db: dir.join("library.db"),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: None,
+        mpv: None,
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    client.post(
+        "/api/downloads/folder",
+        json!({ "folder": saved.to_string_lossy() }),
+    );
+    client.post("/api/addons", json!({ "link": link }));
+    let keep = |title: &str| -> i64 {
+        let (_, found) = client.get(&format!(
+            "/api/addons/search?q={title}&addon=demo.folder&limit=1"
+        ));
+        let track = found["groups"][0]["tracks"][0].clone();
+        client.post(
+            "/api/tracks/keep",
+            json!({ "addon": "demo.folder", "track": track }),
+        )["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let ids = ["alpha", "bravo", "charlie"].map(keep);
+    let list = client.post("/api/playlists", json!({ "name": "Spent" }))["id"]
+        .as_i64()
+        .unwrap();
+    client.post(&format!("/api/playlists/{list}/add"), json!({ "ids": ids }));
+
+    // The allowance is spent: the first song is refused, and saving waits instead of asking for every song. Nothing
+    // is marked as not saved, so the kept list is not left short.
+    spent.store(true, std::sync::atomic::Ordering::Relaxed);
+    client.post(
+        &format!("/api/playlists/{list}/download"),
+        json!({ "on": true }),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let held = loop {
+        let (_, now) = client.get("/api/downloads");
+        if !now["held"].is_null() {
+            break now;
+        }
+        assert!(Instant::now() < deadline, "saving did not wait: {now}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        held["held"]["why"].as_str().unwrap().contains("allowance"),
+        "{held}"
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    let (_, now) = client.get("/api/downloads");
+    assert_eq!(
+        (
+            &now["counts"]["queued"],
+            &now["counts"]["failed"],
+            &now["counts"]["saved"]
+        ),
+        (&json!(3), &json!(0), &json!(0)),
+        "{now}"
+    );
+    assert!(now["held"]["until_ms"].as_i64().unwrap() > 0, "{now}");
+
+    // The allowance is back and the listener tries again: saving goes on at once, and every song is saved.
+    spent.store(false, std::sync::atomic::Ordering::Relaxed);
+    client.post("/api/downloads/retry", json!({}));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let (_, now) = client.get("/api/downloads");
+        if now["counts"]["saved"] == 3 {
+            assert!(now["held"].is_null(), "{now}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "still waiting: {now}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

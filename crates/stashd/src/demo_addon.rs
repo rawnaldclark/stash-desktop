@@ -34,6 +34,9 @@ pub struct DemoAddon {
     eclipse: bool,
     /// Answer "do you have this song". Without it the add-on only searches and streams, as many do.
     resolves: bool,
+    /// The listener's allowance is spent: every stream and download is refused as the contract says (to try what Stash
+    /// does then). Shared, so it can be switched while the add-on runs.
+    spent: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn header(name: &str, value: &str) -> Header {
@@ -141,7 +144,13 @@ impl DemoAddon {
             delay,
             eclipse,
             resolves,
+            spent: Default::default(),
         })
+    }
+
+    /// Switches the allowance spent (true) or back (false), also once the add-on runs.
+    pub fn allowance_spent(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.spent.clone()
     }
 
     pub fn tracks(&self) -> usize {
@@ -260,6 +269,14 @@ impl DemoAddon {
             .or_else(|| path.strip_prefix("/download/").filter(|_| !self.eclipse))
         {
             std::thread::sleep(self.delay);
+            if self.spent.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = request.respond(refusal(
+                    429,
+                    "quota_exceeded",
+                    "your allowance for today is used up",
+                ));
+                return;
+            }
             let Some(row) = id.parse::<i64>().ok().and_then(|id| self.rows.get(&id)) else {
                 let _ = request.respond(refusal(404, "not_found", "no such track"));
                 return;

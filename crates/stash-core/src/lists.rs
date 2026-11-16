@@ -26,6 +26,8 @@ pub struct DownloadProgress {
     pub here: u64,
     pub waiting: u64,
     pub failed: u64,
+    /// Songs the listener took off the downloads: a kept list leaves them be.
+    pub declined: u64,
 }
 
 /// The file's own limits, kept by this writer too.
@@ -229,7 +231,9 @@ impl Library {
     // ---- Downloads
 
     /// Puts songs on the list to be saved as files: songs of the library that are not files already. A song that
-    /// failed before is tried again; one queued, saving or saved stays as it is. Answers how many were put on it.
+    /// failed before is tried again; one queued, saving or saved stays as it is. Asked for by hand, a song stays on
+    /// the list whatever the lists kept on this computer hold, and one the listener took off before is theirs to save
+    /// again. Answers how many were put on it.
     pub fn ask_downloads(&mut self, ids: &[i64], now_ms: i64) -> Result<usize> {
         let tx = self.conn.transaction()?;
         let mut queued = 0;
@@ -240,48 +244,84 @@ impl Library {
                  ON CONFLICT(track_id) DO UPDATE SET state = 'queued', error = NULL, asked_at = excluded.asked_at
                  WHERE downloads.state = 'failed'",
             )?;
+            let mut claim = tx.prepare("UPDATE downloads SET by_list = 0 WHERE track_id = ?1")?;
+            let mut welcome = tx.prepare("DELETE FROM download_declined WHERE track_id = ?1")?;
             for id in ids {
                 queued += ask.execute(params![id, now_ms])?;
+                claim.execute([id])?;
+                welcome.execute([id])?;
             }
         }
         tx.commit()?;
         Ok(queued)
     }
 
-    /// Puts songs on the list as [`Library::ask_downloads`] does, but leaves alone every song that has been on it: one
-    /// that could not be saved is not tried again, so a list kept on this computer does not spend an add-on's allowance
-    /// on the same song again and again (the listener can ask for it again). Answers how many were put on it.
-    pub fn ask_new_downloads(&mut self, ids: &[i64], now_ms: i64) -> Result<usize> {
+    /// Brings the downloads into line with the lists kept on this computer (the liked songs when they are, each
+    /// playlist that is; a smart playlist's songs as its rules pick them now). Their songs that are not files and have
+    /// never been on the downloads are put on it; songs a list put there that still wait, but are on no kept list any
+    /// more, are taken off. A song that could not be saved, or that the listener took off, is left alone, so a kept
+    /// list does not spend an add-on's allowance on it again and again (the listener can ask for it again). A song
+    /// asked for by hand stays whatever the lists hold. Answers how many were put on and how many taken off.
+    pub fn reconcile_kept(&mut self, now_ms: i64) -> Result<(usize, usize)> {
+        let smart: Vec<i64> = self
+            .conn
+            .prepare_cached("SELECT id FROM playlists WHERE download = 1 AND rules IS NOT NULL")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut picked = Vec::new();
+        for list in smart {
+            picked.extend(self.playlist_track_ids(list, 0, usize::MAX >> 1)?);
+        }
+        let liked = self.setting(DOWNLOAD_LIKED)?.as_deref() == Some("1");
         let tx = self.conn.transaction()?;
-        let mut queued = 0;
-        {
-            let mut ask = tx.prepare(
-                "INSERT INTO downloads(track_id, state, asked_at)
-                 SELECT id, 'queued', ?2 FROM tracks WHERE id = ?1 AND origin <> 'file'
-                 ON CONFLICT(track_id) DO NOTHING",
+        tx.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS kept_now(id INTEGER PRIMARY KEY);
+             DELETE FROM temp.kept_now;",
+        )?;
+        if liked {
+            tx.execute(
+                "INSERT OR IGNORE INTO temp.kept_now(id) SELECT id FROM tracks WHERE liked_at_ms IS NOT NULL",
+                [],
             )?;
-            for id in ids {
-                queued += ask.execute(params![id, now_ms])?;
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO temp.kept_now(id)
+             SELECT i.track_id FROM playlist_items i JOIN playlists p ON p.id = i.playlist_id
+             WHERE p.download = 1 AND p.rules IS NULL",
+            [],
+        )?;
+        {
+            let mut put = tx.prepare("INSERT OR IGNORE INTO temp.kept_now(id) VALUES (?1)")?;
+            for id in picked {
+                put.execute([id])?;
             }
         }
+        let added = tx.execute(
+            "INSERT INTO downloads(track_id, state, asked_at, by_list)
+             SELECT k.id, 'queued', ?1, 1 FROM temp.kept_now k JOIN tracks t ON t.id = k.id
+             WHERE t.origin <> 'file'
+               AND NOT EXISTS (SELECT 1 FROM downloads d WHERE d.track_id = k.id)
+               AND NOT EXISTS (SELECT 1 FROM download_declined x WHERE x.track_id = k.id)",
+            [now_ms],
+        )?;
+        let dropped = tx.execute(
+            "DELETE FROM downloads WHERE state = 'queued' AND by_list = 1
+               AND track_id NOT IN (SELECT id FROM temp.kept_now)",
+            [],
+        )?;
+        tx.execute("DELETE FROM temp.kept_now", [])?;
         tx.commit()?;
-        Ok(queued)
+        Ok((added, dropped))
     }
 
-    /// Takes songs off the list that are still waiting to be saved (the one coming in is let finish: what it cost is
-    /// spent). Answers how many were taken off.
-    pub fn unask_downloads(&mut self, ids: &[i64]) -> Result<usize> {
-        let tx = self.conn.transaction()?;
-        let mut dropped = 0;
-        {
-            let mut drop =
-                tx.prepare("DELETE FROM downloads WHERE track_id = ?1 AND state = 'queued'")?;
-            for id in ids {
-                dropped += drop.execute([id])?;
-            }
-        }
-        tx.commit()?;
-        Ok(dropped)
+    /// Whether a smart playlist is kept on this computer. Its songs change as songs are played, with no edit to say
+    /// so, and the kept lists are looked at now and then only for it.
+    pub fn kept_smart_lists(&self) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM playlists WHERE download = 1 AND rules IS NOT NULL)",
+            [],
+            |r| r.get(0),
+        )?)
     }
 
     /// Keeps playlist `id` on this computer, or stops. False when there is no such playlist.
@@ -302,55 +342,30 @@ impl Library {
             .optional()?)
     }
 
-    /// The songs of every list kept on this computer: the liked songs when they are, and each playlist that is (a
-    /// smart playlist's, as its rules pick them now).
-    pub fn kept_downloaded_ids(&self) -> Result<Vec<i64>> {
-        let mut ids = Vec::new();
-        if self.setting(DOWNLOAD_LIKED)?.as_deref() == Some("1") {
-            ids.extend(self.liked_ids_at(0, usize::MAX >> 1)?);
-        }
-        let lists: Vec<i64> = self
-            .conn
-            .prepare_cached("SELECT id FROM playlists WHERE download = 1")?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        for list in lists {
-            ids.extend(self.playlist_track_ids(list, 0, usize::MAX >> 1)?);
-        }
-        ids.sort_unstable();
-        ids.dedup();
-        Ok(ids)
-    }
-
     /// How far these songs are on this computer: how many play with no connection, how many wait to be saved (or are
-    /// coming in), and how many could not be saved.
+    /// coming in), how many could not be saved, and how many the listener took off. One query, however long the list.
     pub fn download_progress(&self, ids: &[i64]) -> Result<DownloadProgress> {
+        let list = serde_json::to_string(ids).unwrap_or_else(|_| "[]".into());
         let mut stmt = self.conn.prepare_cached(concat!(
-            "SELECT ",
+            "SELECT COALESCE(SUM(",
             here!(),
-            ", (SELECT d.state FROM downloads d WHERE d.track_id = t.id) FROM tracks t WHERE t.id = ?1"
+            "), 0),
+                    COALESCE(SUM(d.state IN ('queued', 'saving')), 0),
+                    COALESCE(SUM(d.state = 'failed'), 0),
+                    COALESCE(SUM(x.track_id IS NOT NULL), 0)
+             FROM json_each(?1) j JOIN tracks t ON t.id = j.value
+             LEFT JOIN downloads d ON d.track_id = t.id
+             LEFT JOIN download_declined x ON x.track_id = t.id"
         ))?;
-        let mut progress = DownloadProgress {
+        let (here, waiting, failed, declined): (i64, i64, i64, i64) =
+            stmt.query_row([list], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        Ok(DownloadProgress {
             songs: ids.len() as u64,
-            ..DownloadProgress::default()
-        };
-        for id in ids {
-            let found: Option<(bool, Option<String>)> = stmt
-                .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
-                .optional()?;
-            let Some((here, state)) = found else {
-                continue;
-            };
-            if here {
-                progress.here += 1;
-            }
-            match state.as_deref() {
-                Some("queued" | "saving") => progress.waiting += 1,
-                Some("failed") => progress.failed += 1,
-                _ => {}
-            }
-        }
-        Ok(progress)
+            here: here as u64,
+            waiting: waiting as u64,
+            failed: failed as u64,
+            declined: declined as u64,
+        })
     }
 
     /// The next song to save, now marked as saving; the first asked for first.
@@ -370,6 +385,16 @@ impl Library {
             )?;
         }
         Ok(next)
+    }
+
+    /// The song coming in waits its turn again, first in line (not its own trouble: the add-on's allowance is spent,
+    /// or it could not be reached).
+    pub fn download_held(&mut self, id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE downloads SET state = 'queued' WHERE track_id = ?1 AND state = 'saving'",
+            [id],
+        )?;
+        Ok(())
     }
 
     /// Songs that were coming in when the program last ended are queued again (what came in is thrown away).
@@ -444,7 +469,8 @@ impl Library {
     }
 
     /// Takes songs off the list. A saved one goes back to being a song the add-ons play, and its file is answered
-    /// so it can be deleted; one queued, saving or failed is just taken off.
+    /// so it can be deleted; one queued, saving or failed is just taken off. Either way the song is remembered as one
+    /// the listener took off: a list kept on this computer does not put it back (asked for by hand, it comes back).
     pub fn forget_downloads(&mut self, ids: &[i64]) -> Result<Vec<String>> {
         let tx = self.conn.transaction()?;
         let mut files = Vec::new();
@@ -457,6 +483,8 @@ impl Library {
                  WHERE id = ?1 AND origin = 'file' AND locator = ?2",
             )?;
             let mut drop = tx.prepare("DELETE FROM downloads WHERE track_id = ?1")?;
+            let mut decline =
+                tx.prepare("INSERT OR IGNORE INTO download_declined(track_id) VALUES (?1)")?;
             for id in ids {
                 let found: Option<(String, Option<String>)> = read
                     .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -469,6 +497,7 @@ impl Library {
                     files.push(path);
                 }
                 drop.execute([id])?;
+                decline.execute([id])?;
             }
         }
         tx.commit()?;
@@ -505,7 +534,8 @@ impl Library {
             > 0)
     }
 
-    /// Failed songs back on the list (all of them when `ids` is empty).
+    /// Failed songs back on the list (all of them when `ids` is empty). Asked for by hand: a song a kept list put
+    /// there is the listener's own now.
     pub fn retry_downloads(&mut self, ids: &[i64], now_ms: i64) -> Result<usize> {
         if ids.is_empty() {
             return Ok(self.conn.execute(
@@ -516,7 +546,8 @@ impl Library {
         let mut n = 0;
         for id in ids {
             n += self.conn.execute(
-                "UPDATE downloads SET state = 'queued', error = NULL, asked_at = ?2 WHERE track_id = ?1 AND state = 'failed'",
+                "UPDATE downloads SET state = 'queued', error = NULL, asked_at = ?2, by_list = 0
+                 WHERE track_id = ?1 AND state = 'failed'",
                 params![id, now_ms],
             )?;
         }

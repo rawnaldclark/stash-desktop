@@ -82,7 +82,15 @@ export type TrackRow = {
 export type LikedRow = TrackRow & { liked_at_ms: number };
 export type PlayedRow = TrackRow & { played_at_ms: number };
 
-export type Counts = { tracks: number; albums: number; artists: number; liked: number; playlists: number };
+export type Counts = {
+	tracks: number;
+	albums: number;
+	artists: number;
+	liked: number;
+	playlists: number;
+	/** The liked songs are kept on this computer (`/api/counts` says so; a change's answer leaves it out). */
+	liked_kept?: boolean;
+};
 
 export type PlaylistRow = {
 	id: number;
@@ -154,7 +162,17 @@ export const previewRules = (rules: SmartRules) => post<{ count: number; rows: T
 // ---- Lists kept on this computer (a playlist, or the liked songs)
 
 /** Whether a list is kept on this computer, and how far: its songs, how many play with no connection, how many wait to be saved, and how many could not be. */
-export type ListDownload = { on: boolean; songs: number; here: number; waiting: number; failed: number };
+export type ListDownload = {
+	on: boolean;
+	songs: number;
+	here: number;
+	waiting: number;
+	failed: number;
+	/** Songs the listener took off this computer: the list leaves them be. */
+	declined: number;
+	/** The core's count of changes, when this answer made one. */
+	edits?: number;
+};
 const keptPath = (list: string) => (list === 'liked' ? '/api/liked/download' : `/api/playlists/${encodeURIComponent(list)}/download`);
 export const listDownload = (list: string) => get<ListDownload>(keptPath(list));
 export const setListDownload = (list: string, on: boolean) => post<ListDownload>(keptPath(list), { on });
@@ -426,7 +444,15 @@ export type DownloadState = 'queued' | 'saving' | 'saved' | 'failed';
 export type DownloadRow = TrackRow & { state: DownloadState; error: string | null; bytes: number | null; tier: Tier | null; addon: string | null; saved_at_ms: number | null };
 export type DownloadCounts = { queued: number; saving: number; saved: number; failed: number };
 /** The list (the one coming in first, then those waiting, those not saved, the saved ones newest first), how far the one coming in is, and where songs go. */
-export type Downloads = { rows: DownloadRow[]; counts: DownloadCounts; now: { id: number; bytes: number; of: number | null } | null; folder: string; queued?: number };
+export type Downloads = {
+	rows: DownloadRow[];
+	counts: DownloadCounts;
+	now: { id: number; bytes: number; of: number | null } | null;
+	/** Saving waits after trouble with an add-on (its allowance is spent, it could not be reached): why, and until when. */
+	held?: { why: string; until_ms: number } | null;
+	folder: string;
+	queued?: number;
+};
 export const downloads = (offset: number, limit: number) => get<Downloads>(`/api/downloads?offset=${offset}&limit=${limit}`);
 /** Puts songs on the list: songs of the library, all the liked songs, or a playlist's. `queued` says how many were not on it or saved already. */
 export const saveSongs = (what: { ids: number[] } | { liked: true } | { playlist: number }) => post<Downloads>('/api/downloads', what);

@@ -109,15 +109,19 @@ export async function goOffline(on: boolean): Promise<void> {
 	offline.set(await core.setOffline(on));
 }
 
-/** The liked songs are kept on this computer (a playlist says so itself, as `download`). */
+/** The liked songs are kept on this computer (a playlist says so itself, as `download`). Read with the counts. */
 export const likedKept = writable(false);
-/** Reads whether the liked songs are kept on this computer. */
-export async function readLikedKept(): Promise<void> {
-	try {
-		likedKept.set((await core.listDownload('liked')).on);
-	} catch {
-		/* the core is not answering: as it was */
-	}
+/** Takes in the library's counts, and whether the liked songs are kept on this computer when they say. */
+function setCounts(c: core.Counts): void {
+	counts.set(c);
+	if (typeof c.liked_kept === 'boolean') likedKept.set(c.liked_kept);
+}
+/** A list was kept on this computer, or let go, from this window: its mark changes here, and the change the core counted
+ * is this window's own (nothing is read again for it). */
+export function keptFlipped(list: string, on: boolean, now?: number): void {
+	if (list === 'liked') likedKept.set(on);
+	else playlists.update((all) => all.map((p) => (p.id === list ? { ...p, download: on || undefined } : p)));
+	if (now !== undefined && (edits === null || now === edits + 1)) edits = now;
 }
 
 type Queued = Pick<core.QueueRow, 'id' | 'title' | 'artist' | 'album' | 'art' | 'duration_ms' | 'addon' | 'qid' | 'here'>;
@@ -126,7 +130,16 @@ type Queued = Pick<core.QueueRow, 'id' | 'title' | 'artist' | 'album' | 'art' | 
 function itemOfQueued(q: Queued): LibraryItem {
 	if (q.id !== null) {
 		const known = seen.get(q.id);
-		if (known) return known.item;
+		// The queue's word on whether the song is on this computer is newer than the copy this window has (songs are
+		// saved in the background).
+		if (known) {
+			const away = q.here === false;
+			if ((known.item.here === false) === away) return known.item;
+			const item = { ...known.item };
+			if (away) item.here = false;
+			else delete item.here;
+			return item;
+		}
 	}
 	const d = descriptorOf(q.title, q.artist, q.album, q.duration_ms);
 	const refs: Record<string, string> = {};
@@ -477,14 +490,14 @@ function caughtUp(now: number | undefined): void {
 	if (now === edits || rereading) return;
 	edits = now;
 	rereading = true;
-	void Promise.all([core.counts().then((c) => counts.set(c)), loadLikes(), core.playlists().then((rows) => syncPlaylists(rows)), readLikedKept()])
+	void Promise.all([core.counts().then(setCounts), loadLikes(), core.playlists().then((rows) => syncPlaylists(rows))])
 		.catch(() => {})
 		.finally(() => (rereading = false));
 }
 
 async function loadLibrary(): Promise<void> {
 	await Promise.all([
-		core.counts().then((c) => counts.set(c)),
+		core.counts().then(setCounts),
 		loadLikes(),
 		core.playlists().then((rows) => syncPlaylists(rows, rows.map((r) => r.id))),
 		loadHistory()
