@@ -61,6 +61,23 @@
 @media (hover: hover) and (pointer: fine) { .sb-rec:hover { background: var(--acc-wash); } }
 .sb-rec.on { background: var(--wp-hover); }
 .sb-rec.on .sb-t b { color: var(--acc-text); }
+/* folders: a row that folds its playlists shut or open; they sit a step in under it */
+.sb-folder, .sb-loose { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; border-radius: 8px; }
+.sb-loose { min-height: 12px; }
+.sb-folder > a.sb-rec { padding-left: 18px; }
+.sb-fold { width: 100%; text-align: left; color: inherit; }
+/* (.tile's own display comes later: this one is more specific) */
+.tile.fold-tile { display: grid; place-items: center; color: var(--wp-text-2); }
+.sb-rec .fold-tile .ic { width: 22px; height: 22px; }
+.sb-chev { width: 18px; height: 18px; flex: none; color: var(--wp-text-2); transition: transform 150ms var(--ease-standard); }
+.sb-fold[aria-expanded="false"] .sb-chev { transform: rotate(-90deg); }
+.sb-new { display: grid; place-items: center; width: 28px; height: 28px; margin: -4px 0; border-radius: 50%; color: var(--wp-text-2); }
+.sb-new .ic { width: 20px; height: 20px; }
+@media (hover: hover) and (pointer: fine) { .sb-new:hover { background: var(--wp-hover); color: var(--wp-text); } }
+/* a playlist carried onto a folder: the place under it lights up, a chip with its name follows the pointer */
+.drop-on { background: var(--acc-wash); box-shadow: inset 0 0 0 2px var(--acc); }
+.carry-chip { position: fixed; left: 0; top: 0; z-index: 90; pointer-events: none; max-width: 240px; padding: 8px 14px; border-radius: 999px; background: var(--wp-field); border: 1px solid var(--wp-line-2); box-shadow: var(--shadow-card); font: 600 13px/1.2 var(--font-body); color: var(--wp-text); white-space: nowrap; overflow: clip; text-overflow: ellipsis; }
+body.carrying, body.carrying * { cursor: grabbing !important; user-select: none; }
 @container wp (max-width: 1099.98px) {
 	.side { align-items: center; padding: 16px 0; }
 	.sb-brand { justify-content: center; padding-left: 0; }
@@ -74,6 +91,10 @@
 	.sb-rec { width: 48px; height: 48px; padding: 4px; justify-content: center; }
 	.sb-rec.on { background: none; }
 	.sb-rec.on .tile { outline: 2px solid var(--acc); outline-offset: 2px; }
+	.sb-new, .sb-chev { display: none; }
+	.sb-folder, .sb-loose { justify-items: center; }
+	.sb-folder > a.sb-rec { padding-left: 4px; }
+	.sb-folder > a.sb-rec .tile { width: 32px; height: 32px; }
 }
 
 /* ----- tiles and covers */
@@ -317,6 +338,8 @@
 .mi span { overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
 .mi .ic { color: var(--wp-text-2); width: 20px; height: 20px; }
 .mi:hover, .mi:focus-visible { background: var(--acc-wash); outline: none; }
+.mi-danger, .mi-danger .ic { color: var(--red); }
+.mi-on .ic { color: var(--acc-text); }
 .mh { padding: 8px 10px 6px; font: 600 11px/1.2 var(--font-body); letter-spacing: .08em; text-transform: uppercase; color: var(--wp-text-2); }
 .mnew { display: flex; gap: 8px; padding: 6px; }
 .mnew input { flex: 1; min-width: 0; height: 36px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--wp-line-2); background: var(--wp-main); color: var(--wp-text); font: 400 14px/1 var(--font-body); }

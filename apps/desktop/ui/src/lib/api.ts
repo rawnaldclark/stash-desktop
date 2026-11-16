@@ -130,7 +130,12 @@ export type Playlist = {
 	rules?: SmartRules;
 	/** Kept on this computer (its songs are saved, and so are songs added later). */
 	download?: boolean;
+	/** The folder it is in (`PlaylistFolder`). */
+	folder?: number;
 };
+
+/** A folder of playlists: this computer's own grouping (the phone and the web player have none). */
+export type PlaylistFolder = { id: number; name: string; collapsed: boolean };
 
 /** A play that counted. `playedAt` is when the play STARTED (epoch ms). */
 export type HistoryEntry = { item: LibraryItem; playedAt: number };
@@ -157,6 +162,17 @@ export interface LibraryAPI {
 	removeFromPlaylist(id: string, index: number): Promise<void>;
 	/** Moves the song at `from` to position `to` (both in range; otherwise ignored). */
 	moveInPlaylist(id: string, from: number, to: number): Promise<void>;
+	/** The listener's playlist folders, in their order. */
+	folders: Readable<PlaylistFolder[]>;
+	/** A new folder, after the others (with `playlist`, that playlist goes in it). Answers its id. */
+	createFolder(name: string, playlist?: string): Promise<number>;
+	renameFolder(id: number, name: string): Promise<void>;
+	/** Deletes a folder: its playlists stay, out of any folder. */
+	deleteFolder(id: number): Promise<void>;
+	/** Folds a folder shut (its playlists are not listed under it in the sidebar), or opens it. */
+	foldFolder(id: number, collapsed: boolean): Promise<void>;
+	/** Puts a playlist in a folder, or (null) takes it out of any. */
+	moveToFolder(playlist: string, folder: number | null): Promise<void>;
 	/** Reads the counts, the likes, the playlists and the history again (an import or a scan changed the library under them). */
 	reload(): Promise<void>;
 }

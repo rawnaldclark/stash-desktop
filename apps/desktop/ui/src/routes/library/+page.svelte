@@ -15,6 +15,7 @@
 	import Songs from '../../lib/desktop/Songs.svelte';
 	import { fold } from '../../lib/identity';
 	import Card from '../../lib/ui/Card.svelte';
+	import { atEvent, deleteFolder, folderHref, folderMenu, playlistMenu, playlistsWord } from '../../lib/desktop/folders';
 	import Icon from '../../lib/ui/Icon.svelte';
 	import TrackRow from '../../lib/ui/TrackRow.svelte';
 	import { L, LS, ui } from '../../lib/ui/state.svelte';
@@ -84,6 +85,29 @@
 
 	let naming = $state(false);
 	let name = $state('');
+	/** The folder opened in Library › Playlists (`?folder=`), while it is there. */
+	const openFolder = $derived(tab === 'playlists' ? L.folders.find((f) => String(f.id) === page.url.searchParams.get('folder')) : undefined);
+	const folderIds = $derived(new Set(L.folders.map((f) => f.id)));
+	/** What the grid shows: every match while searching; else the open folder's playlists, or the ones in none. */
+	const shownPlaylists = $derived(needle ? playlists : playlists.filter((p) => (openFolder ? p.folder === openFolder.id : !p.folder || !folderIds.has(p.folder))));
+	const inFolder = (id: number) => L.playlists.filter((p) => p.folder === id).length;
+	let namingFolder = $state(false);
+	let folderName = $state('');
+	let renamingFolder = $state(false);
+	let folderDraft = $state('');
+	async function createFolder() {
+		try {
+			await library.createFolder(folderName);
+			namingFolder = false;
+			folderName = '';
+		} catch {
+			/* said by the shell (the core's own words) */
+		}
+	}
+	async function renameFolder() {
+		if (openFolder && folderDraft.trim()) await library.renameFolder(openFolder.id, folderDraft);
+		renamingFolder = false;
+	}
 
 	const groups = $derived.by(() => {
 		const out: { day: string; entries: HistoryEntry[] }[] = [];
@@ -111,8 +135,11 @@
 
 	const play = (items: LibraryItem[], i = 0, from = 'Your likes') => void player.playItems(items, i, { from });
 	async function create() {
+		// Made in the folder open, if one is.
+		const into = openFolder?.id;
 		try {
 			const p = await library.createPlaylist(name);
+			if (into !== undefined) await library.moveToFolder(p.id, into);
 			naming = false;
 			name = '';
 			await goto(`/playlist/${p.id}`);
@@ -174,16 +201,48 @@
 			<p class="s-hint">Songs you like land here. Press the heart on any song.</p>
 		{/if}
 	{:else if tab === 'playlists'}
+		{#if openFolder && !needle}
+			<div class="fold-head">
+				<a class="act-ib" href="/library?tab=playlists" aria-label="All playlists" title="All playlists"><Icon name="chevron_left" /></a>
+				<span class="tile fold-tile"><Icon name="folder_open" /></span>
+				{#if renamingFolder}
+					<form class="rename" onsubmit={(e) => { e.preventDefault(); void renameFolder(); }}>
+						<!-- svelte-ignore a11y_autofocus -->
+						<input aria-label="Folder name" bind:value={folderDraft} maxlength="80" autofocus onkeydown={(e) => e.key === 'Escape' && (renamingFolder = false)} />
+						<button type="submit" class="btn">Save</button>
+					</form>
+				{:else}
+					<h2 class="fold-name">{openFolder.name}</h2>
+				{/if}
+				<button type="button" class="act-ib" aria-label="Rename folder" title="Rename" onclick={() => { folderDraft = openFolder.name; renamingFolder = true; }}><Icon name="edit" /></button>
+				<button type="button" class="act-ib" aria-label="Delete folder" title="Delete folder (its playlists stay)" onclick={() => { const f = openFolder; void goto('/library?tab=playlists').then(() => deleteFolder(f)); }}><Icon name="delete" /></button>
+			</div>
+		{/if}
 		<div class="cards">
 			{#if !needle}
-				<button type="button" class="card card-new" onclick={() => (naming = true)} aria-label="New playlist"><span class="tile new-tile"><Icon name="add" /></span><b>New playlist</b></button>
-				<button type="button" class="card card-new" onclick={() => (ui.smart = { id: null })} aria-label="New smart playlist"><span class="tile new-tile"><Icon name="queue_music" /></span><b>New smart playlist</b></button>
+				<button type="button" class="card card-new" onclick={() => { naming = true; namingFolder = false; }} aria-label="New playlist"><span class="tile new-tile"><Icon name="add" /></span><b>New playlist</b></button>
+				{#if !openFolder}
+					<button type="button" class="card card-new" onclick={() => (ui.smart = { id: null })} aria-label="New smart playlist"><span class="tile new-tile"><Icon name="queue_music" /></span><b>New smart playlist</b></button>
+					<button type="button" class="card card-new" onclick={() => { namingFolder = true; naming = false; }} aria-label="New folder"><span class="tile new-tile"><Icon name="create_new_folder" /></span><b>New folder</b></button>
+					{#each L.folders as f (f.id)}
+						<a class="card" href={folderHref(f.id)} aria-label="{f.name}, folder" oncontextmenu={(e) => { e.preventDefault(); folderMenu(f, atEvent(e)); }}><span class="tile fold-tile"><Icon name="folder" /></span><b>{f.name}</b><i>Folder · {playlistsWord(inFolder(f.id))}</i></a>
+					{/each}
+				{/if}
 			{/if}
-			{#each playlists as p (p.id)}
-				<Card title={p.name} sub={p.rules ? `Smart · ${songs(p.items.length)}` : p.followed ? `Mix · ${songs(p.items.length)}` : songs(p.items.length)} items={p.items} href="/playlist/{p.id}" kept={p.download} />
+			{#each shownPlaylists as p (p.id)}
+				<Card title={p.name} sub={p.rules ? `Smart · ${songs(p.items.length)}` : p.followed ? `Mix · ${songs(p.items.length)}` : songs(p.items.length)} items={p.items} href="/playlist/{p.id}" kept={p.download} oncontext={(e) => { e.preventDefault(); playlistMenu(p, atEvent(e)); }} />
 			{/each}
 		</div>
 		{#if needle && !playlists.length}<p class="s-hint">No playlist matches “{q.trim()}”.</p>{/if}
+		{#if openFolder && !needle && !shownPlaylists.length}<p class="s-hint">This folder is empty. Drag a playlist onto it in the sidebar, or choose Move to folder on a playlist’s page.</p>{/if}
+		{#if namingFolder}
+			<form class="new-form" onsubmit={(e) => { e.preventDefault(); void createFolder(); }}>
+				<!-- svelte-ignore a11y_autofocus -->
+				<input aria-label="Folder name" placeholder="Folder name" bind:value={folderName} maxlength="80" autofocus />
+				<button type="submit" class="btn" disabled={!folderName.trim()}>Create</button>
+				<button type="button" class="btn ghost" onclick={() => (namingFolder = false)}>Cancel</button>
+			</form>
+		{/if}
 		{#if naming}
 			<form class="new-form" onsubmit={(e) => { e.preventDefault(); void create(); }}>
 				<!-- svelte-ignore a11y_autofocus -->

@@ -13,12 +13,15 @@
 	import { L, ui } from '../../../lib/ui/state.svelte';
 	import { songs, totalLength } from '../../../lib/ui/format';
 	import { describe } from '../../../lib/desktop/smart';
+	import { folderHref, playlistMenu, under } from '../../../lib/desktop/folders';
 
 	const pl = $derived(L.playlists.find((p) => p.id === page.params.id));
 	/** A followed mix is its owner's (it came in with an imported library): it plays; its songs are not edited here. */
 	const followed = $derived(!!pl?.followed);
 	/** A smart playlist fills itself by its rules: its songs are not edited by hand. */
 	const smart = $derived(pl?.rules);
+	/** The folder it is in, if any. */
+	const folder = $derived(pl?.folder ? L.folders.find((f) => f.id === pl.folder) : undefined);
 	let editing = $state(false);
 	let draft = $state('');
 	let confirmDelete = $state(false);
@@ -65,7 +68,7 @@
 		<div class="alb-top">
 			<div class="alb-cover"><Tile items={pl.items} seed={pl.name} /></div>
 			<div class="alb-txt">
-				<p class="caps">{smart ? 'Smart playlist' : followed ? 'Shared mix' : 'Playlist'}</p>
+				<p class="caps">{smart ? 'Smart playlist' : followed ? 'Shared mix' : 'Playlist'}{#if folder}<span class="sep">{' · '}</span><a class="pl-folder" href={folderHref(folder.id)}>{folder.name}</a>{/if}</p>
 				{#if editing}
 					<form class="rename" onsubmit={(e) => { e.preventDefault(); void rename(); }}>
 						<!-- svelte-ignore a11y_autofocus -->
@@ -84,6 +87,7 @@
 			<button type="button" class="act-ib" aria-label="Shuffle {pl.name}" title="Shuffle" disabled={!pl.items.length} onclick={() => { player.setShuffle(true); play(pl.items); }}><Icon name="shuffle" /></button>
 			<DownloadSwitch list={pl.id} name={pl.name} count={pl.items.length} />
 			{#if smart}<button type="button" class="btn ghost" onclick={() => (ui.smart = { id: pl.id })}>Edit rules</button>{/if}
+			<button type="button" class="act-ib" aria-label="Move to folder" title={folder ? `In ${folder.name}` : 'Move to folder'} aria-haspopup="menu" onclick={(e) => playlistMenu(pl, under(e.currentTarget))}><Icon name="drive_file_move" /></button>
 			<button type="button" class="act-ib" aria-label="Rename playlist" title="Rename" onclick={() => { draft = pl.name; editing = true; }}><Icon name="edit" /></button>
 			{#if confirmDelete}
 				<button type="button" class="btn danger" onclick={remove}>Delete this playlist</button>

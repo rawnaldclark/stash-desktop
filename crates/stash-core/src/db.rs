@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 17;
+pub const SCHEMA_VERSION: i64 = 18;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
@@ -292,6 +292,18 @@ const V17: &str = "
     ) WITHOUT ROWID;
 ";
 
+/// Version 18: playlist folders (`folders.rs`), this computer's own grouping of playlists. A folder deleted leaves its
+/// playlists out of any.
+const V18: &str = "
+    CREATE TABLE playlist_folders(
+        id        INTEGER PRIMARY KEY,
+        name      TEXT NOT NULL,
+        position  INTEGER NOT NULL,
+        collapsed INTEGER NOT NULL DEFAULT 0
+    );
+    ALTER TABLE playlists ADD COLUMN folder_id INTEGER REFERENCES playlist_folders(id) ON DELETE SET NULL;
+";
+
 /// Version 16: what a list kept on this computer leaves alone. A song the listener took off the downloads is
 /// remembered (`download_declined`), so a kept list does not put it back; and a song a list put on the downloads says
 /// so (`by_list`), so it is taken off again when no kept list holds it, while one asked for by hand stays.
@@ -486,6 +498,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V17)?;
         tx.pragma_update(None, "user_version", 17)?;
+        tx.commit()?;
+    }
+    if found < 18 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V18)?;
+        tx.pragma_update(None, "user_version", 18)?;
         tx.commit()?;
     }
     Ok(())

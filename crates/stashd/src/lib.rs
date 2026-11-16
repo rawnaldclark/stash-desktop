@@ -3,6 +3,7 @@
 mod autoplay;
 mod blocking;
 pub mod demo_addon;
+mod folders;
 mod kept;
 mod relay;
 mod saving;

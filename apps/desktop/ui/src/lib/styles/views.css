@@ -19,6 +19,13 @@
 @media (hover: hover) and (pointer: fine) { .card:hover { background: var(--wp-hover); transform: translateY(-4px); } }
 .new-tile { display: grid; place-items: center; border: 1px dashed var(--wp-line-2); background: transparent !important; color: var(--wp-text-2); }
 .new-tile .ic { width: 36px; height: 36px; }
+.card > .fold-tile .ic { width: 38%; height: 38%; }
+/* an open folder in Library › Playlists */
+.fold-head { display: flex; align-items: center; gap: 12px; margin: 4px 0 16px; }
+.fold-head .fold-tile { width: 48px; height: 48px; border-radius: 8px; }
+.fold-head .fold-tile .ic { width: 26px; height: 26px; }
+.fold-name { min-width: 0; overflow: clip; text-overflow: ellipsis; white-space: nowrap; font: 700 24px/1.2 var(--font-display, var(--font-body)); color: var(--wp-text); }
+.pl-folder { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { .card { transition: none; } .card:hover { transform: none; } }
 /* a card with a menu: an invisible play button over all of it, and "more" on the picture's corner */
 .card-m { position: relative; }

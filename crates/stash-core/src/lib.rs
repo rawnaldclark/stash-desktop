@@ -10,6 +10,7 @@ pub mod covers;
 pub mod db;
 pub mod downloads;
 pub mod eclipse;
+pub mod folders;
 pub mod identity;
 pub mod import;
 pub mod library;

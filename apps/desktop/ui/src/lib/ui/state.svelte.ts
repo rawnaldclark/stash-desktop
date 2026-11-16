@@ -5,7 +5,8 @@
 import { fromStore, get } from 'svelte/store';
 import { blockedNow as blockedNowStore, blockedOf, library, likedKept as likedKeptStore, offline as offlineStore, player, sources as sourcesApi } from '../app';
 import { LIB_REF, songIndex } from '../identity';
-import type { Counts, Descriptor, HistoryEntry, LibraryItem, Playlist, SourceStatus } from '../api';
+import type { Counts, Descriptor, HistoryEntry, LibraryItem, Playlist, PlaylistFolder, SourceStatus } from '../api';
+import type { IconName } from './icons';
 import type { PlayerState } from '../api';
 
 /**
@@ -37,6 +38,7 @@ export const S = {
 
 const likes = fromStore<LibraryItem[]>(library.likes);
 const playlists = fromStore<Playlist[]>(library.playlists);
+const folders = fromStore<PlaylistFolder[]>(library.folders);
 const history = fromStore<HistoryEntry[]>(library.history);
 const counts = fromStore<Counts | null>(library.counts);
 const loaded = fromStore<boolean>(library.loaded);
@@ -52,6 +54,10 @@ class Lib {
 	}
 	get playlists() {
 		return playlists.current;
+	}
+	/** The playlist folders, in their order. */
+	get folders() {
+		return folders.current;
 	}
 	/** The liked songs are kept on this computer. */
 	get likedKept() {
@@ -96,6 +102,19 @@ export const L = new Lib();
 
 /** `group`: the menu is for a set of songs (a Home album card): queue, playlist and like act on all of them, `item` (the first) names the artist and album. */
 export type MenuState = { x: number; y: number; item: LibraryItem; group?: LibraryItem[]; queueIndex?: number; queueLength?: number; playlistId?: string; playlistIndex?: number; playlistLength?: number; /** On Library › Downloads: the song is saved, or on its way. */ download?: 'saved' | 'waiting'; anchor?: HTMLElement | null; /** The songs are the ones the listener picked in a list (Ctrl or Shift+click): their places in it. */ picks?: number[]; /** Opens on "Add to playlist" at once. */ view?: 'playlists'; /** Opens above the point (from the bar along the bottom). */ up?: boolean };
+
+/** One entry of a menu of choices. `checked`: one of a set (the folder a playlist is in). `ask`: asks for a name in place,
+ * and `make`s with it. */
+export type Choice = {
+	icon: IconName;
+	label: string;
+	run?: () => void;
+	checked?: boolean;
+	danger?: boolean;
+	ask?: { value?: string; placeholder: string; submit: string; make: (name: string) => void };
+};
+/** A menu of choices (a playlist's, a folder's): `label` names it for a screen reader, `title` heads it. */
+export type ChoicesState = { x: number; y: number; label: string; title?: string; choices: Choice[]; anchor?: HTMLElement | null; up?: boolean };
 
 const LS = {
 	get(k: string): string | null {
@@ -150,6 +169,8 @@ class UIState {
 	/** A button on the message, when there is something to do about it. */
 	toastAction = $state<{ label: string; run: () => void } | null>(null);
 	menu = $state<MenuState | null>(null);
+	/** The menu of choices open (a playlist's, a folder's), if any. One menu at a time: the song menu closes it. */
+	choices = $state.raw<ChoicesState | null>(null);
 	/** The text in the header search box (shared with the Search page). */
 	q = $state('');
 	/** Stash is offline: only what is on this computer plays (Settings › Your library, Ctrl+K, the header's chip). */
@@ -193,7 +214,12 @@ class UIState {
 		}, action ? 7000 : 3800);
 	}
 	openMenu(m: MenuState) {
+		this.choices = null;
 		this.menu = m;
+	}
+	openChoices(c: ChoicesState) {
+		this.menu = null;
+		this.choices = c;
 	}
 	closeMenu() {
 		this.menu = null;

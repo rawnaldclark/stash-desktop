@@ -106,7 +106,12 @@ export type PlaylistRow = {
 	rules?: SmartRules;
 	/** Kept on this computer: its songs are saved, and so are songs that come onto it later. */
 	download?: boolean;
+	/** The folder it is in. */
+	folder?: number;
 };
+
+/** A playlist folder (the core's `folders.rs`). */
+export type FolderRow = { id: number; name: string; position: number; collapsed: boolean };
 
 /** Smart playlists (the core's `smart.rs`): rules over what the library knows of a song. */
 export type SmartField = 'title' | 'artist' | 'album' | 'year' | 'length' | 'plays' | 'played_often' | 'last_played' | 'added' | 'liked' | 'quality' | 'here';
@@ -149,13 +154,21 @@ export const artist = (id: number) => get<{ artist: ArtistRow; rows: TrackRow[];
 
 /** The core's answer to a change the listener made: the playlists and the counts as they now are. */
 /** `edits`: the core's count of changes to the likes and the playlists, this one included. */
-export type Changed = { playlists: PlaylistRow[]; counts: Counts; id?: number; liked?: boolean; added?: number; done?: boolean; edits?: number };
+export type Changed = { playlists: PlaylistRow[]; counts: Counts; folders?: FolderRow[]; id?: number; liked?: boolean; added?: number; done?: boolean; edits?: number };
 
 /** Likes a song of the library, or takes the like back. */
 export const likeTrack = (id: number, liked: boolean) => post<Changed>('/api/tracks/like', { id, liked });
 /** Makes a track an add-on found a song of the library; the answer's `id` is its row. */
 export const keepFound = (addon: string, track: KeptTrack) => post<Changed>('/api/tracks/keep', { addon, track });
 export const createPlaylist = (name: string) => post<Changed>('/api/playlists', { name });
+export const folders = () => rows<FolderRow>('/api/folders');
+/** With `playlist`, that playlist goes in the new folder. */
+export const createFolder = (name: string, playlist?: number) => post<Changed>('/api/folders', { name, playlist });
+export const renameFolder = (id: number, name: string) => post<Changed>(`/api/folders/${id}/rename`, { name });
+export const deleteFolder = (id: number) => post<Changed>(`/api/folders/${id}/delete`, {});
+export const foldFolder = (id: number, collapsed: boolean) => post<Changed>(`/api/folders/${id}/fold`, { collapsed });
+/** Into a folder, or (null) out of any. */
+export const setPlaylistFolder = (id: number, folder: number | null) => post<Changed>(`/api/playlists/${id}/folder`, { folder });
 /** Makes a smart playlist: it fills itself by `rules`. */
 export const createSmartPlaylist = (name: string, rules: SmartRules) => post<Changed>('/api/playlists', { name, rules });
 /** Gives a smart playlist new rules. */

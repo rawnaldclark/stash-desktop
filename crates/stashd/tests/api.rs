@@ -846,6 +846,56 @@ fn what_is_done_here_goes_out_as_a_library_file() {
         "Late drive"
     );
 
+    // Folders: one made with the playlist in it, renamed, folded shut. A folder needs a name, said in words.
+    let (status, refused) = client.send("/api/folders", json!({ "name": " " }));
+    assert_eq!(
+        (status, refused["error"]["message"].as_str()),
+        (400, Some("A folder needs a name"))
+    );
+    let made = client.post("/api/folders", json!({ "name": "Night", "playlist": mix }));
+    let night = made["id"].as_i64().unwrap();
+    assert_eq!(
+        (
+            made["folders"][0]["name"].as_str(),
+            made["playlists"][0]["folder"].as_i64()
+        ),
+        (Some("Night"), Some(night))
+    );
+    client.post(
+        &format!("/api/folders/{night}/rename"),
+        json!({ "name": "Nights" }),
+    );
+    let folded = client.post(
+        &format!("/api/folders/{night}/fold"),
+        json!({ "collapsed": true }),
+    );
+    assert_eq!(
+        (
+            folded["folders"][0]["name"].as_str(),
+            folded["folders"][0]["collapsed"].as_bool()
+        ),
+        (Some("Nights"), Some(true))
+    );
+    assert_eq!(client.get("/api/folders").1["rows"][0]["name"], "Nights");
+    let (status, _) = client.send("/api/folders/9999/rename", json!({ "name": "x" }));
+    assert_eq!(status, 404);
+    // Out of the folder and in again, by the playlist's own route; the answer carries the folders too.
+    let out = client.post(
+        &format!("/api/playlists/{mix}/folder"),
+        json!({ "folder": null }),
+    );
+    assert_eq!(
+        (
+            out["playlists"][0].get("folder"),
+            out["folders"].as_array().map(Vec::len)
+        ),
+        (None, Some(1))
+    );
+    client.post(
+        &format!("/api/playlists/{mix}/folder"),
+        json!({ "folder": night }),
+    );
+
     // Played past its half, a song's play is kept.
     let export = || {
         let mut response = client
@@ -905,6 +955,8 @@ fn what_is_done_here_goes_out_as_a_library_file() {
     );
     let playlist = &file["playlists"][0];
     assert_eq!(playlist["name"], "Late drive");
+    // Folders are this computer's own: the file says nothing of them.
+    assert!(!file.to_string().contains("Nights"), "{file}");
     assert_eq!(
         playlist["items"]
             .as_array()
@@ -928,6 +980,17 @@ fn what_is_done_here_goes_out_as_a_library_file() {
             again["summary"]["plays_added"].as_u64()
         ),
         (Some(0), Some(0), Some(0), Some(0))
+    );
+
+    // The folder deleted: its playlist stays, out of any folder.
+    let gone = client.post(&format!("/api/folders/{night}/delete"), json!({}));
+    assert_eq!(
+        (
+            gone["folders"].as_array().map(Vec::len),
+            gone["playlists"].as_array().map(Vec::len),
+            gone["playlists"][0].get("folder")
+        ),
+        (Some(0), Some(1), None)
     );
 
     let deleted = client.post(&format!("/api/playlists/{mix}/delete"), json!({}));

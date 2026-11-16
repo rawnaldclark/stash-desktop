@@ -150,6 +150,9 @@ pub struct PlaylistRow {
     pub rules: Option<crate::smart::Rules>,
     /// Kept on this computer: its songs are saved as files, and so are songs that come onto it later.
     pub download: bool,
+    /// The folder it is in (`folders.rs`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder: Option<i64>,
 }
 
 /// What the library knows a song by, for asking an add-on for it.
@@ -670,7 +673,7 @@ impl Library {
     pub fn playlists(&self) -> Result<Vec<PlaylistRow>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT p.id, p.name, (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id), p.follow_id IS NOT NULL,
-                    p.external_id, p.created_at_ms, p.updated_at_ms, p.rules, p.download
+                    p.external_id, p.created_at_ms, p.updated_at_ms, p.rules, p.download, p.folder_id
              FROM playlists p ORDER BY p.position, p.id",
         )?;
         let mut rows = stmt
@@ -688,6 +691,7 @@ impl Library {
                         .and_then(|json| serde_json::from_str(&json).ok())
                         .and_then(|v| crate::smart::Rules::read(&v).ok()),
                     download: r.get(8)?,
+                    folder: r.get(9)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

@@ -22,6 +22,7 @@ import {
 	type PlayerAPI,
 	type PlayerState,
 	type Playlist,
+	type PlaylistFolder,
 	type QueueItem,
 	type SearchAPI,
 	type SourcesAPI,
@@ -448,6 +449,7 @@ const player: PlayerAPI = {
 
 const likes = writable<LibraryItem[]>([]);
 const playlists = writable<Playlist[]>([]);
+const folders = writable<PlaylistFolder[]>([]);
 const history = writable<HistoryEntry[]>([]);
 const counts = writable<Counts | null>(null);
 const loaded = writable(false);
@@ -462,6 +464,10 @@ const HISTORY_MAX = 500;
 
 async function loadLikes(): Promise<void> {
 	likes.set((await allPages((o, l) => core.likedAt(o, l))).map(itemOfRow));
+}
+const folderOf = (r: core.FolderRow): PlaylistFolder => ({ id: r.id, name: r.name, collapsed: r.collapsed });
+async function loadFolders(): Promise<void> {
+	folders.set((await core.folders()).map(folderOf));
 }
 async function loadHistory(): Promise<void> {
 	history.set((await core.historyAt(0, HISTORY_MAX)).map((r) => ({ item: itemOfRow(r), playedAt: r.played_at_ms })));
@@ -492,6 +498,7 @@ function syncPlaylists(rows: core.PlaylistRow[], force: number[] = []): Promise<
 					if (r.followed) p.followed = true;
 					if (r.rules) p.rules = r.rules;
 					if (r.download) p.download = true;
+					if (r.folder) p.folder = r.folder;
 					return p;
 				})
 			);
@@ -504,6 +511,7 @@ function syncPlaylists(rows: core.PlaylistRow[], force: number[] = []): Promise<
 /** Takes in the core's answer to a change: the counts and the playlists as they now are. */
 function took(c: core.Changed, force: number[] = []): Promise<void> {
 	counts.set(c.counts);
+	if (c.folders) folders.set(c.folders.map(folderOf));
 	if (c.edits !== undefined && (edits === null || c.edits > edits)) edits = c.edits;
 	return syncPlaylists(c.playlists, force);
 }
@@ -523,7 +531,7 @@ function caughtUp(now: number | undefined): void {
 	if (now === edits || rereading) return;
 	edits = now;
 	rereading = true;
-	void Promise.all([core.counts().then(setCounts), loadLikes(), core.playlists().then((rows) => syncPlaylists(rows))])
+	void Promise.all([core.counts().then(setCounts), loadLikes(), loadFolders(), core.playlists().then((rows) => syncPlaylists(rows))])
 		.catch(() => {})
 		.finally(() => (rereading = false));
 }
@@ -532,6 +540,7 @@ async function loadLibrary(): Promise<void> {
 	await Promise.all([
 		core.counts().then(setCounts),
 		loadLikes(),
+		loadFolders(),
 		core.playlists().then((rows) => syncPlaylists(rows, rows.map((r) => r.id))),
 		loadHistory()
 	]);
@@ -678,6 +687,35 @@ const library: LibraryAPI = {
 				}
 			})
 		),
+	folders: ro(folders),
+	createFolder: (name, playlist) =>
+		change(async () => {
+			const c = await core.createFolder(name.trim(), playlist === undefined ? undefined : pid(playlist));
+			await took(c);
+			if (c.id === undefined) throw new Refused('The folder was not made', 500);
+			return c.id;
+		}),
+	renameFolder: (id, name) => quiet(change(async () => took(await core.renameFolder(id, name.trim())))),
+	deleteFolder: (id) => change(async () => took(await core.deleteFolder(id))),
+	foldFolder: (id, collapsed) =>
+		quiet(
+			change(async () => {
+				// Folds at once; the core keeps it for next time.
+				folders.update((l) => l.map((f) => (f.id === id ? { ...f, collapsed } : f)));
+				await took(await core.foldFolder(id, collapsed));
+			})
+		),
+	moveToFolder: (playlist, folder) =>
+		change(async () => {
+			// Moves at once; the core's lists follow.
+			playlists.update((l) => l.map((p) => (p.id === playlist ? { ...p, folder: folder ?? undefined } : p)));
+			try {
+				await took(await core.setPlaylistFolder(pid(playlist), folder));
+			} catch (e) {
+				await resync(pid(playlist));
+				throw e;
+			}
+		}),
 	reload: async () => {
 		await loadLibrary().catch(() => {});
 		relisted();

@@ -2060,6 +2060,10 @@ fn lists_route(state: &State, request: &mut Request, path: &str) -> Result<Optio
                     now,
                 )?,
                 "delete" => library.delete_playlist(id)?,
+                // Into a folder, or (`folder` null) out of any.
+                "folder" => {
+                    library.set_playlist_folder(id, body.get("folder").and_then(Value::as_i64))?
+                }
                 "add" => {
                     let ids: Vec<i64> = body
                         .get("ids")
@@ -2092,6 +2096,7 @@ fn lists_route(state: &State, request: &mut Request, path: &str) -> Result<Optio
     // Every answer carries the lists as they now are, so the window need not ask again; and the count of changes, so it
     // can tell this change from one made elsewhere.
     answer["playlists"] = json!(library.playlists()?);
+    answer["folders"] = json!(library.playlist_folders()?);
     answer["counts"] = json!(library.counts()?);
     state.edited();
     answer["edits"] = json!(state.edits.load(Ordering::Relaxed));
@@ -2203,6 +2208,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::blocking::route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::folders::route(state, request, &path)? {
         return Ok((response, false));
     }
     if let Some(response) = offline_route(state, request, &path)? {

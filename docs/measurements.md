@@ -823,3 +823,66 @@ A reviewer read sections 24–26 and found these. All are fixed.
   - Playing from offset 0 with the third row's id queued that song first.
 - **The kept-list API test:** a search for every song's artist with `here=1` found the 4 here, and 6 without it.
 - **On the built page:** the "Don't play", picking, kept-list and "On this computer" checks all passed again, with no errors in the page.
+
+## 29. Playlist folders
+
+Playlists can be grouped into folders, in the sidebar and in Library › Playlists. A folder holds playlists, not other folders. It has a name and a place after the folders made before it, and it is folded shut or open.
+
+Folders are this computer's own. The phone and the web player have none, and the library file Stash writes for them says nothing of folders. Schema 18 adds the `playlist_folders` table and `playlists.folder_id`.
+
+### Making and filling folders
+
+- **Make a folder** from the "+" beside Your library in the sidebar (it also makes a playlist or a smart playlist), or from the New folder card in Library › Playlists.
+- **Put a playlist in a folder** in any of these ways:
+  - Carry it with the mouse onto the folder in the sidebar. Carrying it onto "Your library", or among the playlists in no folder, takes it out.
+  - Use its menu: right-click it in the sidebar or on its card, or press Move to folder on its page. The menu marks the folder it is in, offers "Not in a folder", and can make a new folder with the playlist in it.
+  - Make a new playlist while a folder is open in Library › Playlists: the playlist goes in that folder.
+- **Carrying uses the pointer's own events**, as moving songs in Up next does. A drag started by the system (HTML5 drag and drop) does not reach the page in the window on Windows.
+  - The place under the pointer lights up, and a chip with the playlist's name follows it.
+  - Escape puts it back.
+  - The click at the end of a carry is swallowed, so the playlist does not open.
+
+### What a folder shows
+
+- **In the sidebar**, a folder shows its playlists a step in under it. A click folds it shut or open, and the core keeps that for next time.
+- **In Library › Playlists**, the top level shows the folders, then the playlists in no folder. A folder's card opens it, with its playlists, Rename and Delete.
+- **Searching Library › Playlists** finds playlists wherever they are.
+- **A playlist's page** names its folder above its title, as a link back to it.
+
+### Deleting a folder
+
+Deleting a folder keeps its playlists: they come out of it. The deletion is said with Undo, which makes the folder again with the same name and those playlists in it.
+
+### Checked
+
+- **Core test** (`folders::tests`):
+  - Folders are made, and an empty name is refused.
+  - Playlists go in and out, and a folder or playlist that does not exist is said.
+  - Folders are renamed and folded shut.
+  - A deleted folder's playlists stay, out of any folder.
+  - Deleting a playlist leaves the folder.
+- **API test** (in `what_is_done_here_goes_out_as_a_library_file`):
+  - A folder made with a playlist in it, renamed, then folded shut.
+  - An empty name is refused in words, and renaming a folder that does not exist answers 404.
+  - The playlist goes out of the folder and back in by `/api/playlists/{id}/folder`. Each answer carries the folders.
+  - The written library file does not name the folder.
+  - Deleting the folder keeps the playlist, out of any folder.
+- **On the built page** (light and dark, with a scratch library of 6 made-up songs and 3 playlists):
+  - **Making a folder:** "+" offered New playlist, New smart playlist and New folder. "Summer" was made in place.
+  - **Carrying:**
+    - Road was carried onto Summer: Summer lit up, the chip said "Road", Road went in, and the page did not move.
+    - Night was carried with Escape pressed: it stayed out.
+    - Trip was carried onto Your library: it came out.
+  - **Folding:** Summer was folded shut and was still shut after a reload.
+  - **Menus:**
+    - Trip's right-click menu ("Move to folder: Summer, Not in a folder, New folder") moved it in, and said so.
+    - The playlist page's menu took a playlist out.
+    - Its keys worked: Escape closed it and focus went back to its button.
+  - **Library › Playlists:**
+    - The top level showed Summer's card and Night.
+    - Opening Summer showed Road and Trip.
+    - Renaming it changed the sidebar too.
+    - A playlist made inside it went in it, and its page named the folder.
+  - **Deleting:** Summer was deleted from its menu and its playlists stayed. Undo brought it back with Road in it.
+  - **In the narrow rail:** the folder is a tile, and its playlists' tiles are smaller (32 px against 40).
+  - No errors in the page.

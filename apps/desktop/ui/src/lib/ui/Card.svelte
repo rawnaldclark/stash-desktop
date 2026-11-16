@@ -20,7 +20,8 @@
 		song,
 		menu,
 		ini,
-		kept = false
+		kept = false,
+		oncontext
 	}: {
 		title: string;
 		sub?: string;
@@ -38,6 +39,8 @@
 		ini?: string;
 		/** a list kept on this computer: a mark before the line under the title */
 		kept?: boolean;
+		/** a right-click (or the menu key) on a card that is a link: its own menu (a playlist's) */
+		oncontext?: (e: MouseEvent) => void;
 	} = $props();
 
 	const args = $derived<SongMenuArgs>(menu ?? (song ? { item: song } : null));
@@ -62,7 +65,7 @@
 		</button>
 	</div>
 {:else if href}
-	<a class="card" {href} aria-label={label} {onclick}>{@render inner()}</a>
+	<a class="card" {href} aria-label={label} {onclick} oncontextmenu={oncontext}>{@render inner()}</a>
 {:else if args}
 	<div class="card card-m" use:songMenu={args}>
 		{@render inner()}
