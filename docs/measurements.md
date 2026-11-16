@@ -466,3 +466,20 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 ### Not covered yet
 
 - A browser that sends no Sec-Fetch-Site (Chrome before 76, Firefox before 90, Safari before 16.4) is not told apart from a program, so a page in one could still make the core ask an add-on.
+
+## 21. Scrobbling
+
+- **What you play goes to ListenBrainz, or to a server that speaks its language** (Settings › Scrobbling; `crates/stash-core/src/scrobble.rs`, `listenbrainz.rs`, `crates/stashd/src/scrobbling.rs`). The listener pastes their token; the core checks it with the service before keeping it, and keeps the name the service knows them by. Another server is given by its address (Maloja, Koito and others people run themselves); an address pasted with one of the API's own paths on it is cut back to its root. More than one service can be on at once.
+- **A play is sent when it counts**, by the rule the library counts plays by (half the song, never before 30 s, always by 4 minutes), with the time it began. Its title, artist and album go, and its length, ISRC and track number when the library knows them. The song that begins playing is told as playing now. A file whose artist is the "Unknown artist" placeholder is not sent.
+- **Plays wait in the library until the service takes them** (schema 14), so what is played with no connection goes when there is one. At most 50,000 wait for each service; past that the oldest make way. A service that is down or busy is left 30 s, then twice as long each time up to 30 minutes, or as long as it asks; Try again asks it at once. One that refuses the token is asked nothing more until the token is given again, and plays still wait for it. A play it says is wrong is let go on its own: the others sent with it go one by one, and the listener is told how many were let go. While a service is off, plays are not kept for it.
+- **The token** is kept in the library, as an add-on's link is, and the window is never given it. A redirect is not followed, so the token goes only where the listener said.
+
+### Checked
+
+- **By the tests:** `listenbrainz.rs` (addresses cut to their root; songs with nothing empty in them; answers read as what to do next), `scrobble.rs` (a play waits for each service that is on, once, oldest first; taken, let go, troubled, refused and given again; removed with what waited; past 50,000 the oldest make way), and `crates/stashd/tests/api.rs` (`plays_go_to_listenbrainz_and_wait_while_it_is_away`), against a stand-in for ListenBrainz that checks what is sent as the service does. A wrong token, no token, an address that is not one and an address with nothing there were refused in words; the token was never given back. An untagged file's play counted and was not sent. An add-on's song was told as playing now, then sent as a single play with the time it began. With the service away, the next play waited with "it answered 503" and went when the service was asked again. A refused token held the next play back until it was given again. Off, a play was not kept for it; then it was removed.
+- **On the built page served by the core**, light and dark, against a stand-in on this computer: a wrong token said "That server did not take that token."; connecting showed "As listener · Nothing sent yet"; three plays waiting while the service was away showed with "Trouble just now: it answered 503." and went as one import on Try again; a refused token was said, and the play that waited went once the token was given again. Ctrl+K finds Settings › Scrobbling. No errors in the page.
+
+### Not covered yet
+
+- Last.fm. It needs an application key and secret, and those do not belong in a public repository; a build could carry them from outside the source.
+- The real ListenBrainz: the stand-in follows its documented checks, but no real token was used.

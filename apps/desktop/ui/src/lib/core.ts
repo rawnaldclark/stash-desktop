@@ -134,6 +134,36 @@ export const createSmartPlaylist = (name: string, rules: SmartRules) => post<Cha
 export const setPlaylistRules = (id: number, rules: SmartRules) => post<Changed>(`/api/playlists/${id}/rules`, { rules });
 /** How many songs `rules` pick now, and the first few. Rules that make no sense are refused in the core's words. */
 export const previewRules = (rules: SmartRules) => post<{ count: number; rows: TrackRow[] }>('/api/playlists/preview', { rules });
+
+// ---- Scrobbling (the core's `scrobble.rs`, `listenbrainz.rs` and `scrobbling.rs`)
+
+/** A service the listener's plays go to: ListenBrainz, or a server that speaks its language. Never its token. */
+export type ScrobbleTarget = {
+	id: number;
+	kind: string;
+	url: string;
+	/** The name the service knows the listener by. */
+	user: string | null;
+	enabled: boolean;
+	/** It refused the token: nothing is sent until it is given again (plays wait meanwhile). */
+	refused: boolean;
+	added_at_ms: number;
+	sent: number;
+	sent_at_ms: number | null;
+	/** Plays it said were wrong, let go. */
+	dropped: number;
+	waiting: number;
+	trouble: { message: string; at_ms: number } | null;
+};
+type Targets = { targets: ScrobbleTarget[] };
+export const scrobbling = () => get<Targets>('/api/scrobbling');
+/** Adds a service by the listener's token (checked with the service first); `url` for another server than ListenBrainz.
+ *  Giving a service's token again makes it go on. */
+export const addScrobbling = (token: string, url?: string) => post<Targets & { id: number }>('/api/scrobbling', url ? { token, url } : { token });
+export const setScrobblingEnabled = (id: number, enabled: boolean) => post<Targets>(`/api/scrobbling/${id}/enabled`, { enabled });
+export const removeScrobbling = (id: number) => post<Targets>(`/api/scrobbling/${id}/remove`, {});
+/** Asks a service again now, though it was left a while after it could not take plays. */
+export const scrobbleAgain = (id: number) => post<Targets>(`/api/scrobbling/${id}/again`, {});
 export const renamePlaylist = (id: number, name: string) => post<Changed>(`/api/playlists/${id}/rename`, { name });
 export const deletePlaylist = (id: number) => post<Changed>(`/api/playlists/${id}/delete`, {});
 export const addToPlaylist = (id: number, ids: number[]) => post<Changed>(`/api/playlists/${id}/add`, { ids });
