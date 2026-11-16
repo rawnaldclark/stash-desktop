@@ -97,9 +97,11 @@
 	let folderName = $state('');
 	let renamingFolder = $state(false);
 	let folderDraft = $state('');
-	// Another folder opened (the page stays): what was being named or renamed is let go, so it is not saved onto it.
+	// Another folder opened (the page stays): what was being named or renamed is let go, so it is not saved onto it. Its
+	// id, not the folder: the folders are read again after any change (a like), and that is the same folder.
+	const openFolderId = $derived(openFolder?.id);
 	$effect(() => {
-		void openFolder?.id;
+		void openFolderId;
 		untrack(() => {
 			renamingFolder = false;
 			namingFolder = false;

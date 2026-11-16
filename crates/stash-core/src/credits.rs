@@ -41,60 +41,142 @@ static MAYBE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\s*,\s*|\s+(?:&|and|x|with|vs\.?)\s+").expect("a valid pattern")
 });
 
-/// The most pieces a credit is split into; a longer list of names is left whole.
+/// The most places a credit may be cut; a longer list of names is left whole.
 const MOST_PIECES: usize = 12;
 
-/// A stretch of the credit between two separators, with the separator before it.
-#[derive(Debug, Clone)]
-struct Piece {
-    before: String,
+/// A place the credit may be cut: the separator's bytes, and whether it surely parts two artists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Cut {
+    start: usize,
+    end: usize,
     sure: bool,
-    text: String,
 }
 
-/// The credit cut at every separator, sure or not.
-fn pieces(credit: &str) -> Vec<Piece> {
-    let mut cuts: Vec<(usize, usize, bool)> = SURE
+/// Every place the credit may be cut, in order. Places that may be cut can overlap: the spaces after one word may be
+/// the spaces before the next ("Lil Nas X & Jack Harlow" has " X " and " & "), so each search for one goes on from the
+/// spaces that end the one before. A sure separator wins where the two overlap.
+fn cuts(credit: &str) -> Vec<Cut> {
+    let mut cuts: Vec<Cut> = SURE
         .find_iter(credit)
-        .map(|m| (m.start(), m.end(), true))
+        .map(|m| Cut {
+            start: m.start(),
+            end: m.end(),
+            sure: true,
+        })
         .collect();
-    for m in MAYBE.find_iter(credit) {
-        // A sure separator wins where the two overlap (" (feat. " holds a space MAYBE does not care for).
-        if !cuts.iter().any(|&(s, e, _)| m.start() < e && s < m.end()) {
-            cuts.push((m.start(), m.end(), false));
+    let mut at = 0;
+    while let Some(m) = MAYBE.find_at(credit, at) {
+        if !cuts
+            .iter()
+            .any(|c| c.sure && m.start() < c.end && c.start < m.end())
+        {
+            cuts.push(Cut {
+                start: m.start(),
+                end: m.end(),
+                sure: false,
+            });
+        }
+        at = m.start() + m.as_str().trim_end().len();
+    }
+    cuts.sort_by_key(|c| (c.start, c.end));
+    cuts
+}
+
+/// A stretch of the credit with no sure separator in it: its bytes, the separator before it, and what closes it (the
+/// ")" of "A (feat. B)").
+#[derive(Debug)]
+struct Run {
+    start: usize,
+    end: usize,
+    before: String,
+    closing: String,
+}
+
+/// The credit as its runs, each with the places inside it that may be cut.
+fn runs(credit: &str, cuts: &[Cut]) -> Vec<(Run, Vec<Cut>)> {
+    // The sure separators that part names: not one at the very start, nor one right after another (nothing to name
+    // between), nor one that ends the credit ("A; B;": it stays with the last name).
+    let mut bounds: Vec<Cut> = Vec::new();
+    let mut at = 0;
+    for cut in cuts.iter().filter(|c| c.sure) {
+        if cut.start > at {
+            bounds.push(*cut);
+            at = cut.end;
         }
     }
-    cuts.sort_unstable();
-    let mut out = Vec::with_capacity(cuts.len() + 1);
-    let (mut at, mut before, mut sure) = (0, String::new(), true);
-    for (start, end, is_sure) in cuts {
-        // A separator at the very start, or two in a row, leaves nothing to name: it stays with the text.
-        if start == 0 || start <= at {
-            continue;
-        }
-        out.push(Piece {
+    if bounds
+        .last()
+        .is_some_and(|c| credit[c.end..].trim().is_empty())
+    {
+        bounds.pop();
+    }
+    let mut runs = Vec::new();
+    let (mut start, mut before) = (0, String::new());
+    for bound in bounds.iter().map(Some).chain([None]) {
+        let end = bound.map_or(credit.len(), |c| c.start);
+        runs.push(Run {
+            start,
+            end,
             before: std::mem::take(&mut before),
-            sure,
-            text: credit[at..start].to_string(),
+            closing: String::new(),
         });
-        before = credit[start..end].to_string();
-        sure = is_sure;
-        at = end;
-    }
-    let rest = &credit[at..];
-    match out.last_mut() {
-        // It ends with a separator ("A; B;"): that stays with the last name.
-        Some(last) if rest.trim().is_empty() => {
-            last.text.push_str(&before);
-            last.text.push_str(rest);
+        if let Some(c) = bound {
+            before = credit[c.start..c.end].to_string();
+            start = c.end;
         }
-        _ => out.push(Piece {
-            before,
-            sure,
-            text: rest.to_string(),
-        }),
     }
-    out
+    // "A (feat. B)": the ")" closes the run, wherever it falls. What comes after it ("A (feat. B) & C") is a name of its
+    // own, when a separator comes first.
+    let mut i = 0;
+    while i < runs.len() {
+        if runs[i].before.contains('(')
+            && let Some(q) = closer(&credit[runs[i].start..runs[i].end]).map(|q| runs[i].start + q)
+        {
+            let end = runs[i].end;
+            let r = q + credit[q..end].bytes().take_while(|&b| b == b')').count();
+            if credit[r..end].trim().is_empty() {
+                runs[i].closing = credit[q..end].to_string();
+                runs[i].end = q;
+            } else if let Some(next) = cuts.iter().find(|c| !c.sure && c.start == r) {
+                runs[i].closing = credit[q..r].to_string();
+                runs[i].end = q;
+                runs.insert(
+                    i + 1,
+                    Run {
+                        start: next.end,
+                        end,
+                        before: credit[next.start..next.end].to_string(),
+                        closing: String::new(),
+                    },
+                );
+            }
+        }
+        i += 1;
+    }
+    runs.into_iter()
+        .map(|run| {
+            let inside = cuts
+                .iter()
+                .filter(|c| !c.sure && c.start >= run.start && c.end <= run.end)
+                .copied()
+                .collect();
+            (run, inside)
+        })
+        .collect()
+}
+
+/// Where the ")" is that closes a "(" just before `text`: the first one not closing a "(" in it.
+fn closer(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, ch) in text.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' if depth == 0 => return Some(i),
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
 }
 
 impl Library {
@@ -111,8 +193,8 @@ impl Library {
         known: &mut HashMap<String, Option<i64>>,
     ) -> Result<Vec<CreditPart>> {
         let credit = credit.trim();
-        let pieces = pieces(credit);
-        if pieces.len() < 2 || pieces.len() > MOST_PIECES {
+        let cuts = cuts(credit);
+        if cuts.is_empty() || cuts.len() >= MOST_PIECES {
             return Ok(Vec::new());
         }
         let whole = sort_key(credit);
@@ -137,14 +219,10 @@ impl Library {
             known.insert(key, id);
             Ok(id)
         };
-        // Runs of pieces between sure separators, each split only as far as it names known artists.
+        // Each run is split only as far as it names known artists.
         let mut parts = Vec::new();
-        let mut start = 0;
-        for end in 1..=pieces.len() {
-            if end == pieces.len() || pieces[end].sure {
-                parts.extend(segment(&pieces[start..end], &mut lookup)?);
-                start = end;
-            }
+        for (run, inside) in runs(credit, &cuts) {
+            parts.extend(segment(credit, &run, &inside, &mut lookup)?);
         }
         if parts.len() < 2 {
             return Ok(Vec::new());
@@ -153,74 +231,87 @@ impl Library {
     }
 }
 
-/// The best way found to cut the first pieces of a run: how many known artists it names, in how many parts, where its
-/// last part starts, and that part's artist.
-type Cut = (usize, usize, usize, Option<i64>);
+/// The best way found to reach a place where a part may start: how many known artists it names, in how many parts,
+/// the place it came from, and the artist of the part that ends there.
+type Best = (usize, usize, usize, Option<i64>);
 
-/// A run of pieces (no sure separator inside it) as the artists it names: of every way to cut it, the one that names
-/// the most known artists, and of those the one with the fewest parts (so nothing is cut that names no one known).
+/// A run as the artists it names: of every way to cut it (at no two places that overlap), the one that names the most
+/// known artists, and of those the one with the fewest parts (so nothing is cut that names no one known).
 fn segment(
-    run: &[Piece],
+    credit: &str,
+    run: &Run,
+    cuts: &[Cut],
     lookup: &mut impl FnMut(&str) -> Result<Option<i64>>,
 ) -> Result<Vec<CreditPart>> {
-    let mut run = run.to_vec();
-    let n = run.len();
-    // "A (feat. B, C)": the ")" closes the run; it is no part of the last name.
-    let mut closing = String::new();
-    if run[0].before.contains('(') {
-        let last = &mut run[n - 1].text;
-        let kept = last.trim_end().len();
-        if last[..kept].ends_with(')') && last.matches(')').count() > last.matches('(').count() {
-            closing = last[kept - 1..].to_string();
-            last.truncate(kept - 1);
+    let n = cuts.len();
+    // Place 0 is the run's start, place k + 1 is after its cut k, and place n + 1 its end.
+    let from = |place: usize| {
+        if place == 0 {
+            run.start
+        } else {
+            cuts[place - 1].end
         }
-    }
-    // The text from piece `j` up to (not including) piece `i`, as written.
-    let text = |j: usize, i: usize| -> String {
-        let mut out = run[j].text.clone();
-        for p in &run[j + 1..i] {
-            out.push_str(&p.before);
-            out.push_str(&p.text);
-        }
-        out
     };
-    // best[i]: the best way to cut the first i pieces: (known artists, parts), and where its last part starts.
-    let mut best: Vec<Option<Cut>> = vec![None; n + 1];
+    let to = |place: usize| {
+        if place == n + 1 {
+            run.end
+        } else {
+            cuts[place - 1].start
+        }
+    };
+    let mut best: Vec<Option<Best>> = vec![None; n + 2];
     best[0] = Some((0, 0, 0, None));
-    for i in 1..=n {
-        for j in 0..i {
-            let Some((known, count, _, _)) = best[j] else {
+    // Each cut starts after the one before, so a part only ever leads to a later place.
+    for place in 0..=n {
+        let Some((known, count, _, _)) = best[place] else {
+            continue;
+        };
+        let start = from(place);
+        for next in (1..=n + 1).filter(|&next| next == n + 1 || cuts[next - 1].start >= start) {
+            let text = &credit[start..to(next)];
+            if text.trim().is_empty() {
                 continue;
-            };
-            let id = lookup(&text(j, i))?;
-            let candidate = (known + usize::from(id.is_some()), count + 1, j, id);
-            let better = match best[i] {
-                None => true,
-                Some((k, c, _, _)) => candidate.0 > k || (candidate.0 == k && candidate.1 < c),
-            };
+            }
+            let id = lookup(text)?;
+            let candidate = (known + usize::from(id.is_some()), count + 1, place, id);
+            let better = best[next].is_none_or(|(k, c, _, _)| {
+                candidate.0 > k || (candidate.0 == k && candidate.1 < c)
+            });
             if better {
-                best[i] = Some(candidate);
+                best[next] = Some(candidate);
             }
         }
     }
+    // Nothing in it to name (only spaces): kept as written.
+    if best[n + 1].is_none() {
+        return Ok(vec![CreditPart {
+            before: run.before.clone(),
+            name: String::new(),
+            after: format!("{}{}", &credit[run.start..run.end], run.closing),
+            id: None,
+        }]);
+    }
     let mut parts = Vec::new();
-    let mut i = n;
-    while i > 0 {
-        let (_, _, j, id) = best[i].expect("every length can be cut");
-        let mut name = text(j, i);
-        let trimmed = name.trim_end().len();
-        let mut after = name[trimmed..].to_string();
-        name.truncate(trimmed);
-        if i == n {
-            after.push_str(&closing);
+    let mut place = n + 1;
+    while place > 0 {
+        let (_, _, came, id) = best[place].expect("every place on the way was reached");
+        let text = &credit[from(came)..to(place)];
+        let name = text.trim_end();
+        let mut after = text[name.len()..].to_string();
+        if place == n + 1 {
+            after.push_str(&run.closing);
         }
         parts.push(CreditPart {
-            before: run[j].before.clone(),
-            name,
+            before: if came == 0 {
+                run.before.clone()
+            } else {
+                credit[cuts[came - 1].start..cuts[came - 1].end].to_string()
+            },
+            name: name.to_string(),
             after,
             id,
         });
-        i = j;
+        place = came;
     }
     parts.reverse();
     Ok(parts)
@@ -293,6 +384,38 @@ mod tests {
     }
 
     #[test]
+    fn names_that_end_in_a_joining_word_and_a_feat_that_closes_early_are_split_too() {
+        let lib = library(&["Lil Nas X", "Jack Harlow", "Drake", "Future", "Ben With"]);
+        // The space after "X" is the space before "&".
+        assert_eq!(
+            parts(&lib, "Lil Nas X & Jack Harlow"),
+            ["Lil Nas X", "Jack Harlow"]
+        );
+        assert_eq!(
+            parts(&lib, "Jack Harlow and Lil Nas X"),
+            ["Jack Harlow", "Lil Nas X"]
+        );
+        assert_eq!(parts(&lib, "Ben With x Drake"), ["Ben With", "Drake"]);
+        assert!(parts(&lib, "Lil Nas X").is_empty());
+        // The ")" closes the feat. where it falls; what comes after it is a name of its own.
+        assert_eq!(
+            parts(&lib, "Drake (feat. Future) & Newcomer"),
+            ["Drake", "Future", "Newcomer?"]
+        );
+        let feat = lib.credit_parts("Drake (feat. Future), Newcomer").unwrap();
+        assert_eq!(
+            feat.iter()
+                .map(|p| (p.before.as_str(), p.name.as_str(), p.after.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("", "Drake", ""),
+                (" (feat. ", "Future", ")"),
+                (", ", "Newcomer", "")
+            ]
+        );
+    }
+
+    #[test]
     fn an_artist_has_their_songs_with_others() {
         let lib = library(&[
             "Drake",
@@ -347,6 +470,11 @@ mod tests {
             "Drake (feat. Future, Newcomer)",
             "Drake (Ft. Future (UK) )",
             "Drake; Future;",
+            "Drake (feat. Future) & Newcomer",
+            "Drake (feat. Future)) & Newcomer",
+            "Lil Nas X & Future x Drake",
+            "Drake (feat. ) & Future",
+            "Drake; ; Future",
         ] {
             let parts = lib.credit_parts(credit).unwrap();
             assert!(parts.len() >= 2, "{credit}: {parts:?}");

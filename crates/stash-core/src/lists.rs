@@ -402,15 +402,16 @@ impl Library {
     }
 
     /// Trouble that may be its own, for the song coming in (`id`). A try that asked something (`asked`) is noted, and
-    /// counted against the song (a strike) when another song was saved since its try before: the add-on gives other
-    /// songs, so the trouble is likely this one's. Answers what the song has had so far; it is kept across starts, and
+    /// counted against the song (a strike) when an add-on gave another song since its try before: the add-on gives
+    /// other songs, so the trouble is likely this one's. A song saved from a copy kept from playing it does not count:
+    /// no add-on was asked for it. Answers what the song has had so far; it is kept across starts, and
     /// a song saved or asked for again starts over.
     pub fn download_unsure(&mut self, id: i64, asked: bool, now_ms: i64) -> Result<UnsureTries> {
         let tx = self.conn.transaction()?;
         let strike: bool = asked
             && tx.query_row(
                 "SELECT EXISTS (SELECT 1 FROM downloads d JOIN downloads o
-                                  ON o.track_id <> d.track_id AND o.state = 'saved' AND o.saved_at > d.tried_at
+                                  ON o.track_id <> d.track_id AND o.state = 'saved' AND o.tried_at > d.tried_at
                                  WHERE d.track_id = ?1)",
                 [id],
                 |r| r.get(0),
@@ -495,7 +496,8 @@ impl Library {
         )?;
         tx.execute(
             "UPDATE downloads SET state = 'saved', path = ?2, addon = ?3, tier = ?4, bytes = ?5, error = NULL,
-                                  saved_at = ?6, strikes = 0, asks = 0, unsure_since = NULL, tried_at = NULL
+                                  saved_at = ?6, strikes = 0, asks = 0, unsure_since = NULL,
+                                  tried_at = CASE WHEN ?7 THEN ?6 END
              WHERE track_id = ?1",
             params![
                 id,
@@ -503,7 +505,8 @@ impl Library {
                 saved.addon,
                 saved.tier,
                 file.file_size.map(|s| s as i64),
-                saved.at_ms
+                saved.at_ms,
+                saved.fetched
             ],
         )?;
         tx.commit()?;
@@ -1236,21 +1239,59 @@ mod tests {
             library.download_unsure(alpha, true, 200).unwrap(),
             had(0, 2, 100)
         );
-        // Another song saved since its try before: a strike. The same save is not counted twice.
-        library
-            .conn
-            .execute(
-                "UPDATE downloads SET state = 'saved', saved_at = 250 WHERE track_id = ?1",
-                [bravo],
-            )
-            .unwrap();
+        // Another song saved since its try before, from a copy kept from playing it: no add-on gave it, so it says
+        // nothing of them.
+        let save = |library: &mut Library, id: i64, at_ms: i64, fetched: bool| {
+            library
+                .conn
+                .execute(
+                    "UPDATE downloads SET state = 'saving' WHERE track_id = ?1",
+                    [id],
+                )
+                .unwrap();
+            let file = crate::library::NewTrack {
+                title: "Bravo".into(),
+                artist: "Someone".into(),
+                album_artist: None,
+                album: None,
+                year: None,
+                disc_no: 0,
+                track_no: 0,
+                duration_ms: 1_000,
+                isrc: None,
+                origin: crate::library::Origin::File,
+                addon_id: None,
+                locator: format!("C:/Saved/{id}.flac"),
+                codec: Some("flac".into()),
+                sample_rate: Some(44_100),
+                bit_depth: Some(16),
+                added_at: 0,
+                file_size: Some(10),
+                file_mtime: Some(0),
+            };
+            let saved = SavedDownload {
+                addon: "demo".into(),
+                tier: None,
+                at_ms,
+                fetched,
+                cover_inside: false,
+            };
+            assert!(library.download_saved(id, &file, &saved).unwrap());
+        };
+        save(&mut library, bravo, 250, false);
         assert_eq!(
             library.download_unsure(alpha, true, 300).unwrap(),
-            had(1, 3, 100)
+            had(0, 3, 100)
         );
+        // Given by an add-on since: a strike. The same save is not counted twice.
+        save(&mut library, bravo, 350, true);
         assert_eq!(
             library.download_unsure(alpha, true, 400).unwrap(),
             had(1, 4, 100)
+        );
+        assert_eq!(
+            library.download_unsure(alpha, true, 450).unwrap(),
+            had(1, 5, 100)
         );
         // Try again starts every song on the list over.
         library.retry_downloads(&[], 500).unwrap();
@@ -1308,6 +1349,8 @@ pub struct SavedDownload {
     pub addon: String,
     pub tier: Option<String>,
     pub at_ms: i64,
+    /// An add-on gave it just now (not a copy kept from playing it): it tells that the add-on gives songs.
+    pub fetched: bool,
     /// The file carries its cover now.
     pub cover_inside: bool,
 }

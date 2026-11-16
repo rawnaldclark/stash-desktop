@@ -14,6 +14,10 @@ const URL_CAP: usize = 16_384;
 /// The largest answer read from an add-on's API (not its media).
 const BODY_CAP: u64 = 2 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(15);
+/// How long finding the add-on's server by its name, and then connecting to it, may take (together, less than
+/// [`TIMEOUT`]).
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// A quality tier, lowest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
@@ -709,6 +713,10 @@ fn base_of(link: &str) -> Result<(Url, String)> {
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(TIMEOUT))
+        // Within the whole wait, so a name that is not found or a connection that is not made in time is told apart
+        // from an add-on that is slow to answer (see `unanswered`).
+        .timeout_resolve(Some(RESOLVE_TIMEOUT))
+        .timeout_connect(Some(CONNECT_TIMEOUT))
         .max_redirects(0)
         .http_status_as_error(false)
         .user_agent(concat!("Stash-desktop/", env!("CARGO_PKG_VERSION")))
@@ -834,6 +842,40 @@ struct ErrorDetail {
     retry_after: Option<u64>,
 }
 
+/// A request that got no answer. [`Code::Network`] only when nothing reached the add-on: its server's name was not
+/// found, nothing listens there, there is no way to it, or connecting took too long (no connection, or its server is
+/// down: the same for every request, and nothing was asked of it). A line that broke once the request was on its way,
+/// or an answer that is not HTTP, is the add-on not working: it may have been asked, and have spent something on it.
+fn unanswered(e: ureq::Error) -> AddonError {
+    use std::io::ErrorKind;
+    match e {
+        ureq::Error::HostNotFound
+        | ureq::Error::ConnectionFailed
+        | ureq::Error::ConnectProxyFailed(_)
+        | ureq::Error::Timeout(ureq::Timeout::Resolve | ureq::Timeout::Connect) => {
+            AddonError::host(Code::Network, e.to_string())
+        }
+        // A name that could not be looked up comes as one of these too, with no kind of its own.
+        ureq::Error::Io(ref io)
+            if !matches!(
+                io.kind(),
+                ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::BrokenPipe
+                    | ErrorKind::UnexpectedEof
+                    | ErrorKind::WriteZero
+                    | ErrorKind::TimedOut
+            ) =>
+        {
+            AddonError::host(Code::Network, e.to_string())
+        }
+        ureq::Error::Timeout(_) => {
+            AddonError::host(Code::Timeout, "the add-on did not answer in time")
+        }
+        other => AddonError::host(Code::Unavailable, other.to_string()),
+    }
+}
+
 /// An answer as it came: its status, what it says about waiting and signing in, and its text.
 struct Fetched {
     status: u16,
@@ -843,12 +885,7 @@ struct Fetched {
 }
 
 fn fetch(agent: &ureq::Agent, url: &str) -> Result<Fetched> {
-    let mut response = agent.get(url).call().map_err(|e| match e {
-        ureq::Error::Timeout(_) => {
-            AddonError::host(Code::Timeout, "the add-on did not answer in time")
-        }
-        other => AddonError::host(Code::Network, other.to_string()),
-    })?;
+    let mut response = agent.get(url).call().map_err(unanswered)?;
     let header = |name: &str| {
         response
             .headers()

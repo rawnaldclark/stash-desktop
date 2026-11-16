@@ -95,6 +95,9 @@ pub struct Failure {
     pub nothing_to_ask: bool,
     /// An add-on was asked for the song this time (not only "no"s remembered from before).
     pub asked: bool,
+    /// An add-on answered that it does not have the song (now, or a little while ago), or cannot give it: when another
+    /// could not be reached, the line was not down, so that was the other add-on's trouble.
+    pub answered: bool,
 }
 
 /// Asks where a track plays from: its add-on, or for a song known by its description, the listener's add-ons in turn.

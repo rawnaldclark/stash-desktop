@@ -1083,7 +1083,8 @@ impl Library {
     }
 
     /// Songs whose credit names this artist among others ("A & B", "B feat. A"; see [`crate::credits`]): the most
-    /// played first, at most `limit`. Of the credits that hold the artist's name, the first [`CREDITS_READ`] are read.
+    /// played first, at most `limit`. Of the credits that hold the artist's name as words of their own, the first
+    /// [`CREDITS_READ`] are read.
     pub fn artist_with_others(&self, id: i64, limit: usize) -> Result<Vec<TrackRow>> {
         use rusqlite::OptionalExtension;
         let key: Option<String> = self
@@ -1094,19 +1095,29 @@ impl Library {
         let Some(key) = key.filter(|k| !k.is_empty()) else {
             return Ok(Vec::new());
         };
-        // Both are lower case, so the name is found in a credit whatever its case.
+        // Both are lower case, so the name is found in a credit whatever its case. Only credits that hold it as words
+        // of their own are split ("yo" is in many a name, but stands alone in few).
         let credits = self
             .conn
             .prepare_cached(
-                "SELECT id, name FROM artists WHERE id != ?1 AND instr(sort_key, ?2) > 0 ORDER BY id LIMIT ?3",
+                "SELECT id, name, sort_key FROM artists WHERE id != ?1 AND instr(sort_key, ?2) > 0 ORDER BY id",
             )?
-            .query_map(params![id, key, CREDITS_READ as i64], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            .query_map(params![id, key], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
             })?
+            .filter_map(|row| match row {
+                Ok((_, _, ref other_key)) if !holds_words(other_key, &key) => None,
+                other => Some(other),
+            })
+            .take(CREDITS_READ)
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut known = std::collections::HashMap::new();
         let mut ids = Vec::new();
-        for (other, credit) in credits {
+        for (other, credit, _) in credits {
             let parts = self.credit_parts_with(&credit, &mut known)?;
             if parts.iter().any(|p| p.id == Some(id)) {
                 ids.push(other);
@@ -1343,6 +1354,16 @@ impl<'t> Writer<'t> {
 pub const CREDITS_READ: usize = 500;
 
 /// How a name sorts: lower case, without a leading article, so "The Beatles" files under B.
+/// Whether `words` stand in `text` as words of their own: not inside a longer one ("drake" in "drakeo the ruler").
+fn holds_words(text: &str, words: &str) -> bool {
+    !words.is_empty()
+        && text.match_indices(words).any(|(at, _)| {
+            let before = text[..at].chars().next_back();
+            let after = text[at + words.len()..].chars().next();
+            !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+        })
+}
+
 pub fn sort_key(name: &str) -> String {
     let lower = name.trim().to_lowercase();
     for article in ["the ", "a ", "an "] {

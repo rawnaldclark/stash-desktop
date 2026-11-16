@@ -1028,7 +1028,7 @@ A reviewer read sections 29 and 30 (playlist folders, the third review's fixes).
   - at once for a refusal the song before did not have (unchanged);
   - when nothing tells whose trouble it is for a long while: it has had such trouble for a day and been asked three times in it, or been asked twelve times.
 
-  So a lone song whose server keeps failing is still given up on, and an outage with nothing saved fails nothing for a day.
+  So a lone song whose server keeps failing is still given up on, and an outage with nothing saved fails nothing for a day. (§34 drops the twelve asks, which broke this for a lone song.)
 - **What a song has had is kept in the library** (schema 19: `strikes`, `asks`, `unsure_since` and `tried_at` on its downloads row). A new start of Stash no longer gives every song three new tries. A song saved, asked for again, or retried with Try again starts over.
 - **No bursts.** Saving waits before the next song, even after a song is given up on, when:
   - the song before had trouble that may be its own (of any kind now, not only the same);
@@ -1119,3 +1119,82 @@ A playlist's page has "Save as a playlist file", and Library › Liked has the s
   - Settings had the button.
   - Saving the likes (one song only add-ons play) saved nothing, and said why.
   - There were no errors in the page, apart from the covers the made-up files do not have.
+
+## 34. Fifth review: out of reach only when no add-on answered; copies say nothing; credits split better
+
+A reviewer read sections 31 and 32 (songs by several artists, the fourth review's fixes). It found two major defects, two medium ones and three minor ones; all are fixed. The saving rules below amend §32's. The schema 19 migration and the player change were found sound.
+
+### Saving
+
+- **"Out of reach" now means nothing reached the add-on.**
+  - A request counts as out of reach only when it never got there. That is: the server's name was not found, nothing listened on its port, there was no route to it, or connecting took longer than 8 s (finding the server by name, longer than 5 s).
+  - Before, every error that came without an answer counted, including a line that broke after the request went out and an answer that was not HTTP. Those are now the add-on not working, which is trouble that may be the song's own: the add-on may have been asked, and spent something on it.
+- **One add-on out of reach while another answered is not the connection being down.**
+  - Here the other add-on said it does not have the song, now or a little while ago. The connection was up, so this is trouble that may be the song's own, and its rules apply (strikes, a day).
+  - Before, one add-on that was switched off held such a song for ever, and asked the others for it again every six hours.
+  - When two add-ons had trouble, the one that answered now says more than the one out of reach, whichever came last.
+- **The window says why saving waits in words of its own:** "no add-on can be reached (is this computer online?)".
+- **A song saved from a copy kept from playing it says nothing of the add-ons.**
+  - It no longer ends a run of trouble, starts the wait's doubling over, or counts as a strike against the songs tried before it.
+  - On the downloads row, `tried_at` of a saved song now says when an add-on gave it, and is empty for a copy. There is no schema change.
+- **No twelve-ask limit; trouble that comes again waits longer each time.**
+  - §32 gave a song up at its twelfth ask. A lone song reached that about five hours into an add-on's outage, although §32 said nothing fails for a day.
+  - Now a song with no strikes is given up on only after a day with three asks in it.
+  - Each time such trouble comes again (the song before had it too, or this one is the only one left), saving waits twice as long as the time before. That is at least as long as the add-on asked, and at most an hour, so an add-on that asks to wait five seconds is not asked every five seconds. The first such wait is as long as the add-on asked.
+- **Going back online ends only a wait for add-ons out of reach, and only when Stash was offline.** Before, every request saying `offline: false` ended any wait, an allowance spent included, and started its doubling over.
+
+### Songs by several artists
+
+- **Names that end in a joining word now split.**
+  - "Lil Nas X & Jack Harlow" was read as "Lil Nas" and "& Jack Harlow", because " X " took the space " & " needed. It was not split.
+  - The places a credit may be cut may now share their spaces, and the split chooses among cuts that do not overlap.
+  - The same held for names ending in "and", "with" or "vs".
+- **The ")" that closes a "(feat." now closes it wherever it falls.**
+  - In "Drake (feat. Future) & Newcomer", Future's part was "Future)", which never linked.
+  - It now reads as Drake, Future, Newcomer.
+- **An artist page's "With others" reads only credits that hold the artist's name as words of their own** ("yo" is part of many names), up to 500 of them. Before, the first 500 credits holding those letters were read, so for a short name the real ones could be left out.
+- **The window's cache of credits no longer empties itself past 4,000 credits.**
+  - With more than that on screen (a long Liked list), it asked again for ever.
+  - It is let go when the library's songs, albums or artists change. Before, only a change in its artists did.
+  - An answer asked for before such a change is thrown away, and the credits are asked again.
+  - An ask that failed is asked again 5 s later. Before, those credits stayed unsplit until the library changed.
+
+### The window
+
+- **Any change dropped a folder rename in Library › Playlists' folder view** (a like, or a folder made elsewhere), because the folders are read again after it.
+  - The form now follows the folder's id.
+  - Only opening another folder drops it.
+
+### The demo add-on
+
+- **Out of reach, nothing answers on its port.**
+  - It now listens through a door in front of its server. Shut, nothing listens there, so a connection is refused, and the connections open are cut, as when a server goes down.
+  - Before, it answered with text that is not HTTP, which now counts as the add-on not working.
+  - `out_of_reach()` gives a switch that returns once the door is so.
+
+### Checked
+
+- **Core tests:**
+  - Credits, newly split:
+    - "Lil Nas X & Jack Harlow", "Jack Harlow and Lil Nas X" and "Ben With x Drake" split.
+    - "Lil Nas X" alone did not.
+    - "Drake (feat. Future) & Newcomer" read as Drake, Future, Newcomer (not known).
+    - In "Drake (feat. Future), Newcomer", Future's part closed with ")".
+  - Credits, given back as written: five more credits, among them "Drake (feat. Future)) & Newcomer", "Drake (feat. ) & Future" and "Drake; ; Future".
+  - `lists::tests`: a save from a copy was no strike; a save an add-on gave was one, counted once.
+- **stashd tests:**
+  - Out of reach only when no add-on answered; with an answer, it was trouble that may be the song's own.
+  - Trouble that came again waited 5, 10, then 20 s after an add-on asked for 5 s. It waited 600 s when asked for 600 s, and an hour at most.
+  - Going back online ended a wait for add-ons out of reach, and not one for an allowance spent.
+  - With no strikes, 40 asks within a day gave nothing up.
+- **API tests:**
+  - The allowance test, with the door shut (the connection refused):
+    - Saving was held, saying "no add-on can be reached", for at most 61 s, with 3 queued and 0 failed.
+    - Once online again, all three were saved.
+  - New: one add-on out of reach while the other said it does not have the song. Saving was held, but not as out of reach, with 1 queued and 0 failed.
+    - It first failed on the second try. The other add-on's "no" was remembered but not believed, so the other add-on was not asked, and only the one out of reach was left.
+    - A remembered "no" now counts as an answer.
+- **Page checks:**
+  - Credits: one ask for 4 credits; links and "With others" as before.
+  - Folders: a rename kept "Summer 20" while a folder made elsewhere appeared, and opening another folder still dropped the form.
+- **All core and stashd tests, clippy, and the window's check, unit tests (53) and build** passed.

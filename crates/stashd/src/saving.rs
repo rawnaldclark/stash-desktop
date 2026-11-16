@@ -64,27 +64,45 @@ enum Unsure {
 struct Step {
     give_up: bool,
     wait: bool,
+    /// The trouble came again (the song before had it too, or this one is the only one left): saving waits longer
+    /// than the time before, however little the add-on asked for.
+    again: bool,
 }
 
 /// A song is given up on at its third strike: a try with trouble that may be its own, after another song was saved
 /// since its try before (see `Library::download_unsure`).
 const STRIKES: u32 = 3;
 /// A song that gets no strikes (it is the only one left, or no song is saved) is given up on once it has had such
-/// trouble for a day and been asked at least [`STRIKES`] times in it, or once it has been asked [`ASKS_MOST`] times.
+/// trouble for a day and been asked at least [`STRIKES`] times in it. It is not asked often meanwhile: each time such
+/// trouble comes again, saving waits twice as long as the time before, up to an hour.
 const UNSURE_FOR_MS: i64 = 24 * 60 * 60 * 1000;
-const ASKS_MOST: u32 = 12;
 
 /// Saving waits: after trouble that is everyone's (the add-on's allowance is spent or its key refused, too many asks,
 /// it cannot be reached, no add-on can be asked, the downloads folder cannot be written), when two songs in a row had
 /// trouble that may be their own, when the one song left had it again, or when the add-on asked to be left alone. Nothing is asked until `until`; then the song first in line is tried (the
 /// one held went to the back). Each time it is held again it waits twice as long, up to an hour, or as long as the
-/// add-on asked; a song saved ends it, and so do the listener's "Try again", an add-on added or switched on, and a new
-/// downloads folder.
+/// add-on asked; a song an add-on gave ends it, and so do the listener's "Try again", an add-on added or switched on,
+/// and a new downloads folder. Going back online ends a wait for add-ons out of reach.
 struct Held {
     why: String,
     until: Instant,
     until_ms: i64,
     wait: Duration,
+    /// It waits because no add-on could be reached.
+    away: bool,
+}
+
+/// Why saving waits, which says for how long.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hold {
+    /// Trouble that is everyone's, or trouble that may be the song's own when the add-on asked to be left alone: as
+    /// long as the add-on asked, else a minute, then twice as long each time, up to an hour.
+    AsAsked,
+    /// No add-on could be reached: a minute, then twice as long each time, up to a few minutes.
+    Away,
+    /// Trouble that may be the songs' own came again: twice as long as the time before (at least as long as the add-on
+    /// asked), up to an hour, so a song is not asked often however little the add-on asks to wait.
+    Again,
 }
 
 /// How long saving first waits after trouble with an add-on, and the longest it waits.
@@ -97,6 +115,8 @@ const HELD_AWAY_MOST: Duration = Duration::from_secs(300);
 const HELD_LEAST: Duration = Duration::from_secs(5);
 /// Why saving waits after "no"s that were not believed.
 const NOT_FINDING: &str = "your add-ons are not finding songs just now";
+/// Why saving waits when no add-on could be reached.
+const UNREACHED: &str = "no add-on can be reached (is this computer online?)";
 
 #[derive(Clone, Copy, serde::Serialize)]
 struct Progress {
@@ -116,35 +136,53 @@ impl Saving {
     /// Saving waits after trouble that is not the song's own: as long as the add-on asked (`after`, in seconds), else
     /// a minute, and held again, twice as long.
     fn hold(&self, why: String, after: Option<u32>) {
-        self.hold_at_most(why, after, HELD_MOST);
+        self.hold_as(why, after, Hold::AsAsked);
     }
 
-    /// Saving waits while the add-on cannot be reached: a minute, then twice as long, up to a few minutes.
+    /// Saving waits while no add-on can be reached: a minute, then twice as long, up to a few minutes.
     fn hold_away(&self, why: String) {
-        self.hold_at_most(why, None, HELD_AWAY_MOST);
+        self.hold_as(why, None, Hold::Away);
     }
 
-    fn hold_at_most(&self, why: String, after: Option<u32>, most: Duration) {
+    fn hold_as(&self, why: String, after: Option<u32>, how: Hold) {
         let mut held = self.held.lock().unwrap();
+        let most = if how == Hold::Away {
+            HELD_AWAY_MOST
+        } else {
+            HELD_MOST
+        };
         let step = held.as_ref().map_or(HELD_FIRST, |h| (h.wait * 2).min(most));
-        let wait = after
-            .map(|s| Duration::from_secs(u64::from(s)).clamp(HELD_LEAST, HELD_MOST))
-            .unwrap_or(step);
+        let asked = after.map(|s| Duration::from_secs(u64::from(s)).clamp(HELD_LEAST, HELD_MOST));
+        let wait = match (how, asked) {
+            (Hold::Again, Some(asked)) => asked.max(step),
+            (_, Some(asked)) => asked,
+            (_, None) => step,
+        };
         *held = Some(Held {
             why,
             until: Instant::now() + wait,
             until_ms: now_ms() + wait.as_millis() as i64,
             wait,
+            away: how == Hold::Away,
         });
     }
 
-    /// The trouble is over (a song was saved, the listener asked to try again, an add-on was added or switched on,
-    /// the downloads folder changed).
+    /// The trouble is over (an add-on gave a song, the listener asked to try again, an add-on was added or switched
+    /// on, the downloads folder changed).
     pub(crate) fn release(&self) {
         *self.held.lock().unwrap() = None;
     }
 
-    /// A song was saved: a run of trouble ends (its tries start over in the library).
+    /// The connection is back (Stash was offline): a wait for add-ons out of reach is over. Other waits are not (an
+    /// allowance spent is spent whatever the connection).
+    pub(crate) fn release_away(&self) {
+        let mut held = self.held.lock().unwrap();
+        if held.as_ref().is_some_and(|h| h.away) {
+            *held = None;
+        }
+    }
+
+    /// An add-on gave a song: a run of trouble ends (its tries start over in the library).
     fn saved_one(&self) {
         *self.last.lock().unwrap() = None;
     }
@@ -162,12 +200,13 @@ impl Saving {
     /// A try that asked something (`asked`) gives the song up at its third strike (a try after another song was saved
     /// since its try before: the add-on gives other songs, so the trouble is likely this one's), at once for a refusal
     /// the song before did not have, or when nothing has told whose trouble it is for a long while (it has had such
-    /// trouble for a day and been asked three times in it, or been asked twelve times), so no song is asked for ever.
+    /// trouble for a day, and been asked three times in it), so no song is asked for ever.
     ///
     /// Saving waits before it asks the next song when the song before had such trouble too (likely everyone's: the
     /// add-on or the line is down, its lookup is broken, it refuses every request), when the same song comes again (it
     /// is the only one left), or when the add-on asked to be left alone a while (`asked_to_wait`), whether or not the
-    /// song was given up on: nothing is asked over and over, and a run never ends in a burst of asks.
+    /// song was given up on: nothing is asked over and over, and a run never ends in a burst of asks. When the trouble
+    /// came again, the wait is longer than the one before (see [`Hold::Again`]).
     fn unsure(
         &self,
         id: i64,
@@ -187,11 +226,11 @@ impl Saving {
             _ => false,
         };
         *last = Some((id, kind));
-        let long_unsure = tries.asks >= ASKS_MOST
-            || (tries.asks >= STRIKES && now_ms - tries.since_ms >= UNSURE_FOR_MS);
+        let long_unsure = tries.asks >= STRIKES && now_ms - tries.since_ms >= UNSURE_FOR_MS;
         Step {
             give_up: asked && (first_refusal || tries.strikes >= STRIKES || long_unsure),
             wait: run || again || asked_to_wait,
+            again: run || again,
         }
     }
 
@@ -312,14 +351,22 @@ fn save(state: &State, id: i64, stop: &AtomicBool) {
             back();
         }
         if step.wait {
-            state.saving.hold(waits, after);
+            let how = if step.again {
+                Hold::Again
+            } else {
+                Hold::AsAsked
+            };
+            state.saving.hold_as(waits, after, how);
         }
     };
     match outcome {
-        Ok(()) => {
+        // An add-on gave it: whatever trouble came before is over.
+        Ok(true) => {
             state.saving.release();
             state.saving.saved_one();
         }
+        // From a copy kept from playing it: no add-on was asked, so it says nothing of them.
+        Ok(false) => {}
         // The song's own: given up on.
         Err(Trouble::Failed(why)) => {
             state.saving.settled();
@@ -332,11 +379,11 @@ fn save(state: &State, id: i64, stop: &AtomicBool) {
             back();
             state.saving.hold(why, after);
         }
-        // The add-on could not be reached: everyone's too, and nothing was asked; saving waits only a little.
-        Err(Trouble::Away(why)) => {
+        // No add-on could be reached: everyone's too, and nothing was asked; saving waits only a little.
+        Err(Trouble::Away(_)) => {
             state.saving.settled();
             back();
-            state.saving.hold_away(why);
+            state.saving.hold_away(UNREACHED.into());
         }
         Err(Trouble::Busy(why, after)) => unsure(Unsure::Busy, why.clone(), why, after, true),
         Err(Trouble::Later(why, asked)) => {
@@ -353,7 +400,8 @@ fn save(state: &State, id: i64, stop: &AtomicBool) {
     }
 }
 
-fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<(), Trouble> {
+/// Brings the song in. Answers whether an add-on gave it (else it came from a copy kept from playing it).
+fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<bool, Trouble> {
     let (song, art, root) = {
         let library = state.library.lock().unwrap();
         let described = library
@@ -397,7 +445,7 @@ fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<(), Troub
         .relays
         .copy(&state.library, id)
         .filter(|(_, copy)| allowed(copy));
-    let (head, addon, tier) = if let Some((kept, copy)) = copy {
+    let (head, addon, tier, fetched) = if let Some((kept, copy)) = copy {
         let copied = std::fs::copy(&kept, &part).and_then(|_| {
             let mut head = vec![0u8; 64];
             let n = std::fs::File::open(&part)?.read(&mut head)?;
@@ -406,7 +454,7 @@ fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<(), Troub
         });
         match copied {
             Ok(head) if downloads::kind_of(&head).is_some() => {
-                (head, copy.addon.unwrap_or_default(), copy.tier)
+                (head, copy.addon.unwrap_or_default(), copy.tier, false)
             }
             Ok(_) => {
                 let _ = std::fs::remove_file(&part);
@@ -456,7 +504,7 @@ fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<(), Troub
             },
         );
         match fetched {
-            Ok((head, _)) => (head, addon, Some(info.tier.as_str().to_string())),
+            Ok((head, _)) => (head, addon, Some(info.tier.as_str().to_string()), true),
             Err(trouble) => {
                 let _ = std::fs::remove_file(&part);
                 return Err(trouble);
@@ -482,6 +530,7 @@ fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<(), Troub
             addon,
             tier,
             at_ms: now_ms(),
+            fetched,
             cover_inside,
         };
         state
@@ -498,7 +547,7 @@ fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<(), Troub
             if let Ok(Some(file)) = copy {
                 state.relays.delete(vec![file]);
             }
-            Ok(())
+            Ok(fetched)
         }
         // Taken off the list while its tags were written: nothing is kept.
         Ok(false) => {
@@ -513,18 +562,20 @@ fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<(), Troub
 }
 
 /// What saving makes of the add-ons not giving the song (see `save`). Everyone's: an allowance spent, too many asks, a
-/// key refused, an add-on out of reach, no add-on to ask, the library not read. Maybe the song's own: an add-on down or
-/// too slow;
-/// "no"s from add-ons that are not finding other songs either; a request the add-on refused, or answered with what the
-/// contract does not allow. The song's own: no add-on has it (when that is believed).
+/// key refused, no add-on that could be reached, no add-on to ask, the library not read. Maybe the song's own: an
+/// add-on not working or too slow, or one out of reach while another said it does not have the song; "no"s from
+/// add-ons that are not finding other songs either; a request the add-on refused, or answered with what the contract
+/// does not allow. The song's own: no add-on has it (when that is believed).
 fn trouble_of(failure: Failure) -> Trouble {
     match failure.code {
         Some(Code::QuotaExceeded | Code::RateLimited | Code::Unauthorized) => {
             Trouble::Held(failure.message, failure.retry_after)
         }
-        // No answer at all: the add-on's server is the same for every song, and nothing was spent.
-        Some(Code::Network) => Trouble::Away(failure.message),
-        Some(Code::Unavailable | Code::Timeout) => {
+        // No add-on answered at all: no connection, or their servers down. The same for every song, and nothing was
+        // spent.
+        Some(Code::Network) if !failure.answered => Trouble::Away(failure.message),
+        // One could not be reached while another answered (the line is up): maybe that add-on has the song.
+        Some(Code::Network | Code::Unavailable | Code::Timeout) => {
             Trouble::Busy(failure.message, failure.retry_after)
         }
         Some(code) => Trouble::Refused(failure.message, code),
@@ -789,10 +840,18 @@ mod tests {
                 "{code:?}"
             );
         }
-        // Everyone's, and nothing asked: out of reach.
+        // Everyone's, and nothing asked: out of reach. But not while another add-on answered (it does not have the
+        // song): the line is up, and the one out of reach may have it.
         assert!(matches!(
             trouble_of(failure(Some(Code::Network), false, false)),
             Trouble::Away(_)
+        ));
+        assert!(matches!(
+            trouble_of(Failure {
+                answered: true,
+                ..failure(Some(Code::Network), false, false)
+            }),
+            Trouble::Busy(_, Some(30))
         ));
         // Either: an add-on down or too slow...
         for code in [Code::Unavailable, Code::Timeout] {
@@ -851,8 +910,13 @@ mod tests {
         asks: 1,
         since_ms: NOW,
     };
+    /// What becomes of a song (with no "ask again in" from the add-on: a wait is for trouble that came again).
     fn step(give_up: bool, wait: bool) -> Step {
-        Step { give_up, wait }
+        Step {
+            give_up,
+            wait,
+            again: wait,
+        }
     }
 
     #[test]
@@ -868,9 +932,8 @@ mod tests {
         assert!(!busy(2, had(0, 2, NOW - UNSURE_FOR_MS)).give_up);
         assert!(!busy(2, had(0, 3, NOW - UNSURE_FOR_MS + 1)).give_up);
         assert!(busy(2, had(0, 3, NOW - UNSURE_FOR_MS)).give_up);
-        // ...or been asked twelve times.
-        assert!(!busy(3, had(0, ASKS_MOST - 1, NOW)).give_up);
-        assert!(busy(3, had(0, ASKS_MOST, NOW)).give_up);
+        // However often it was asked in that day (saving waits longer each time, so that is not often).
+        assert!(!busy(3, had(0, 40, NOW - UNSURE_FOR_MS + 1)).give_up);
         // A try that asked nothing (only "no"s remembered from before) gives no song up.
         assert!(
             !saving
@@ -894,9 +957,11 @@ mod tests {
         assert_eq!(unsure(5, Unsure::Busy, FRESH), step(false, false));
         saving.settled();
         assert_eq!(unsure(6, Unsure::Busy, FRESH), step(false, false));
-        // The add-on's "ask again in" is waited for, even after the first song.
+        // The add-on's "ask again in" is waited for, even after the first song (as asked: the trouble did not come
+        // again).
         saving.settled();
-        assert!(saving.unsure(7, Unsure::Busy, FRESH, true, true, NOW).wait);
+        let asked = saving.unsure(7, Unsure::Busy, FRESH, true, true, NOW);
+        assert!(asked.wait && !asked.again, "{asked:?}");
         // "Try again": no run under way.
         saving.forgive();
         assert_eq!(unsure(8, Unsure::Busy, FRESH), step(false, false));
@@ -940,5 +1005,40 @@ mod tests {
             saving.held_for().unwrap() <= HELD_LEAST,
             "at least a few seconds"
         );
+    }
+
+    #[test]
+    fn trouble_that_comes_again_waits_longer_each_time_however_little_the_add_on_asks() {
+        let saving = Saving::default();
+        let waits = || saving.held.lock().unwrap().as_ref().unwrap().wait;
+        // The first time, as asked; each time after, twice as long as the time before.
+        saving.hold_as("busy".into(), Some(5), Hold::AsAsked);
+        assert_eq!(waits(), Duration::from_secs(5));
+        saving.hold_as("busy".into(), Some(5), Hold::Again);
+        assert_eq!(waits(), Duration::from_secs(10));
+        saving.hold_as("busy".into(), Some(5), Hold::Again);
+        assert_eq!(waits(), Duration::from_secs(20));
+        // Never less than asked, and never more than an hour.
+        saving.hold_as("busy".into(), Some(600), Hold::Again);
+        assert_eq!(waits(), Duration::from_secs(600));
+        for _ in 0..10 {
+            saving.hold_as("busy".into(), Some(5), Hold::Again);
+        }
+        assert_eq!(waits(), HELD_MOST);
+    }
+
+    #[test]
+    fn going_back_online_ends_only_a_wait_for_add_ons_out_of_reach() {
+        let saving = Saving::default();
+        saving.hold("spent".into(), Some(600));
+        saving.release_away();
+        assert!(
+            saving.held_for().is_some(),
+            "an allowance spent is still spent"
+        );
+        saving.hold_away("unreachable".into());
+        assert!(saving.held_for().unwrap() <= HELD_AWAY_MOST);
+        saving.release_away();
+        assert!(saving.held_for().is_none());
     }
 }

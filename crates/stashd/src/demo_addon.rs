@@ -6,9 +6,12 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
@@ -23,7 +26,11 @@ const TRACKS_CAP: usize = 5_000;
 const TIERS: [&str; 4] = ["low", "high", "lossless", "hires"];
 
 pub struct DemoAddon {
+    /// The server, on a port of its own behind the add-on's (see [`door`]).
     server: Server,
+    inside: SocketAddr,
+    /// The add-on's own port, until it runs.
+    listener: Option<TcpListener>,
     port: u16,
     library: Library,
     rows: HashMap<i64, TrackRow>,
@@ -36,10 +43,97 @@ pub struct DemoAddon {
     resolves: bool,
     /// The listener's allowance is spent: every stream and download is refused as the contract says (to try what Stash
     /// does then). Shared, so it can be switched while the add-on runs.
-    spent: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Out of reach: every stream and download is met with no answer at all, only a broken line (to try what Stash
-    /// does with no connection, or the add-on's server down). Shared, like `spent`.
-    gone: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    spent: Arc<AtomicBool>,
+    /// Out of reach: nothing answers on its port at all (to try what Stash does with no connection, or the add-on's
+    /// server down). Shared, like `spent`.
+    reach: Reach,
+}
+
+/// Switches a [`DemoAddon`] out of reach and back, also once it runs.
+#[derive(Clone, Default)]
+pub struct Reach {
+    /// Asked for: out of reach.
+    gone: Arc<AtomicBool>,
+    /// As it is: the add-on's port is shut.
+    shut: Arc<AtomicBool>,
+}
+
+impl Reach {
+    /// Out of reach (true) or back (false). Answers once it is so (the add-on runs), or after a few seconds.
+    pub fn set(&self, gone: bool) {
+        self.gone.store(gone, Ordering::Relaxed);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while self.shut.load(Ordering::Relaxed) != gone && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+}
+
+/// The connections open through the door, to cut when it shuts.
+type Open = Arc<Mutex<HashMap<u64, TcpStream>>>;
+
+/// The add-on's own port, in front of its server: what comes in is passed through. Out of reach, the door is shut:
+/// nothing listens on the port, so a connection is refused, and the connections open are cut, as when an add-on's
+/// server goes down. (The server cannot do that itself: it keeps every connection it has answered on.)
+fn door(port: u16, mut listener: Option<TcpListener>, inside: SocketAddr, reach: Reach) {
+    let open: Open = Default::default();
+    let mut next = 0u64;
+    loop {
+        if reach.gone.load(Ordering::Relaxed) {
+            if listener.take().is_some() {
+                for (_, line) in open.lock().unwrap().drain() {
+                    let _ = line.shutdown(Shutdown::Both);
+                }
+            }
+            reach.shut.store(true, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(5));
+            continue;
+        }
+        let listening = match listener.as_ref() {
+            Some(listening) => listening,
+            // Open again, on the same port.
+            None => match TcpListener::bind(("127.0.0.1", port)) {
+                Ok(again) => {
+                    let _ = again.set_nonblocking(true);
+                    listener.insert(again)
+                }
+                Err(_) => {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+            },
+        };
+        reach.shut.store(false, Ordering::Relaxed);
+        let Ok((outside, _)) = listening.accept() else {
+            std::thread::sleep(Duration::from_millis(2));
+            continue;
+        };
+        let _ = outside.set_nonblocking(false);
+        let Ok(within) = TcpStream::connect(inside) else {
+            continue;
+        };
+        let (Ok(cut), Ok(from_outside), Ok(from_within)) =
+            (outside.try_clone(), outside.try_clone(), within.try_clone())
+        else {
+            continue;
+        };
+        next += 1;
+        open.lock().unwrap().insert(next, cut);
+        pass(from_outside, within, None);
+        pass(from_within, outside, Some((open.clone(), next)));
+    }
+}
+
+/// Passes on what comes from `from` to `to` until either ends, then ends both (and forgets the connection).
+fn pass(mut from: TcpStream, mut to: TcpStream, done: Option<(Open, u64)>) {
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut from, &mut to);
+        let _ = from.shutdown(Shutdown::Both);
+        let _ = to.shutdown(Shutdown::Both);
+        if let Some((open, id)) = done {
+            open.lock().unwrap().remove(&id);
+        }
+    });
 }
 
 fn header(name: &str, value: &str) -> Header {
@@ -131,15 +225,20 @@ impl DemoAddon {
             .into_iter()
             .filter_map(|item| Some((item.id?, item.locator)))
             .collect();
-        let server = Server::http(("127.0.0.1", port))
-            .map_err(|e| anyhow!("cannot listen on 127.0.0.1:{port}: {e}"))?;
-        let port = server
+        let server = Server::http(("127.0.0.1", 0))
+            .map_err(|e| anyhow!("cannot listen on this computer: {e}"))?;
+        let inside = server
             .server_addr()
             .to_ip()
-            .map(|a| a.port())
-            .unwrap_or(port);
+            .ok_or_else(|| anyhow!("the server has no port"))?;
+        let listener = TcpListener::bind(("127.0.0.1", port))
+            .with_context(|| format!("cannot listen on 127.0.0.1:{port}"))?;
+        listener.set_nonblocking(true)?;
+        let port = listener.local_addr()?.port();
         Ok(Self {
             server,
+            inside,
+            listener: Some(listener),
             port,
             library,
             rows: rows.into_iter().map(|r| (r.id, r)).collect(),
@@ -148,18 +247,18 @@ impl DemoAddon {
             eclipse,
             resolves,
             spent: Default::default(),
-            gone: Default::default(),
+            reach: Reach::default(),
         })
     }
 
     /// Switches the allowance spent (true) or back (false), also once the add-on runs.
-    pub fn allowance_spent(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    pub fn allowance_spent(&self) -> Arc<AtomicBool> {
         self.spent.clone()
     }
 
-    /// Switches the add-on out of reach (true) or back (false), also once it runs.
-    pub fn out_of_reach(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
-        self.gone.clone()
+    /// Switches the add-on out of reach and back, also once it runs.
+    pub fn out_of_reach(&self) -> Reach {
+        self.reach.clone()
     }
 
     pub fn tracks(&self) -> usize {
@@ -172,7 +271,14 @@ impl DemoAddon {
     }
 
     /// Answers until the program ends.
-    pub fn run(self) {
+    pub fn run(mut self) {
+        let (port, listener, inside, reach) = (
+            self.port,
+            self.listener.take(),
+            self.inside,
+            self.reach.clone(),
+        );
+        std::thread::spawn(move || door(port, listener, inside, reach));
         for request in self.server.incoming_requests() {
             self.handle(request);
         }
@@ -278,19 +384,7 @@ impl DemoAddon {
             .or_else(|| path.strip_prefix("/download/").filter(|_| !self.eclipse))
         {
             std::thread::sleep(self.delay);
-            if self.gone.load(std::sync::atomic::Ordering::Relaxed) {
-                // No answer: what comes back is not HTTP at all, as from a line that broke (tiny_http cannot drop
-                // the connection itself).
-                let mut line = request.into_writer();
-                let _ = line.write_all(
-                    b"no answer
-
-",
-                );
-                let _ = line.flush();
-                return;
-            }
-            if self.spent.load(std::sync::atomic::Ordering::Relaxed) {
+            if self.spent.load(Ordering::Relaxed) {
                 let _ = request.respond(refusal(
                     429,
                     "quota_exceeded",

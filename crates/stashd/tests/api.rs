@@ -4581,9 +4581,10 @@ fn an_add_on_whose_allowance_is_spent_holds_saving_and_fails_nothing() {
     // connection, its server down): everyone's trouble again, and nothing was spent, so saving waits, a minute at
     // first, and still marks nothing as not saved.
     spent.store(false, std::sync::atomic::Ordering::Relaxed);
-    gone.store(true, std::sync::atomic::Ordering::Relaxed);
+    gone.set(true);
     client.post("/api/downloads/retry", json!({}));
-    let away = held_when("the add-on out of reach", &|why| !why.contains("allowance"));
+    // (Not trouble that may be the song's own: nothing was asked, and the window says so.)
+    let away = held_for("no add-on can be reached");
     std::thread::sleep(Duration::from_millis(500));
     let (_, now) = client.get("/api/downloads");
     assert_eq!(
@@ -4604,7 +4605,7 @@ fn an_add_on_whose_allowance_is_spent_holds_saving_and_fails_nothing() {
 
     // It can be reached again, and the connection comes back (Stash was offline): saving goes on at once, without
     // waiting out its minute, and every song is saved.
-    gone.store(false, std::sync::atomic::Ordering::Relaxed);
+    gone.set(false);
     client.post("/api/offline", json!({ "offline": true }));
     client.post("/api/offline", json!({ "offline": false }));
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -5237,5 +5238,82 @@ fn a_playlist_file_comes_in_and_goes_out() {
     );
     let (status, _) = client.get("/api/playlists/999999/file");
     assert_eq!(status, 404);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_add_on_out_of_reach_while_another_says_no_is_not_the_connection_down() {
+    let dir = std::env::temp_dir().join(format!("stash-api-reach-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (first, second, saved) = (dir.join("First"), dir.join("Second"), dir.join("Saved"));
+    for (folder, name) in [(&first, "alpha"), (&second, "bravo")] {
+        std::fs::create_dir_all(folder).unwrap();
+        silence(&folder.join(format!("{name}.wav")));
+    }
+    // The song is the first add-on's; the second does not have it.
+    let gone = DemoAddon::bind_as(&first, 0, Duration::ZERO, true).unwrap();
+    let other = DemoAddon::bind(&second, 0, Duration::ZERO).unwrap();
+    let (gone_link, other_link, reach) = (gone.link(), other.link(), gone.out_of_reach());
+    std::thread::spawn(move || gone.run());
+    std::thread::spawn(move || other.run());
+    let core = Core::bind(Options {
+        db: dir.join("library.db"),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: None,
+        mpv: None,
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    client.post(
+        "/api/downloads/folder",
+        json!({ "folder": saved.to_string_lossy() }),
+    );
+    client.post("/api/addons", json!({ "link": gone_link }));
+    client.post("/api/addons", json!({ "link": other_link }));
+    let (_, found) = client.get("/api/addons/search?q=alpha&addon=demo.folder.eclipse&limit=1");
+    let track = found["groups"][0]["tracks"][0].clone();
+    let id = client.post(
+        "/api/tracks/keep",
+        json!({ "addon": "demo.folder.eclipse", "track": track }),
+    )["id"]
+        .as_i64()
+        .unwrap();
+
+    // Its add-on is out of reach, and the other answers that it does not have the song: the connection is up, so this
+    // is not the wait for add-ons out of reach (which never gives a song up), but trouble that may be the song's own:
+    // asked again after a wait, and not given up on yet.
+    reach.set(true);
+    client.post("/api/downloads", json!({ "ids": [id] }));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let held = loop {
+        let (_, now) = client.get("/api/downloads");
+        if now["held"]["why"].is_string() {
+            break now;
+        }
+        assert!(Instant::now() < deadline, "saving did not wait: {now}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        !held["held"]["why"]
+            .as_str()
+            .unwrap()
+            .contains("no add-on can be reached"),
+        "{held}"
+    );
+    assert_eq!(
+        (&held["counts"]["queued"], &held["counts"]["failed"]),
+        (&json!(1), &json!(0)),
+        "{held}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

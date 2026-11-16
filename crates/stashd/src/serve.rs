@@ -382,6 +382,8 @@ pub(crate) fn through_addons<T>(
     let mut had_it = false;
     // Whether an add-on was asked anything this time (not only "no"s remembered from before).
     let mut any_asked = false;
+    // Whether an add-on said no a little while ago, believed or not: it could be reached then.
+    let mut remembered_no = false;
     // A name the add-on gave before says nothing of how it answers when asked; a song it was asked for does.
     let found = |addon_id: &str, asked: bool| {
         if asked {
@@ -418,7 +420,7 @@ pub(crate) fn through_addons<T>(
                 }
                 Err(e) => {
                     lacks.troubled(addon_id, &e);
-                    trouble = Some(e);
+                    keep_trouble(&mut trouble, e);
                     continue;
                 }
             }
@@ -426,6 +428,7 @@ pub(crate) fn through_addons<T>(
         // A "no" from a little while ago counts only if it was believed when it was said. One that was not is asked
         // again once the add-on is finding other songs: its answer counts then.
         if let Some(believed) = lacks.remembered(id, addon_id) {
+            remembered_no = true;
             if believed {
                 said_no.push(addon_id);
                 continue;
@@ -473,7 +476,7 @@ pub(crate) fn through_addons<T>(
             }
             Err(e) => {
                 lacks.troubled(addon_id, &e);
-                trouble = Some(e);
+                keep_trouble(&mut trouble, e);
                 continue;
             }
         };
@@ -489,7 +492,7 @@ pub(crate) fn through_addons<T>(
             }
             Err(e) => {
                 lacks.troubled(addon_id, &e);
-                trouble = Some(e);
+                keep_trouble(&mut trouble, e);
                 continue;
             }
         }
@@ -499,6 +502,7 @@ pub(crate) fn through_addons<T>(
             message: e.in_words(),
             code: Some(e.code),
             retry_after: e.retry_after,
+            answered: had_it || !said_no.is_empty() || remembered_no,
             ..Default::default()
         },
         None => {
@@ -532,6 +536,14 @@ pub(crate) fn through_addons<T>(
             }
         }
     })
+}
+
+/// Of the trouble an add-on had and the trouble kept so far, the one that says more: an add-on that could not be
+/// reached says least (another's answer says more of the song and of the add-ons).
+fn keep_trouble(kept: &mut Option<AddonError>, e: AddonError) {
+    if e.code != Code::Network || kept.as_ref().is_none_or(|k| k.code == Code::Network) {
+        *kept = Some(e);
+    }
 }
 
 /// How the player finds where a track plays from.
@@ -1278,10 +1290,13 @@ fn offline_route(state: &State, request: &mut Request, path: &str) -> Result<Opt
         if on && let Ok(player) = &state.player {
             player.ask_again_ahead();
         }
-        // Back online: what waited goes (saving does not wait out a hold from while the add-on could not be reached).
+        // Back online: what waited goes. Saving does not wait out a hold from while no add-on could be reached (other
+        // holds stand: an allowance spent is still spent).
         if !on {
             state.scrobbling.ring(None);
-            state.saving.release();
+            if was {
+                state.saving.release_away();
+            }
             state.saving.ring();
         }
         // Every window reads its lists again: which songs are on this computer may have changed since it last did
