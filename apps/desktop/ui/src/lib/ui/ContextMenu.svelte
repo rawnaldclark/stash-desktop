@@ -167,7 +167,7 @@
 			{/if}
 		{:else}
 			<p class="mh">Add to playlist</p>
-			{#each L.playlists.filter((x) => !x.followed) as p (p.id)}
+			{#each L.playlists.filter((x) => !x.followed && !x.rules) as p (p.id)}
 				{@render entry('library_music', p.name, () => change(() => library.addToPlaylist(p.id, targets), `Added to ${p.name}`))}
 			{/each}
 			{#if naming}

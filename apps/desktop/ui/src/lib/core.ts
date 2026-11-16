@@ -75,7 +75,25 @@ export type PlayedRow = TrackRow & { played_at_ms: number };
 
 export type Counts = { tracks: number; albums: number; artists: number; liked: number; playlists: number };
 
-export type PlaylistRow = { id: number; name: string; tracks: number; followed: boolean; external_id: string | null; created_at_ms: number; updated_at_ms: number };
+export type PlaylistRow = {
+	id: number;
+	name: string;
+	tracks: number;
+	followed: boolean;
+	external_id: string | null;
+	created_at_ms: number;
+	updated_at_ms: number;
+	/** A smart playlist's rules: it fills itself. */
+	rules?: SmartRules;
+};
+
+/** Smart playlists (the core's `smart.rs`): rules over what the library knows of a song. */
+export type SmartField = 'title' | 'artist' | 'album' | 'year' | 'length' | 'plays' | 'played_often' | 'last_played' | 'added' | 'liked' | 'quality' | 'here';
+export type SmartOp = 'contains' | 'not_contains' | 'is' | 'is_not' | 'starts_with' | 'at_least' | 'below' | 'within' | 'not_within';
+export type SmartOrder = 'added' | 'most_played' | 'recently_played' | 'least_recently_played' | 'title' | 'artist' | 'album' | 'year' | 'random';
+/** `value`: text, a quality ("lossy", "lossless", "hires"), a whole number (a year, seconds, plays, days), or nothing. */
+export type SmartRule = { field: SmartField; op: SmartOp; value?: string | number | null; days?: number };
+export type SmartRules = { any: boolean; rules: SmartRule[]; order?: SmartOrder; limit?: number };
 
 export type AlbumRow = { id: number; title: string; artist: string; artist_id: number; year: number | null; tracks: number; art: string | null };
 export type ArtistRow = { id: number; name: string; tracks: number; albums: number; art: string | null };
@@ -110,6 +128,12 @@ export const likeTrack = (id: number, liked: boolean) => post<Changed>('/api/tra
 /** Makes a track an add-on found a song of the library; the answer's `id` is its row. */
 export const keepFound = (addon: string, track: KeptTrack) => post<Changed>('/api/tracks/keep', { addon, track });
 export const createPlaylist = (name: string) => post<Changed>('/api/playlists', { name });
+/** Makes a smart playlist: it fills itself by `rules`. */
+export const createSmartPlaylist = (name: string, rules: SmartRules) => post<Changed>('/api/playlists', { name, rules });
+/** Gives a smart playlist new rules. */
+export const setPlaylistRules = (id: number, rules: SmartRules) => post<Changed>(`/api/playlists/${id}/rules`, { rules });
+/** How many songs `rules` pick now, and the first few. Rules that make no sense are refused in the core's words. */
+export const previewRules = (rules: SmartRules) => post<{ count: number; rows: TrackRow[] }>('/api/playlists/preview', { rules });
 export const renamePlaylist = (id: number, name: string) => post<Changed>(`/api/playlists/${id}/rename`, { name });
 export const deletePlaylist = (id: number) => post<Changed>(`/api/playlists/${id}/delete`, {});
 export const addToPlaylist = (id: number, ids: number[]) => post<Changed>(`/api/playlists/${id}/add`, { ids });

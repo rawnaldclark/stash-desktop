@@ -30,7 +30,7 @@
 		</a>
 		{#each L.playlists as p (p.id)}
 			<a class="sb-rec" class:on={page.url.pathname === `/playlist/${p.id}`} href="/playlist/{p.id}" title={p.name}>
-				<Tile items={p.items} seed={p.name} /><span class="sb-t"><b>{p.name}</b><i>{p.followed ? 'Mix' : 'Playlist'} · {songs(p.items.length)}</i></span>
+				<Tile items={p.items} seed={p.name} /><span class="sb-t"><b>{p.name}</b><i>{p.rules ? 'Smart playlist' : p.followed ? 'Mix' : 'Playlist'} · {songs(p.items.length)}</i></span>
 			</a>
 		{/each}
 	</nav>

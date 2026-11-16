@@ -15,6 +15,7 @@
 	import PlayerBar from '../lib/ui/PlayerBar.svelte';
 	import Sidebar from '../lib/ui/Sidebar.svelte';
 	import CommandPalette from '../lib/ui/CommandPalette.svelte';
+	import SmartEditor from '../lib/desktop/SmartEditor.svelte';
 	import Toast from '../lib/ui/Toast.svelte';
 	import Wash from '../lib/ui/Wash.svelte';
 	import { coverOf } from '../lib/ui/format';
@@ -216,5 +217,6 @@
 	{#if ContextMenu}<ContextMenu />{/if}
 	<Toast />
 	{#if ui.palette}<CommandPalette />{/if}
+	{#if ui.smart}<SmartEditor />{/if}
 </div>
 {/if}

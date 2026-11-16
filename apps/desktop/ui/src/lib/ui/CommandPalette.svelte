@@ -43,6 +43,7 @@
 		list.push({ id: 'repeat', group: 'Commands', icon: repeat === 'one' ? 'repeat_one' : 'repeat', label: repeat === 'off' ? 'Repeat off' : repeat === 'all' ? 'Repeat the queue' : 'Repeat the song', run: () => player.setRepeat(repeat) });
 		if (canMini) list.push({ id: 'mini', group: 'Commands', icon: 'picture_in_picture_alt', label: 'Mini player', run: () => void core.showView('mini').catch(() => {}) });
 		list.push({ id: 'upnext', group: 'Commands', icon: 'queue_music', label: 'Up next', run: () => ui.setTab('next') });
+		list.push({ id: 'smart', group: 'Commands', icon: 'add', label: 'New smart playlist', run: () => (ui.smart = { id: null }) });
 		list.push({ id: 'lyrics', group: 'Commands', icon: 'lyrics', label: 'Lyrics', run: () => ui.setTab('lyrics') });
 		const pages: [string, string, IconName][] = [
 			['Home', '/', 'home'],

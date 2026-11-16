@@ -7,7 +7,7 @@ import type { Readable } from 'svelte/store';
 import type { SearchResult } from './sources/search';
 import type { Album, Artist, Artwork, Descriptor, Lyrics, LyricLine, LyricWord, Track } from './sources/contract';
 import type { LibraryItem } from './identity';
-import type { AddonInfo, Counts, Replaygain, Signal, Tier } from './core';
+import type { AddonInfo, Counts, Replaygain, Signal, SmartRules, Tier } from './core';
 
 export type { Readable, SearchResult, Counts, Album, Artist, Artwork, Descriptor, Lyrics, LyricLine, LyricWord, Track, LibraryItem, Signal, Tier };
 
@@ -120,6 +120,8 @@ export type Playlist = {
 	updatedAt: number;
 	/** A shared mix this playlist follows: its songs are not edited here. */
 	followed?: boolean;
+	/** A smart playlist's rules: it fills itself, and its songs are not edited by hand. */
+	rules?: SmartRules;
 };
 
 /** A play that counted. `playedAt` is when the play STARTED (epoch ms). */
@@ -138,6 +140,9 @@ export interface LibraryAPI {
 	like(item: LibraryItem): Promise<void>;
 	unlike(item: LibraryItem): Promise<void>;
 	createPlaylist(name: string): Promise<Playlist>;
+	/** A playlist that fills itself by `rules`. */
+	createSmartPlaylist(name: string, rules: SmartRules): Promise<Playlist>;
+	setPlaylistRules(id: string, rules: SmartRules): Promise<void>;
 	renamePlaylist(id: string, name: string): Promise<void>;
 	deletePlaylist(id: string): Promise<void>;
 	addToPlaylist(id: string, items: LibraryItem[]): Promise<void>;

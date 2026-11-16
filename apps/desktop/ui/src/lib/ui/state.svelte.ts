@@ -118,6 +118,8 @@ class UIState {
 	panelOpen = $state(true);
 	/** The command palette (Ctrl+K) is open. */
 	palette = $state(false);
+	/** The smart playlist editor is open: on a new one (`id` null), or on the playlist `id`. */
+	smart = $state<{ id: string | null } | null>(null);
 	/** The desktop has no lyrics yet, so the panel opens on Up next unless the listener chose Lyrics. */
 	panelTab = $state<'lyrics' | 'next'>(LS.get('stash.panelTab') === 'lyrics' ? 'lyrics' : 'next');
 	/** On the Now playing route (the big lyrics). */

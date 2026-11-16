@@ -9,10 +9,13 @@
 	import { reorder } from '../../../lib/ui/reorder';
 	import { L, ui } from '../../../lib/ui/state.svelte';
 	import { songs, totalLength } from '../../../lib/ui/format';
+	import { describe } from '../../../lib/desktop/smart';
 
 	const pl = $derived(L.playlists.find((p) => p.id === page.params.id));
 	/** A followed mix is its owner's (it came in with an imported library): it plays; its songs are not edited here. */
 	const followed = $derived(!!pl?.followed);
+	/** A smart playlist fills itself by its rules: its songs are not edited by hand. */
+	const smart = $derived(pl?.rules);
 	let editing = $state(false);
 	let draft = $state('');
 	let confirmDelete = $state(false);
@@ -38,7 +41,7 @@
 		<div class="alb-top">
 			<div class="alb-cover"><Tile items={pl.items} seed={pl.name} /></div>
 			<div class="alb-txt">
-				<p class="caps">{followed ? 'Shared mix' : 'Playlist'}</p>
+				<p class="caps">{smart ? 'Smart playlist' : followed ? 'Shared mix' : 'Playlist'}</p>
 				{#if editing}
 					<form class="rename" onsubmit={(e) => { e.preventDefault(); void rename(); }}>
 						<!-- svelte-ignore a11y_autofocus -->
@@ -49,12 +52,14 @@
 					<h1 class="alb-title">{pl.name}</h1>
 				{/if}
 				<p class="alb-meta"><b>{songs(pl.items.length)}</b>{#if pl.items.length}<span class="sep">{' · '}</span><span>{totalLength(pl.items)}</span>{/if}</p>
+				{#if smart}<p class="pl-rules">{describe(smart)}</p>{/if}
 			</div>
 		</div>
 		<div class="alb-act">
 			<button type="button" class="act-play" aria-label="Play {pl.name}" disabled={!pl.items.length} onclick={() => play(pl.items)}><Icon name="play_arrow" /></button>
 			<button type="button" class="act-ib" aria-label="Shuffle {pl.name}" title="Shuffle" disabled={!pl.items.length} onclick={() => { player.setShuffle(true); play(pl.items); }}><Icon name="shuffle" /></button>
 			<button type="button" class="act-ib" aria-label="Save {pl.name} to this computer" title="Download" disabled={!pl.items.length} onclick={() => void savePlaylist(pl.id).then((said) => ui.toast(said), () => {})}><Icon name="download" /></button>
+			{#if smart}<button type="button" class="btn ghost" onclick={() => (ui.smart = { id: pl.id })}>Edit rules</button>{/if}
 			<button type="button" class="act-ib" aria-label="Rename playlist" title="Rename" onclick={() => { draft = pl.name; editing = true; }}><Icon name="edit" /></button>
 			{#if confirmDelete}
 				<button type="button" class="btn danger" onclick={remove}>Delete this playlist</button>
@@ -64,7 +69,7 @@
 			{/if}
 		</div>
 		{#if pl.items.length}
-			{#if followed}
+			{#if followed || smart}
 				<div class="trk-list">
 					{#each pl.items as it, i (it.key + i)}
 						<TrackRow item={it} num={i + 1} album onplay={() => play(pl.items, i)} />
@@ -77,6 +82,8 @@
 					{/each}
 				</div>
 			{/if}
+		{:else if smart}
+			<p class="s-hint">No song in your library matches these rules yet. It fills itself when one does.</p>
 		{:else}
 			<p class="s-hint">This playlist is empty. Use the “more” menu on any song and choose Add to playlist.</p>
 		{/if}
@@ -88,3 +95,7 @@
 		<p class="s-hint">That playlist isn’t here. <a class="lnk" href="/library?tab=playlists">Back to your playlists</a></p>
 	</div>
 {/if}
+
+<style>
+	.pl-rules { margin: 6px 0 0; color: var(--wp-text-2); font: 400 13px/1.45 var(--font-body); }
+</style>

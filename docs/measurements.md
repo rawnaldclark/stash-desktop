@@ -435,3 +435,18 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 ### Not covered yet
 
 - An artist with more than half the songs cannot be kept apart everywhere; their songs are spread as evenly as the rest allows.
+
+## 19. Smart playlists
+
+- **A playlist can fill itself by rules** (`crates/stash-core/src/smart.rs`; Library › Playlists › New smart playlist, or "New smart playlist" in Ctrl+K). A rule compares one thing the library knows of a song: its title, artist or album (contains, does not contain, is, is not, starts with; without case or accents, so "beyonce" finds "Beyoncé"), whether it is liked, its plays (ever, or at least N times in the last D days), when it was last played or added (in the last N days, or not), its year, its length, its quality from the file (lossy, lossless, hi-res; an add-on's song has none until it is saved), and whether it is on this computer (saved songs too). Every rule, or any one; an order (newest added, most played, played most recently, not played for the longest, title, artist, album, newest year, or shuffled with a new pick each day); and at most N songs. A new one starts from one of seven common lists (Recently added, Most played, On repeat, Forgotten favourites, Never played, Lossless, Daily mix). The editor counts the songs the rules pick as they are written, and says in words what does not make sense yet.
+- **It is read anew whenever it is opened, and after each play that counts**, so it follows the library. Its songs are its rules': they are not added, removed or moved by hand, and it is left out of "Add to playlist". Its page says its rules in a line, with Edit rules.
+- **It travels as its songs, with its rules**: in the library file, a smart playlist goes out as the songs it holds then and its rules. The phone and the web player keep the songs (they read only the fields they know); another desktop Stash makes it smart again, and brings in its songs for the rules to find. One that comes back without rules (a phone's copy) stays smart here. Every value typed into a rule reaches SQLite bound, never as SQL.
+
+### Checked
+
+- **By the tests:** `crates/stash-core/tests/smart.rs` runs every rule against a library of five songs (text without case or accents, an album that is missing, years and lengths that are missing, plays ever and lately, never played, likes, quality from the file, an add-on's song), every rule or any one, orders and limits, pages that end at the limit, a shuffle that holds all day and changes on other days, hand edits refused, new rules, and the library file out and back in (into an empty library, into the same one, and back from a phone without rules). `smart.rs` checks rules that make no sense (said in words). `crates/stashd/tests/api.rs`: made, listed with its rules and count, its songs read, hand edits refused (409), the preview's count and first songs, rules that make no sense refused (400), new rules, and none taken by a plain playlist.
+- **On the built page served by the core** (a scratch library, light and dark): a new one opened on Recently added (645 songs); Daily mix gave 30; a second rule with no words said "Not yet: a rule is missing its words." and kept Create off; "lanterns" gave 10 with every rule and 35 with any; Create opened its page (Smart playlist, its rules in a line, no handles to reorder); the sidebar said "Smart playlist · 35 songs"; Edit rules down to one rule gave 15, kept on Save; a song's Add to playlist did not offer it; Ctrl+K found "New smart playlist". No errors in the page.
+
+### Not covered yet
+
+- Playlist folders, and rules over genre or rating (the library keeps neither yet).

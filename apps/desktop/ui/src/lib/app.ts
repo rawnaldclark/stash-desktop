@@ -390,6 +390,8 @@ async function loadLikes(): Promise<void> {
 }
 async function loadHistory(): Promise<void> {
 	history.set((await core.historyAt(0, HISTORY_MAX)).map((r) => ({ item: itemOfRow(r), playedAt: r.played_at_ms })));
+	// A play may change what a smart playlist holds (most played, played lately).
+	if (get(playlists).some((p) => p.rules)) await core.playlists().then((rows) => syncPlaylists(rows));
 }
 let historyTimer: ReturnType<typeof setTimeout> | undefined;
 function historySoon(): void {
@@ -408,10 +410,12 @@ function syncPlaylists(rows: core.PlaylistRow[], force: number[] = []): Promise<
 				rows.map(async (r): Promise<Playlist> => {
 					const id = String(r.id);
 					const old = have.get(id);
-					const fresh = !old || force.includes(r.id) || old.items.length !== r.tracks || old.updatedAt !== r.updated_at_ms;
+					// A smart playlist follows the library: it is read again every time.
+					const fresh = !old || !!r.rules || force.includes(r.id) || old.items.length !== r.tracks || old.updatedAt !== r.updated_at_ms;
 					const items = fresh ? (await allPages((o, l) => core.playlistTracksAt(r.id, o, l))).map(itemOfRow) : old.items;
 					const p: Playlist = { id, name: r.name, items, createdAt: r.created_at_ms, updatedAt: r.updated_at_ms };
 					if (r.followed) p.followed = true;
+					if (r.rules) p.rules = r.rules;
 					return p;
 				})
 			);
@@ -533,6 +537,15 @@ const library: LibraryAPI = {
 			if (!made) throw new Refused('The playlist was not made', 500);
 			return made;
 		}),
+	createSmartPlaylist: (name, rules) =>
+		change(async () => {
+			const c = await core.createSmartPlaylist(name.trim(), rules);
+			await took(c);
+			const made = get(playlists).find((p) => p.id === String(c.id));
+			if (!made) throw new Refused('The playlist was not made', 500);
+			return made;
+		}),
+	setPlaylistRules: (id, rules) => change(async () => took(await core.setPlaylistRules(pid(id), rules), [pid(id)])),
 	renamePlaylist: (id, name) => quiet(change(async () => took(await core.renamePlaylist(pid(id), name.trim())))),
 	deletePlaylist: (id) => change(async () => took(await core.deletePlaylist(pid(id)))),
 	addToPlaylist: (id, items) =>
