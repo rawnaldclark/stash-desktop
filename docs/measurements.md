@@ -499,3 +499,59 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 
 - Up next and the mini player do not dim what will be passed over.
 - Covers from the web are still asked for (with no connection they just do not load).
+
+## 23. Shortcuts that work in any app
+
+- **Settings › Shortcuts** has one switch, off until the listener turns it on, and keys for seven actions:
+  - play or pause;
+  - next song and previous song;
+  - volume up and volume down, 5 at a time;
+  - like the song playing;
+  - show Stash.
+
+  The first five come with keys: Ctrl+Alt with Home, Page Down, Page Up, Up and Down. None of them is Ctrl+Alt with a letter, which many keyboards turn into a character (AltGr). Like and show have no keys until the listener picks some.
+- **Picking keys:** click a shortcut's keys, then press the new ones. Esc leaves them as they were; Backspace leaves that action with no keys. While keys are being picked, Stash lets go of all of them, since a key held across the system never reaches the window. Some keys are refused in words:
+  - a key alone, or with only Shift, would stop working in every other app (F13 to F24 are allowed, as nothing types with them);
+  - keys another shortcut has.
+
+  When another program holds a shortcut's keys, its row says so.
+- **The like shortcut only likes.** Nothing shows which way a press went, so a second press does not take the like back. A song from an add-on is made a song of the library first, as a like in the window does it.
+- **Media keys work without these** (section 13).
+- **Likes made elsewhere now reach every window.** The core counts changes to the likes and the playlists, and the player's answers carry that count. A window that sees the count move past its own reads its lists again. Before, a like in the mini player did not show in the full window until the window was opened again.
+- **A test run leaves the listener's window alone.** A run on a library named by `STASH_DB` no longer saves the window's place and size. That place is kept in the system's own folder, which the test could not move elsewhere.
+
+### Checked
+
+- **By the tests** in `crates/stashd/tests/api.rs`:
+  - `shortcuts_are_held_by_the_shell_and_do_what_they_say`, with a stand-in for the shell:
+    - Off, the shell was asked to hold nothing.
+    - On, it was asked to hold the five keys, and the one another app had was reported back.
+    - Keys picked as "alt+ctrl+End" were kept as Ctrl+Alt+End. Keys another shortcut had (409, naming it), an S alone (400) and an action there is not (404) were refused.
+    - While keys were picked, nothing was held; then all six were held again.
+    - The choice was kept in the library.
+    - The actions:
+      - play/pause paused and played;
+      - next and previous moved between songs;
+      - volume down twice made 90, and up three times stopped at 100;
+      - like liked a file, and then a song from an add-on, made a song of the library first;
+      - show asked for the full window;
+      - an unknown action was refused.
+    - Each like raised the count of changes, and a like made in a window said the new count in its answer.
+  - `without_a_shell_there_are_no_shortcuts_to_hold`.
+  - A unit test of how keys are named and which are refused.
+- **In the real app on a scratch library.** Windows was asked whether each key was held: another program asking for keys Stash holds is refused. Another program held Ctrl+Alt+Page Up before Stash started.
+  - Off, Ctrl+Alt+Home was free.
+  - Switched on, Ctrl+Alt+Home, Page Down and Down were held by Stash, and Previous song said "Another app uses those keys. Pick other keys."
+  - While new keys were picked for the like, Ctrl+Alt+Home was free. Ctrl+Alt+End, typed into the page, was then held by Stash, and Ctrl+Alt+Home was held again.
+  - For Show Stash, an S alone and Ctrl+Alt+Home were each refused in words, and Esc left it with no keys.
+  - Switched off, every key was free and the choice was kept. After Stash ended, every key was free.
+  - No errors in the page.
+- **On the built page served by the core, as two pages** (the full window and the mini player):
+  - A like in the mini player filled the full window's heart 0.9 s later, and Liked songs went from 30 to 31.
+  - The like shortcut's action filled both hearts 0.85 s later.
+  - An unlike in the full window emptied the mini player's heart 2.1 s later. That page was in the background, where timers run slower.
+
+### Not covered yet
+
+- No key was pressed on this computer, since a press would reach other programs. A key pressed reaches the core through the same call the tests make. The one step not seen is the plugin handing a press to the shell.
+- macOS and Linux were not tried. On Linux the keys need X11; under Wayland they are not held.

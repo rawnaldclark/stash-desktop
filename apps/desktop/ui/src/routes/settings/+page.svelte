@@ -6,6 +6,7 @@
 	import * as core from '../../lib/core';
 	import { folders, lastPart, many, trouble, type Notice } from '../../lib/desktop/folders.svelte';
 	import Scrobbling from '../../lib/desktop/Scrobbling.svelte';
+	import Shortcuts from '../../lib/desktop/Shortcuts.svelte';
 	import Icon from '../../lib/ui/Icon.svelte';
 	import { outputSentence } from '../../lib/ui/signal';
 	import { L, S, ui } from '../../lib/ui/state.svelte';
@@ -473,6 +474,8 @@
 			{/if}
 		</div>
 	</section>
+
+	<Shortcuts />
 
 	<section class="set-sec" id="about" aria-labelledby="h-about">
 		<h2 class="set-h" id="h-about">About</h2>

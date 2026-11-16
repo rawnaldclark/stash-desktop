@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -78,6 +78,11 @@ pub enum View {
 /// The program around the core that owns its windows (the desktop shell), when there is one. The page asks it for a
 /// view through the core (`POST /api/window`), so the page talks to nothing but the core; it says whether it did.
 pub type WindowShell = Arc<dyn Fn(View) -> bool + Send + Sync>;
+
+/// The program around the core that holds keys system-wide (the desktop shell), for the shortcuts that work in any app.
+/// Handed the keys to hold, by action (`("next", "Ctrl+Alt+PageDown")`), it lets go of any it held before and answers
+/// those it could not hold, with why. A key pressed comes back to the core as `POST /api/shortcut {"action"}`.
+pub type KeysShell = Arc<dyn Fn(&[(String, String)]) -> Vec<(String, String)> + Send + Sync>;
 
 pub(crate) type Reply = Response<std::io::Cursor<Vec<u8>>>;
 
@@ -656,7 +661,7 @@ pub(crate) struct State {
     options: Options,
     port: u16,
     /// The player, or the reason there is none (no audio engine found, or it would not start).
-    player: std::result::Result<Player, String>,
+    pub(crate) player: std::result::Result<Player, String>,
     pub(crate) addons: Registry,
     scanning: Arc<Mutex<Scanning>>,
     /// What each add-on was found not to have (shared by playing and saving).
@@ -670,10 +675,20 @@ pub(crate) struct State {
     /// Stash is offline (see [`offline`]).
     pub(crate) offline: Arc<AtomicBool>,
     /// The windows' owner, when the core runs inside one.
-    window: Option<WindowShell>,
+    pub(crate) window: Option<WindowShell>,
+    /// The shortcuts that work in any app.
+    pub(crate) shortcuts: crate::shortcuts::Shortcuts,
+    /// Goes up with each change to the likes and the playlists, so every window (the mini player too) can tell when
+    /// its lists are behind: a change may come from another window, or from a shortcut.
+    pub(crate) edits: AtomicU64,
 }
 
 impl State {
+    /// Notes that the likes or the playlists changed.
+    pub(crate) fn edited(&self) {
+        self.edits.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Starts reading `folders` into the library on a thread of its own, through a connection of its own, so the
     /// window goes on answering. False when a scan is running already.
     fn scan(&self, folders: Vec<String>) -> bool {
@@ -854,6 +869,8 @@ impl Core {
                 scrobbling,
                 offline,
                 window: None,
+                shortcuts: crate::shortcuts::Shortcuts::default(),
+                edits: AtomicU64::new(0),
             },
         })
     }
@@ -865,6 +882,12 @@ impl Core {
     /// Lets the page ask `shell` for the full window or the mini player.
     pub fn with_window(mut self, shell: WindowShell) -> Self {
         self.state.window = Some(shell);
+        self
+    }
+
+    /// Lets `shell` hold the listener's shortcuts that work in any app.
+    pub fn with_shortcuts(mut self, shell: KeysShell) -> Self {
+        self.state.shortcuts.shell = Some(shell);
         self
     }
 
@@ -909,6 +932,15 @@ impl Core {
             {
                 let (state, stop) = (&state, &stop);
                 scope.spawn(move || crate::scrobbling::run(state, stop));
+            }
+            // The shortcuts as the listener left them (the shell holds them once its window is up).
+            if state.shortcuts.shell.is_some() {
+                let state = &state;
+                scope.spawn(move || {
+                    if let Err(e) = crate::shortcuts::apply(state) {
+                        eprintln!("the shortcuts were not held: {e:#}");
+                    }
+                });
             }
             for _ in 0..WORKERS {
                 scope.spawn(|| {
@@ -1006,12 +1038,13 @@ pub(crate) fn body_json(request: &mut Request) -> Result<Value> {
 }
 
 /// The player's state as the window reads it. Without a player: `available: false` and the reason.
-fn player_reply(player: &std::result::Result<Player, String>) -> Reply {
-    match player {
+fn player_reply(state: &State) -> Reply {
+    match &state.player {
         Ok(player) => {
-            let mut state = json!(player.state());
-            state["available"] = json!(true);
-            reply_json(200, state)
+            let mut answer = json!(player.state());
+            answer["available"] = json!(true);
+            answer["edits"] = json!(state.edits.load(Ordering::Relaxed));
+            reply_json(200, answer)
         }
         Err(why) => reply_json(
             200,
@@ -1164,13 +1197,13 @@ fn offline_route(state: &State, request: &mut Request, path: &str) -> Result<Opt
 fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Option<Reply>> {
     let player = &state.player;
     if *request.method() == Method::Get && path == "/api/player" {
-        return Ok(Some(player_reply(player)));
+        return Ok(Some(player_reply(state)));
     }
     // The sound outputs, the one in use and the one chosen.
     if *request.method() == Method::Get && path == "/api/player/devices" {
         return Ok(Some(match player {
             Ok(playing) => reply_json(200, devices_reply(state, playing)),
-            Err(_) => player_reply(player),
+            Err(_) => player_reply(state),
         }));
     }
     // The queue from `offset` on, each track with its place.
@@ -1206,7 +1239,7 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
         return Ok(None);
     }
     let Ok(playing) = player else {
-        return Ok(Some(player_reply(player)));
+        return Ok(Some(player_reply(state)));
     };
     let body = body_json(request)?;
     match path {
@@ -1367,7 +1400,7 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
         }
         _ => return Ok(None),
     }
-    Ok(Some(player_reply(player)))
+    Ok(Some(player_reply(state)))
 }
 
 /// Where lyrics are looked up when no add-on has them.
@@ -1944,9 +1977,12 @@ fn lists_route(state: &State, request: &mut Request, path: &str) -> Result<Optio
         }
         _ => return Ok(None),
     }
-    // Every answer carries the lists as they now are, so the window need not ask again.
+    // Every answer carries the lists as they now are, so the window need not ask again; and the count of changes, so it
+    // can tell this change from one made elsewhere.
     answer["playlists"] = json!(library.playlists()?);
     answer["counts"] = json!(library.counts()?);
+    state.edited();
+    answer["edits"] = json!(state.edits.load(Ordering::Relaxed));
     Ok(Some(reply_json(200, answer)))
 }
 
@@ -1969,6 +2005,7 @@ fn import_route(state: &State, request: &mut Request) -> Result<Reply> {
     };
     let mut library = state.library.lock().unwrap();
     let summary = library.import(&incoming)?;
+    state.edited();
     Ok(reply_json(
         200,
         json!({
@@ -2023,6 +2060,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::scrobbling::route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::shortcuts::route(state, request, &path)? {
         return Ok((response, false));
     }
     if let Some(response) = offline_route(state, request, &path)? {

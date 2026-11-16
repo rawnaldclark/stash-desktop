@@ -3494,3 +3494,302 @@ fn offline_plays_only_what_is_here_and_asks_no_add_on() {
     assert_eq!(online["served_by"].as_str(), Some("demo.folder"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn shortcuts_are_held_by_the_shell_and_do_what_they_say() {
+    use stashd::serve::View;
+    use std::sync::{Arc, Mutex};
+
+    let Some(engine) = engine() else {
+        eprintln!("SKIPPED shortcuts: no libmpv found");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("stash-api-shortcuts-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (music, catalogue) = (dir.join("Music"), dir.join("Catalogue"));
+    std::fs::create_dir_all(&music).unwrap();
+    std::fs::create_dir_all(&catalogue).unwrap();
+    for name in ["first", "second"] {
+        silence_for(&music.join(format!("{name}.wav")), 30);
+    }
+    silence_for(&catalogue.join("alpha.wav"), 30);
+    let db = dir.join("library.db");
+    {
+        let mut library = Library::open(&db).unwrap();
+        assert_eq!(scan_folder(&mut library, &music, |_| {}).unwrap().added, 2);
+    }
+
+    // A stand-in for the desktop shell: it notes each set of keys it is handed, and another app has Ctrl+Alt+Down.
+    type Held = Vec<(String, String)>;
+    let held: Arc<Mutex<Vec<Held>>> = Arc::default();
+    let keys_shell = {
+        let held = Arc::clone(&held);
+        Arc::new(move |wanted: &[(String, String)]| {
+            held.lock().unwrap().push(wanted.to_vec());
+            wanted
+                .iter()
+                .filter(|(_, keys)| keys == "Ctrl+Alt+Down")
+                .map(|(action, _)| (action.clone(), "Another app uses those keys".to_string()))
+                .collect::<Vec<_>>()
+        })
+    };
+    let shown: Arc<Mutex<Vec<View>>> = Arc::default();
+    let window_shell = {
+        let shown = Arc::clone(&shown);
+        Arc::new(move |view: View| {
+            shown.lock().unwrap().push(view);
+            true
+        })
+    };
+    let core = Core::bind(Options {
+        db: db.clone(),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: Some(Output::Silent),
+        mpv: Some(engine),
+        play_counts_between_seconds: None,
+    })
+    .unwrap()
+    .with_window(window_shell)
+    .with_shortcuts(keys_shell);
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    let last_held = || held.lock().unwrap().last().cloned();
+    let pairs = |list: &[(&str, &str)]| -> Vec<(String, String)> {
+        list.iter()
+            .map(|(a, k)| (a.to_string(), k.to_string()))
+            .collect()
+    };
+
+    // Off at first: the shell is asked to hold nothing. Each action has its keys, the like and show none.
+    until("the shell to be asked once", || last_held().is_some());
+    assert_eq!(last_held(), Some(Vec::new()));
+    let (_, first) = client.get("/api/settings/shortcuts");
+    assert_eq!(
+        first,
+        json!({
+            "available": true,
+            "on": false,
+            "actions": ["toggle", "next", "previous", "volume_up", "volume_down", "like", "show"],
+            "keys": {
+                "toggle": "Ctrl+Alt+Home", "next": "Ctrl+Alt+PageDown", "previous": "Ctrl+Alt+PageUp",
+                "volume_up": "Ctrl+Alt+Up", "volume_down": "Ctrl+Alt+Down", "like": "", "show": ""
+            },
+            "trouble": {}
+        })
+    );
+
+    // On: the shell holds the five with keys, and says which one another app has.
+    let on = client.post("/api/settings/shortcuts", json!({ "on": true }));
+    let five = pairs(&[
+        ("like", ""),
+        ("next", "Ctrl+Alt+PageDown"),
+        ("previous", "Ctrl+Alt+PageUp"),
+        ("show", ""),
+        ("toggle", "Ctrl+Alt+Home"),
+        ("volume_down", "Ctrl+Alt+Down"),
+        ("volume_up", "Ctrl+Alt+Up"),
+    ])
+    .into_iter()
+    .filter(|(_, keys)| !keys.is_empty())
+    .collect::<Vec<_>>();
+    assert_eq!(last_held(), Some(five.clone()));
+    assert_eq!(
+        (&on["on"], &on["trouble"]),
+        (
+            &json!(true),
+            &json!({ "volume_down": "Another app uses those keys" })
+        )
+    );
+
+    // Keys the listener picks are named one way; keys another shortcut has, keys that would take typing, and an
+    // action there is not, are refused in words.
+    let liked = client.post(
+        "/api/settings/shortcuts",
+        json!({ "keys": { "like": "alt+ctrl+End" } }),
+    );
+    assert_eq!(liked["keys"]["like"], "Ctrl+Alt+End");
+    assert!(
+        last_held()
+            .unwrap()
+            .contains(&("like".into(), "Ctrl+Alt+End".into()))
+    );
+    let (status, taken) = client.send(
+        "/api/settings/shortcuts",
+        json!({ "keys": { "show": "Ctrl+Alt+Home" } }),
+    );
+    assert_eq!(
+        (status, &taken["error"]["taken_by"]),
+        (409, &json!("toggle"))
+    );
+    let (status, typing) = client.send(
+        "/api/settings/shortcuts",
+        json!({ "keys": { "show": "KeyS" } }),
+    );
+    assert_eq!(
+        (status, typing["error"]["message"].as_str()),
+        (
+            400,
+            Some("A shortcut needs Ctrl, Alt or the Windows key, with one other key")
+        )
+    );
+    assert_eq!(
+        client
+            .send(
+                "/api/settings/shortcuts",
+                json!({ "keys": { "dance": "Ctrl+Alt+F9" } })
+            )
+            .0,
+        404
+    );
+    // While the listener picks keys, none is held; then they all are again.
+    client.post("/api/settings/shortcuts", json!({ "paused": true }));
+    assert_eq!(last_held(), Some(Vec::new()));
+    client.post("/api/settings/shortcuts", json!({ "paused": false }));
+    assert_eq!(last_held().unwrap().len(), 6);
+    // Kept in the library.
+    let stored = Library::open(&db)
+        .unwrap()
+        .setting("shortcuts")
+        .unwrap()
+        .unwrap();
+    assert!(
+        stored.contains("Ctrl+Alt+End") && stored.contains("\"on\":true"),
+        "{stored}"
+    );
+
+    // What each key does. Play and pause.
+    let (_, files) = client.get("/api/tracks?offset=0&limit=10");
+    let file = |title: &str| {
+        files["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["title"] == title)
+            .unwrap()["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let (first, second) = (file("first"), file("second"));
+    client.post("/api/player/volume", json!({ "percent": 100 }));
+    client.post("/api/player/play", json!({ "ids": [first, second] }));
+    client.player_until("first to play", |s| {
+        s["track"]["title"] == "first" && s["status"] == "playing"
+    });
+    let act = |action: &str| client.send("/api/shortcut", json!({ "action": action }));
+    assert_eq!(act("toggle").0, 200);
+    client.player_until("a pause", |s| s["status"] == "paused");
+    act("toggle");
+    client.player_until("playing again", |s| s["status"] == "playing");
+    // Next and previous.
+    act("next");
+    client.player_until("second", |s| s["track"]["title"] == "second");
+    act("previous");
+    client.player_until("first again", |s| s["track"]["title"] == "first");
+    // The volume, in steps of 5, never past 100.
+    act("volume_down");
+    act("volume_down");
+    assert_eq!(client.get("/api/player").1["volume"], 90);
+    for _ in 0..3 {
+        act("volume_up");
+    }
+    assert_eq!(client.get("/api/player").1["volume"], 100);
+
+    // A like: the song playing is liked, and the count of changes every window reads goes up.
+    let before = client.get("/api/player").1["edits"].as_i64().unwrap();
+    let (status, like) = act("like");
+    assert_eq!((status, &like["id"]), (200, &json!(first)));
+    let (_, likes) = client.get("/api/liked?offset=0&limit=10");
+    assert_eq!(likes["rows"][0]["title"], "first");
+    assert_eq!(
+        client.get("/api/player").1["edits"].as_i64().unwrap(),
+        before + 1
+    );
+    // A like in a window counts too, and its answer says the count, so that window knows the change was its own.
+    let unliked = client.post("/api/tracks/like", json!({ "id": first, "liked": false }));
+    assert_eq!(unliked["edits"].as_i64().unwrap(), before + 2);
+
+    // An add-on's song is made a song of the library, and liked.
+    let demo = DemoAddon::bind(&catalogue, 0, Duration::from_millis(20)).unwrap();
+    let link = demo.link();
+    std::thread::spawn(move || demo.run());
+    client.post("/api/addons", json!({ "link": link }));
+    let (_, found) = client.get("/api/addons/search?q=alpha&limit=10");
+    let alpha = found["groups"][0]["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["title"] == "alpha")
+        .unwrap()
+        .clone();
+    client.post(
+        "/api/player/play",
+        json!({ "addon": "demo.folder", "tracks": [alpha] }),
+    );
+    client.player_until("alpha from the add-on", |s| {
+        s["track"]["title"] == "alpha" && s["status"] == "playing"
+    });
+    let (status, kept) = act("like");
+    assert_eq!(status, 200, "{kept}");
+    let (_, likes) = client.get("/api/liked?offset=0&limit=10");
+    let titles: Vec<&str> = likes["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, ["alpha"]);
+    assert_eq!(likes["rows"][0]["id"], kept["id"]);
+
+    // Show brings the full window, and an action there is not is refused.
+    assert_eq!(act("show"), (200, json!({ "done": true })));
+    assert_eq!(*shown.lock().unwrap(), [View::Full]);
+    assert_eq!(act("dance").0, 404);
+
+    // Switched off, nothing is held.
+    client.post("/api/settings/shortcuts", json!({ "on": false }));
+    assert_eq!(last_held(), Some(Vec::new()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn without_a_shell_there_are_no_shortcuts_to_hold() {
+    let dir =
+        std::env::temp_dir().join(format!("stash-api-shortcuts-alone-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let core = Core::bind(Options {
+        db: dir.join("library.db"),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: Some(Output::Silent),
+        mpv: None,
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    let (_, alone) = client.get("/api/settings/shortcuts");
+    assert_eq!(
+        (&alone["available"], &alone["on"]),
+        (&json!(false), &json!(false))
+    );
+    // The choice is still kept, for a program that can hold the keys.
+    let on = client.post("/api/settings/shortcuts", json!({ "on": true }));
+    assert_eq!((&on["on"], &on["trouble"]), (&json!(true), &json!({})));
+    let _ = std::fs::remove_dir_all(&dir);
+}

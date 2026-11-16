@@ -213,6 +213,7 @@ const same = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.s
 
 /** Takes in what the core says the player is doing. Things that did not change keep their objects, so the UI redraws only what did. */
 function take(a: core.CorePlayer): void {
+	caughtUp(a.edits);
 	const before = state.current?.qid;
 	// A failure the core still remembers from before this window opened is not news: it is said when it changes.
 	// A message from before the window opened is not told again, until another comes (the same words count again).
@@ -444,7 +445,28 @@ function syncPlaylists(rows: core.PlaylistRow[], force: number[] = []): Promise<
 /** Takes in the core's answer to a change: the counts and the playlists as they now are. */
 function took(c: core.Changed, force: number[] = []): Promise<void> {
 	counts.set(c.counts);
+	if (c.edits !== undefined && (edits === null || c.edits > edits)) edits = c.edits;
 	return syncPlaylists(c.playlists, force);
+}
+
+/** The core's count of changes to the likes and the playlists that this window has taken in (null until it is read). */
+let edits: number | null = null;
+let rereading = false;
+/** The player's answers carry the core's count of changes: when it moved past this window's own, another window (the
+ * mini player) or a shortcut changed the likes or the playlists, and they are read again. */
+function caughtUp(now: number | undefined): void {
+	if (now === undefined) return;
+	// The first answer, or a core started again: nothing to catch up with.
+	if (edits === null || now < edits) {
+		edits = now;
+		return;
+	}
+	if (now === edits || rereading) return;
+	edits = now;
+	rereading = true;
+	void Promise.all([core.counts().then((c) => counts.set(c)), loadLikes(), core.playlists().then((rows) => syncPlaylists(rows))])
+		.catch(() => {})
+		.finally(() => (rereading = false));
 }
 
 async function loadLibrary(): Promise<void> {

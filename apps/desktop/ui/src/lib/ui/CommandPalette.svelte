@@ -62,6 +62,7 @@
 			['Settings › Lyrics', '/settings#lyrics', 'settings'],
 			['Settings › Your library', '/settings#library', 'settings'],
 			['Settings › Scrobbling', '/settings#scrobbling', 'settings'],
+			['Settings › Shortcuts', '/settings#shortcuts', 'settings'],
 			['Settings › Appearance', '/settings#appearance', 'settings']
 		];
 		for (const [label, href, icon] of pages) list.push({ id: `go:${href}`, group: 'Go to', icon, label, run: go(href) });

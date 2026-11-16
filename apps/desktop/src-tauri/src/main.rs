@@ -6,6 +6,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod media_controls;
+mod shortcuts;
 mod tray;
 mod windows;
 
@@ -54,9 +55,14 @@ fn main() -> Result<()> {
             windows::full(app);
         }));
     }
-    if !measuring {
-        // The window opens where it was closed, at the size it had (a measurement keeps the one size it is run at).
+    if !measuring && own_library {
+        // The window opens where it was closed, at the size it had. A measurement keeps the one size it is run at, and
+        // a library of its own (a test) leaves the listener's window where it was.
         shell = shell.plugin(tauri_plugin_window_state::Builder::default().build());
+    }
+    if !measuring {
+        // Shortcuts that work in any app (the listener's choice, off unless switched on in Settings).
+        shell = shell.plugin(shortcuts::plugin());
     }
     shell
         .setup(move |app| {
@@ -78,6 +84,7 @@ fn main() -> Result<()> {
             } else {
                 let handle = app.handle().clone();
                 core.with_window(Arc::new(move |view| windows::show(&handle, view)))
+                    .with_shortcuts(shortcuts::keys_shell(app.handle().clone(), port))
             };
             std::thread::Builder::new()
                 .name("stash-core".into())

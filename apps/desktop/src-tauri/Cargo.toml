@@ -15,6 +15,7 @@ tauri-plugin-single-instance = "2.5.5"
 souvlaki = "0.9.3"
 serde_json = "1"
 ureq = { version = "3.5.2", features = ["json"] }
+tauri-plugin-global-shortcut = "2"
 
 [build-dependencies]
 tauri-build = "2.7.4"

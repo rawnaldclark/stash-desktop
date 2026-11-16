@@ -123,7 +123,8 @@ export const artistsAt = (offset: number, limit: number, signal?: AbortSignal) =
 export const artist = (id: number) => get<{ artist: ArtistRow; rows: TrackRow[]; albums: AlbumRow[] }>(`/api/artists/${id}`);
 
 /** The core's answer to a change the listener made: the playlists and the counts as they now are. */
-export type Changed = { playlists: PlaylistRow[]; counts: Counts; id?: number; liked?: boolean; added?: number; done?: boolean };
+/** `edits`: the core's count of changes to the likes and the playlists, this one included. */
+export type Changed = { playlists: PlaylistRow[]; counts: Counts; id?: number; liked?: boolean; added?: number; done?: boolean; edits?: number };
 
 /** Likes a song of the library, or takes the like back. */
 export const likeTrack = (id: number, liked: boolean) => post<Changed>('/api/tracks/like', { id, liked });
@@ -136,6 +137,13 @@ export const createSmartPlaylist = (name: string, rules: SmartRules) => post<Cha
 export const setPlaylistRules = (id: number, rules: SmartRules) => post<Changed>(`/api/playlists/${id}/rules`, { rules });
 /** How many songs `rules` pick now, and the first few. Rules that make no sense are refused in the core's words. */
 export const previewRules = (rules: SmartRules) => post<{ count: number; rows: TrackRow[] }>('/api/playlists/preview', { rules });
+
+// ---- Shortcuts that work in any app (the desktop app holds them; in a browser there are none)
+
+export type Shortcuts = { available: boolean; on: boolean; actions: string[]; keys: Record<string, string>; trouble: Record<string, string> };
+export const shortcuts = () => get<Shortcuts>('/api/settings/shortcuts');
+/** `paused`: lets go of the keys while the listener picks new ones (keys held system-wide never reach the window). */
+export const setShortcuts = (change: { on?: boolean; keys?: Record<string, string>; paused?: boolean }) => post<Shortcuts>('/api/settings/shortcuts', change);
 
 // ---- Offline: Stash plays only what is on this computer, and asks no add-on
 
@@ -311,6 +319,8 @@ export type CorePlayer = {
 	/** False when the core has no audio engine; `reason` says why. */
 	available: boolean;
 	reason?: string;
+	/** The core's count of changes to the likes and the playlists: when it moves, another window or a shortcut changed them. */
+	edits?: number;
 	/** "loading": an add-on is being asked where the track plays from. */
 	status: 'idle' | 'loading' | 'playing' | 'paused';
 	index: number | null;

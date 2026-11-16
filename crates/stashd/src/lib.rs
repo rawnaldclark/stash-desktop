@@ -7,4 +7,5 @@ mod relay;
 mod saving;
 mod scrobbling;
 pub mod serve;
+mod shortcuts;
 mod unfound;
