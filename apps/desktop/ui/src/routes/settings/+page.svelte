@@ -509,19 +509,6 @@
 									{#if useLine(a.id)}<i class="src-use">{useLine(a.id)}</i>{/if}
 									{#if troubleOf(a.id)}<i class="src-problem">Trouble {ago(troubleOf(a.id)!.at_ms)}: {troubleOf(a.id)!.message}</i>{/if}
 									{#if a.problem}<i class="src-problem">Cannot be used: {a.problem}.</i>{:else if a.description}<i>{a.description}</i>{/if}
-									{#if offer?.id === a.id}
-										<span class="src-offer" role="group" aria-labelledby="offer-h">
-											<b id="offer-h">A new version of {a.name}: {offer.version}</b>
-											<ul>
-												{#each offer.changes as c (c.words)}<li class:more={c.more}>{c.words}</li>{/each}
-											</ul>
-											{#if offer.changes.some((c) => c.more)}<i class="src-problem">Updating gives it more than when you added it.</i>{/if}
-											<span class="src-offer-acts">
-												<button type="button" class="btn" disabled={checking !== null} onclick={takeOffer}>{checking === a.id ? 'Updating…' : 'Update'}</button>
-												<button type="button" class="btn ghost" onclick={() => (offer = null)}>Not now</button>
-											</span>
-										</span>
-									{/if}
 								</span>
 								<span class="src-acts">
 									<button type="button" class="sw" role="switch" aria-checked={a.enabled} aria-label="{a.name}: on" title={a.enabled ? 'On' : 'Off'} onclick={() => addonChange(() => sources.setEnabled(a.id, !a.enabled))}><i></i></button>
@@ -530,6 +517,19 @@
 									<button type="button" class="btn ghost" aria-label="Check {a.name} for a new version" title="Check for a new version" disabled={checking !== null || ui.offline} onclick={() => check(a)}>{checking === a.id && offer?.id !== a.id ? 'Checking…' : 'Check'}</button>
 									<button type="button" class="btn ghost" aria-label="Remove {a.name}" onclick={() => addonChange(() => sources.remove(a.id))}>Remove</button>
 								</span>
+								{#if offer?.id === a.id}
+									<div class="src-offer" role="group" aria-labelledby="offer-h">
+										<b id="offer-h">{offer.version !== a.version ? `Version ${offer.version} of ${a.name}` : `${a.name} has changed`}</b>
+										<ul>
+											{#each offer.changes as c (c.words)}<li class:gives={c.more}>{c.words}</li>{/each}
+										</ul>
+										{#if offer.changes.some((c) => c.more)}<p class="src-problem">Updating gives it more than when you added it.</p>{/if}
+										<div class="src-offer-acts">
+											<button type="button" class="btn" disabled={checking !== null} onclick={takeOffer}>{checking === a.id ? 'Updating…' : 'Update'}</button>
+											<button type="button" class="btn ghost" onclick={() => (offer = null)}>Not now</button>
+										</div>
+									</div>
+								{/if}
 							</li>
 						{/each}
 					</ol>
@@ -674,17 +674,18 @@
 
 <style>
 	/* an add-on's row: the web player's numbered list, with its controls where the status pill was */
-	.src-acts { display: flex; align-items: center; gap: 4px; }
+	.src-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 4px; }
 	.src-acts .sw { margin-right: 8px; }
 	.src-acts .btn { margin-left: 8px; }
 	.src.off .tr-t { opacity: .55; }
 	.src .tr-t i { white-space: normal; }
 	.src-problem, .set-trouble { color: var(--red) !important; }
 	/* a new version of an add-on: what changed, what gives it more first in red, then take it or put it off */
-	.src-offer { display: grid; gap: 6px; margin: 8px 0 2px; padding: 10px 12px; border: 1px solid var(--wp-line-2); border-radius: 8px; background: var(--wp-field); }
+	.src-offer { grid-column: 2 / -1; display: grid; gap: 6px; margin: 0 0 6px; padding: 10px 12px; border: 1px solid var(--wp-line-2); border-radius: 8px; background: var(--wp-field); font-size: 13px; }
 	.src-offer b { font-weight: 600; color: var(--wp-text); }
-	.src-offer ul { margin: 0; padding-left: 18px; display: grid; gap: 2px; color: var(--wp-text-2); }
-	.src-offer li.more { color: var(--red); }
+	.src-offer ul { margin: 0; padding-left: 18px; display: grid; gap: 2px; list-style: disc; color: var(--wp-text-2); }
+	.src-offer li.gives { color: var(--red); }
+	.src-offer p { margin: 0; }
 	.src-offer-acts { display: flex; gap: 8px; margin-top: 4px; }
 	/* the equalizer: the correction's name reads first; while the switch is off, the tones it keeps are dimmed */
 	.eq-name { color: var(--wp-text); }
