@@ -265,7 +265,7 @@ fn artist_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArtistRow> {
 }
 const TRACK_JOINS: &str =
     "JOIN artists a ON a.id = t.artist_id LEFT JOIN albums al ON al.id = t.album_id";
-/// The same, for the lists kept in `lists.rs` (17 columns, read by [`track_row_for_lists`]).
+/// The same, for the lists kept in `lists.rs` ([`TRACK_COLUMN_COUNT`] columns, read by [`track_row_for_lists`]).
 pub(crate) const TRACK_COLUMNS_FOR_LISTS: &str = TRACK_COLUMNS;
 pub(crate) const TRACK_JOINS_FOR_LISTS: &str = TRACK_JOINS;
 pub(crate) fn track_row_for_lists(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackRow> {
@@ -533,9 +533,6 @@ impl Library {
         Ok(rows)
     }
 
-    /// The tracks with these ids as a queue plays them, in the order asked. Ids the library does not have, tracks
-    /// whose file is marked missing, and tracks that are not files (add-on tracks need their add-on asked first) are
-    /// left out.
     /// Which of these songs play with no connection: files that are here (the listener's own, or songs saved), and
     /// songs kept as they were played.
     pub fn here_of(&self, ids: &[i64]) -> Result<std::collections::HashSet<i64>> {
@@ -557,6 +554,9 @@ impl Library {
         Ok(here)
     }
 
+    /// The tracks with these ids as a queue plays them, in the order asked. Ids the library does not have, tracks
+    /// whose file is marked missing, and tracks that are not files (add-on tracks need their add-on asked first) are
+    /// left out.
     pub fn queue_items(&self, ids: &[i64]) -> Result<Vec<crate::player::QueueItem>> {
         let mut stmt = self.conn.prepare_cached(
             concat!(
@@ -1243,6 +1243,19 @@ fn fts_query(input: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_track_has_as_many_columns_as_are_counted() {
+        let library = Library::open_in_memory().unwrap();
+        let stmt = library
+            .conn
+            .prepare(&format!(
+                "SELECT {} FROM tracks t {}",
+                TRACK_COLUMNS, TRACK_JOINS
+            ))
+            .unwrap();
+        assert_eq!(stmt.column_count(), TRACK_COLUMN_COUNT);
+    }
 
     #[test]
     fn add_ons_are_kept_in_the_listeners_order() {

@@ -59,6 +59,16 @@ pub fn root(given: &str) -> Result<String, String> {
                 .into(),
         );
     }
+    let mut url = url;
+    // Every request carries the token: over plain http anyone on the way can read it. ListenBrainz itself is asked
+    // over https; plain http is for a server on this computer or the home network.
+    if url.scheme() == "http" {
+        if url.host_str() == Some("api.listenbrainz.org") {
+            let _ = url.set_scheme("https");
+        } else if !nearby(&url) {
+            return Err("Use its https address: over http your token could be read on the way (http is fine for a server on this computer or your home network)".into());
+        }
+    }
     let mut root = url[..url::Position::AfterPath]
         .trim_end_matches('/')
         .to_string();
@@ -70,6 +80,40 @@ pub fn root(given: &str) -> Result<String, String> {
         }
     }
     Ok(root)
+}
+
+/// A server on this computer or the home network (or reached through Tailscale, which is encrypted): plain http to it
+/// does not cross the internet.
+fn nearby(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => {
+            let [a, b, ..] = ip.octets();
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || (a == 100 && (64..128).contains(&b))
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            let first = ip.segments()[0];
+            ip.is_loopback() || first & 0xfe00 == 0xfc00 || first & 0xffc0 == 0xfe80
+        }
+        Some(url::Host::Domain(name)) => {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            name == "localhost"
+                || !name.contains('.')
+                || [
+                    ".localhost",
+                    ".local",
+                    ".lan",
+                    ".home.arpa",
+                    ".internal",
+                    ".ts.net",
+                ]
+                .iter()
+                .any(|end| name.ends_with(end))
+        }
+        None => false,
+    }
 }
 
 /// The song as a service takes it ("track_metadata"): its title, artist and album, and what else is known of it.
@@ -243,7 +287,19 @@ fn outcome(answer: Result<Answer, String>) -> Sent {
             wait: None,
         },
         Ok(a) => match a.status {
-            200..=299 => Sent::Taken,
+            // Taken only when it says so: a hotel's sign-in page answers 200 too.
+            200..=299
+                if a.json.is_object()
+                    && a.json.get("status").is_none_or(|s| {
+                        s.as_str().is_some_and(|s| s.eq_ignore_ascii_case("ok"))
+                    }) =>
+            {
+                Sent::Taken
+            }
+            200..=299 => Sent::Later {
+                why: "it answered, but not as ListenBrainz does".into(),
+                wait: None,
+            },
             401 | 403 => Sent::Refused(said(&a.json, "the token was refused")),
             400 | 413 | 422 => Sent::Wrong(said(&a.json, "it said the play is wrong")),
             429 => Sent::Later {
@@ -277,6 +333,24 @@ mod tests {
             root("https://example.org/apis/listenbrainz/1").unwrap(),
             "https://example.org/apis/listenbrainz"
         );
+        // ListenBrainz is asked over https; plain http only to this computer or the home network.
+        assert_eq!(
+            root("http://api.listenbrainz.org/1/submit-listens").unwrap(),
+            ADDRESS
+        );
+        assert!(root("http://example.org/apis/listenbrainz").is_err());
+        for near in [
+            "http://localhost:42010",
+            "http://127.0.0.1:42010",
+            "http://10.0.0.5",
+            "http://nas:42010/apis/listenbrainz",
+            "http://nas.local/apis/listenbrainz",
+            "http://maloja.lan",
+            "http://100.101.102.103:42010",
+            "http://[fd00::5]:42010",
+        ] {
+            assert_eq!(root(near).unwrap(), near, "{near}");
+        }
         assert!(root("ftp://example.org").is_err());
         assert!(root("not an address").is_err());
         assert!(root("https://me:secret@example.org").is_err());
@@ -320,6 +394,16 @@ mod tests {
             })
         };
         assert_eq!(outcome(answer(200, json!({ "status": "ok" }))), Sent::Taken);
+        assert_eq!(outcome(answer(200, json!({}))), Sent::Taken);
+        // A page that is not the service's (a hotel's sign-in page) is not taken for a yes.
+        assert!(matches!(
+            outcome(answer(200, Value::Null)),
+            Sent::Later { .. }
+        ));
+        assert!(matches!(
+            outcome(answer(200, json!({ "status": "error" }))),
+            Sent::Later { .. }
+        ));
         assert_eq!(
             outcome(answer(
                 401,

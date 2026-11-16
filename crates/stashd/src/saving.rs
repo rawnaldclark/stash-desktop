@@ -97,8 +97,15 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
 fn save(state: &State, id: i64, stop: &AtomicBool) {
     let outcome = fetch_and_keep(state, id, stop);
     *state.saving.now.lock().unwrap() = None;
-    if let Err(Trouble::Failed(why)) = outcome {
-        let _ = state.library.lock().unwrap().download_failed(id, &why);
+    match outcome {
+        Err(Trouble::Failed(why)) => {
+            let _ = state.library.lock().unwrap().download_failed(id, &why);
+        }
+        // Stopped because Stash went offline: it waits for the connection, first on the list as it was.
+        Err(Trouble::Cancelled) if crate::serve::offline(state) => {
+            let _ = state.library.lock().unwrap().requeue_downloads();
+        }
+        _ => {}
     }
 }
 
@@ -188,7 +195,7 @@ fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<(), Troub
         let fetched = downloads::fetch(
             &info.url,
             &part,
-            &|| !wanted.get() || stop.load(Ordering::Relaxed),
+            &|| !wanted.get() || stop.load(Ordering::Relaxed) || crate::serve::offline(state),
             &mut |bytes, of| {
                 *state.saving.now.lock().unwrap() = Some(Progress { id, bytes, of });
                 if looked.get().elapsed() >= LOOK_EVERY {

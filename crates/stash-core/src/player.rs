@@ -1074,6 +1074,19 @@ impl Player {
         true
     }
 
+    /// Takes back what the engine was handed beyond the track playing, so the tracks after it are asked for again: what
+    /// may play has changed (Stash went offline). The track playing goes on.
+    pub fn ask_again_ahead(&self) {
+        let start = {
+            let mut shared = self.ctx.shared.lock().unwrap();
+            let current = shared.index().or(shared.starting);
+            self.after_edit(&mut shared, current, current)
+        };
+        if let Some(place) = start {
+            self.start_at(place);
+        }
+    }
+
     /// Moves the track at place `from` to place `to`. The playing track goes on playing wherever it ends up.
     pub fn move_item(&self, from: usize, to: usize) -> bool {
         let start = {

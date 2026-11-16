@@ -92,11 +92,17 @@ pub(crate) fn on_play(library: Arc<Mutex<Library>>, scrobbling: Arc<Scrobbling>)
         if !listenbrainz::sendable(&song) {
             return;
         }
-        let queued = library
+        let queued = match library
             .lock()
             .unwrap()
             .queue_scrobble(started_at_ms.div_euclid(1000), &song)
-            .unwrap_or(0);
+        {
+            Ok(queued) => queued,
+            Err(e) => {
+                eprintln!("a play could not be kept for scrobbling: {e:#}");
+                0
+            }
+        };
         if queued > 0 {
             scrobbling.ring(None);
         }
@@ -188,55 +194,131 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
                 let _ = listenbrainz::now_playing(&agent, &url, &token, song);
             }
             if target.waiting > 0 {
-                send_waiting(state, &agent, target.id, &url, &token);
+                send_waiting(state, stop, &agent, target.id, &url, &token);
             }
         }
     }
 }
 
 /// Sends the plays waiting for service `target`, a batch at a time, until none wait or it cannot take more now.
-fn send_waiting(state: &State, agent: &listenbrainz::Agent, target: i64, url: &str, token: &str) {
+fn send_waiting(
+    state: &State,
+    stop: &AtomicBool,
+    agent: &listenbrainz::Agent,
+    target: i64,
+    url: &str,
+    token: &str,
+) {
     let library = || state.library.lock().unwrap();
     let ids = |plays: &[Waiting]| plays.iter().map(|w| w.id).collect::<Vec<_>>();
-    loop {
-        let batch = library()
-            .waiting_scrobbles(target, listenbrainz::AT_ONCE)
-            .unwrap_or_default();
-        if batch.is_empty() {
-            return;
-        }
+    // The library could not be read or written (a full disk): the service rests, rather than be sent the same plays
+    // again and again.
+    let stuck = |e: stash_core::Error| {
+        eprintln!("scrobbling stopped for a while: {e:#}");
+        state.scrobbling.rest(target, None);
+    };
+    // Stopping, or going offline, ends it between batches: what is left waits.
+    while !stop.load(Ordering::Relaxed) && !crate::serve::offline(state) {
+        let batch = match library().waiting_scrobbles(target, listenbrainz::AT_ONCE) {
+            Ok(batch) if batch.is_empty() => return,
+            Ok(batch) => batch,
+            Err(e) => return stuck(e),
+        };
         // A play no service could take (no title or artist) is let go without asking.
         let (good, bad): (Vec<Waiting>, Vec<Waiting>) = batch
             .into_iter()
             .partition(|w| listenbrainz::sendable(&w.song));
-        if !bad.is_empty() {
-            let _ = library().scrobbles_dropped(target, &ids(&bad));
+        if !bad.is_empty()
+            && let Err(e) = library().scrobbles_dropped(target, &ids(&bad))
+        {
+            return stuck(e);
         }
         if good.is_empty() {
             continue;
         }
         match send(agent, url, token, &good) {
             Sent::Taken => {
-                let _ = library().scrobbles_sent(target, &ids(&good), now_ms());
-                state.scrobbling.rested(target);
-            }
-            // One of them is wrong: each is sent alone, and only the wrong ones are let go.
-            Sent::Wrong(_) if good.len() > 1 => {
-                for one in good {
-                    match send(agent, url, token, std::slice::from_ref(&one)) {
-                        Sent::Taken => {
-                            let _ = library().scrobbles_sent(target, &[one.id], now_ms());
-                        }
-                        Sent::Wrong(why) => let_go(state, target, one.id, &why),
-                        other => return failed(state, target, other),
-                    }
+                if let Err(e) = library().scrobbles_sent(target, &ids(&good), now_ms()) {
+                    return stuck(e);
                 }
                 state.scrobbling.rested(target);
             }
-            Sent::Wrong(why) => let_go(state, target, good[0].id, &why),
-            other => return failed(state, target, other),
+            Sent::Wrong(why) => {
+                if !sort_out(state, stop, agent, target, url, token, good, why) {
+                    return;
+                }
+            }
+            other => return failed(state, target, token, other),
         }
     }
+}
+
+/// The service said a batch is wrong: each play is sent alone, and those it calls wrong are let go. But only when it
+/// takes others: a service that takes none of them is in trouble (or answers everything that way), and the plays wait
+/// for it to rest. Answers whether to go on with the next batch.
+#[allow(clippy::too_many_arguments)]
+fn sort_out(
+    state: &State,
+    stop: &AtomicBool,
+    agent: &listenbrainz::Agent,
+    target: i64,
+    url: &str,
+    token: &str,
+    plays: Vec<Waiting>,
+    why: String,
+) -> bool {
+    /// Plays sent alone and all called wrong, before the service is taken to be in trouble.
+    const NONE_TAKEN: usize = 5;
+    let mut wrong = Vec::new();
+    let mut taken = 0;
+    if plays.len() == 1 {
+        wrong.push((plays[0].id, why.clone()));
+    } else {
+        for one in &plays {
+            if stop.load(Ordering::Relaxed) || crate::serve::offline(state) {
+                return false;
+            }
+            if taken == 0 && wrong.len() >= NONE_TAKEN {
+                break;
+            }
+            match send(agent, url, token, std::slice::from_ref(one)) {
+                Sent::Taken => {
+                    if let Err(e) =
+                        state
+                            .library
+                            .lock()
+                            .unwrap()
+                            .scrobbles_sent(target, &[one.id], now_ms())
+                    {
+                        eprintln!("scrobbling stopped for a while: {e:#}");
+                        state.scrobbling.rest(target, None);
+                        return false;
+                    }
+                    taken += 1;
+                }
+                Sent::Wrong(why) => wrong.push((one.id, why)),
+                other => {
+                    failed(state, target, token, other);
+                    return false;
+                }
+            }
+        }
+    }
+    if taken == 0 {
+        let _ = state.library.lock().unwrap().scrobble_trouble(
+            target,
+            &format!("it took none of the plays it was sent: {why}"),
+            None,
+            now_ms(),
+        );
+        state.scrobbling.rest(target, None);
+        return false;
+    }
+    for (id, why) in wrong {
+        let_go(state, target, id, &why);
+    }
+    state.scrobbling.rested(target);
+    true
 }
 
 fn send(agent: &listenbrainz::Agent, url: &str, token: &str, plays: &[Waiting]) -> Sent {
@@ -251,19 +333,21 @@ fn let_go(state: &State, target: i64, id: i64, why: &str) {
     let _ = library.scrobble_trouble(
         target,
         &format!("a play was not taken: {why}"),
-        false,
+        None,
         now_ms(),
     );
 }
 
-fn failed(state: &State, target: i64, outcome: Sent) {
+/// The service could not take plays now: it refused `token` (the one sent: a token given again meanwhile is left
+/// alone), or it is away or busy and rests.
+fn failed(state: &State, target: i64, token: &str, outcome: Sent) {
     let mut library = state.library.lock().unwrap();
     match outcome {
         Sent::Refused(_) => {
-            let _ = library.scrobble_trouble(target, "it refused the token", true, now_ms());
+            let _ = library.scrobble_trouble(target, "it refused the token", Some(token), now_ms());
         }
         Sent::Later { why, wait } => {
-            let _ = library.scrobble_trouble(target, &why, false, now_ms());
+            let _ = library.scrobble_trouble(target, &why, None, now_ms());
             drop(library);
             state.scrobbling.rest(target, wait);
         }
@@ -297,6 +381,12 @@ pub(crate) fn route(state: &State, request: &mut Request, path: &str) -> Result<
             .unwrap_or_default();
         if token.is_empty() {
             return Ok(Some(refuse(400, "A token is needed")));
+        }
+        if crate::serve::offline(state) {
+            return Ok(Some(refuse(
+                409,
+                "Stash is offline: a token is checked with the service when it is given",
+            )));
         }
         if token.len() > TOKEN_CAP || token.chars().any(|c| c.is_control() || c.is_whitespace()) {
             return Ok(Some(refuse(400, "That is not a token")));
@@ -353,10 +443,9 @@ pub(crate) fn route(state: &State, request: &mut Request, path: &str) -> Result<
     };
     let found = match verb {
         "enabled" => {
-            let on = body_json(request)?
-                .get("enabled")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
+            let Some(on) = body_json(request)?.get("enabled").and_then(Value::as_bool) else {
+                return Ok(Some(refuse(400, "enabled is true or false")));
+            };
             let found = state
                 .library
                 .lock()

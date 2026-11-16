@@ -250,19 +250,26 @@ impl Library {
         Ok(())
     }
 
-    /// The last try to reach service `target` failed: why, in words. `refused`: it refused the token, and nothing more
-    /// is sent to it until the token is given again.
+    /// The last try to reach service `target` failed: why, in words. `refused`: it refused that token, and nothing more
+    /// is sent to it until the token is given again. A token given again meanwhile is not the one refused: then
+    /// nothing is noted.
     pub fn scrobble_trouble(
         &mut self,
         target: i64,
         message: &str,
-        refused: bool,
+        refused: Option<&str>,
         now_ms: i64,
     ) -> Result<()> {
-        self.conn.execute(
-            "UPDATE scrobble_targets SET trouble = ?2, trouble_at_ms = ?3, refused = MAX(refused, ?4) WHERE id = ?1",
-            params![target, message, now_ms, refused as i64],
-        )?;
+        match refused {
+            None => self.conn.execute(
+                "UPDATE scrobble_targets SET trouble = ?2, trouble_at_ms = ?3 WHERE id = ?1",
+                params![target, message, now_ms],
+            )?,
+            Some(token) => self.conn.execute(
+                "UPDATE scrobble_targets SET trouble = ?2, trouble_at_ms = ?3, refused = 1 WHERE id = ?1 AND token = ?4",
+                params![target, message, now_ms, token],
+            )?,
+        };
         Ok(())
     }
 }
@@ -358,7 +365,7 @@ mod tests {
             ]
         );
         library
-            .scrobble_trouble(lb, "it could not be reached", false, 500)
+            .scrobble_trouble(lb, "it could not be reached", None, 500)
             .unwrap();
         assert_eq!(
             library.scrobble_targets().unwrap()[0].trouble,
@@ -381,9 +388,14 @@ mod tests {
             (0, 1, Some(600), 1, None)
         );
 
-        // A refused token holds sending back until it is given again; giving it again keeps what waits.
+        // A refused token holds sending back until it is given again; giving it again keeps what waits. A token that
+        // is no longer the service's (given again while the old one was being refused) changes nothing.
         library
-            .scrobble_trouble(mine, "the token was refused", true, 700)
+            .scrobble_trouble(mine, "the token was refused", Some("an older token"), 690)
+            .unwrap();
+        assert!(!library.scrobble_targets().unwrap()[1].refused);
+        library
+            .scrobble_trouble(mine, "the token was refused", Some("token-b"), 700)
             .unwrap();
         assert!(library.scrobble_targets().unwrap()[1].refused);
         let again = library

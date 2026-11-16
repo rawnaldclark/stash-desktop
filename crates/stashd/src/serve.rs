@@ -1172,16 +1172,20 @@ fn offline_route(state: &State, request: &mut Request, path: &str) -> Result<Opt
         return Ok(None);
     }
     if *request.method() == Method::Post {
-        let on = body_json(request)?
-            .get("offline")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let Some(on) = body_json(request)?.get("offline").and_then(Value::as_bool) else {
+            return Ok(Some(refuse(400, "offline is true or false")));
+        };
         state
             .library
             .lock()
             .unwrap()
             .set_setting(OFFLINE_SETTING, if on { "1" } else { "0" })?;
         state.offline.store(on, Ordering::Relaxed);
+        // Offline: what the engine was handed after the song playing is asked for again, so a song streamed from an
+        // add-on that was about to start does not. The song playing plays to its end.
+        if on && let Ok(player) = &state.player {
+            player.ask_again_ahead();
+        }
         // Back online: what waited goes.
         if !on {
             state.scrobbling.ring(None);

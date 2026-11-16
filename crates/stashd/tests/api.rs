@@ -2911,6 +2911,8 @@ enum Mood {
     Taking,
     Away,
     Refusing,
+    /// Calls every play wrong, as a server set up wrongly may.
+    Wrong,
 }
 
 /// A stand-in for ListenBrainz: it checks a token, and what is sent, the way the service does; it keeps what it takes,
@@ -2956,6 +2958,10 @@ impl Brainz {
                         _ if token != "Token good" => (401, refused),
                         Mood::Refusing => (401, refused),
                         Mood::Away => (503, Value::Null),
+                        Mood::Wrong => (
+                            400,
+                            json!({ "code": 400, "error": "Every play is wrong here." }),
+                        ),
                         Mood::Taking => match checked(&body) {
                             Ok(taken) => {
                                 kept.lock().unwrap().push(taken);
@@ -3257,6 +3263,19 @@ fn plays_go_to_listenbrainz_and_wait_while_it_is_away() {
     assert_eq!(brainz.plays(), ["Paper Boats", "Afterglow", "Cinder Hands"]);
     assert_eq!(target()["refused"], false);
 
+    // A service that calls every play wrong takes none: the play waits, and is not let go.
+    brainz.be(Mood::Wrong);
+    play("2", "Afterglow", "Mira Sol");
+    until("the service to be in trouble", || {
+        target()["waiting"] == 1
+            && target()["trouble"]["message"]
+                == "it took none of the plays it was sent: Every play is wrong here."
+    });
+    assert_eq!(target()["dropped"], 0);
+    brainz.be(Mood::Taking);
+    client.post(&format!("/api/scrobbling/{id}/again"), json!({}));
+    until("the waiting play to be taken", || target()["sent"] == 4);
+
     // Off: plays are not kept for it.
     let off = client.post(
         &format!("/api/scrobbling/{id}/enabled"),
@@ -3274,9 +3293,9 @@ fn plays_go_to_listenbrainz_and_wait_while_it_is_away() {
     assert!(ended["error"].is_null(), "it played through: {ended}");
     assert_eq!(
         (target()["waiting"].as_i64(), target()["sent"].as_i64()),
-        (Some(0), Some(3))
+        (Some(0), Some(4))
     );
-    assert_eq!(brainz.plays().len(), 3);
+    assert_eq!(brainz.plays().len(), 4);
 
     // Removed; a service that is not there is said to be so.
     assert_eq!(
@@ -3466,6 +3485,11 @@ fn offline_plays_only_what_is_here_and_asks_no_add_on() {
     assert_eq!(client.send("/api/addons", json!({ "link": link })).0, 409);
     assert_eq!(
         client.get(&format!("/api/unfound/{bravo}/candidates")).0,
+        409
+    );
+    // Nor is a scrobbling service asked to check a token.
+    assert_eq!(
+        client.send("/api/scrobbling", json!({ "token": "good" })).0,
         409
     );
     // A song that is not here is not added to the queue; one that is, is.
@@ -3791,5 +3815,99 @@ fn without_a_shell_there_are_no_shortcuts_to_hold() {
     // The choice is still kept, for a program that can hold the keys.
     let on = client.post("/api/settings/shortcuts", json!({ "on": true }));
     assert_eq!((&on["on"], &on["trouble"]), (&json!(true), &json!({})));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn offline_takes_back_the_song_handed_ahead() {
+    let Some(engine) = engine() else {
+        eprintln!("SKIPPED offline ahead: no libmpv found");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("stash-api-offline-ahead-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (music, catalogue) = (dir.join("Music"), dir.join("Catalogue"));
+    std::fs::create_dir_all(&music).unwrap();
+    std::fs::create_dir_all(&catalogue).unwrap();
+    // "first" is long enough that the next song is asked for only near its end (30 s before).
+    silence_for(&music.join("first.wav"), 60);
+    silence(&music.join("second.wav"));
+    silence_for(&catalogue.join("bravo.wav"), 30);
+    let db = dir.join("library.db");
+    {
+        let mut library = Library::open(&db).unwrap();
+        assert_eq!(scan_folder(&mut library, &music, |_| {}).unwrap().added, 2);
+    }
+    let core = Core::bind(Options {
+        db: db.clone(),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: Some(Output::Silent),
+        mpv: Some(engine),
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    let demo = DemoAddon::bind(&catalogue, 0, Duration::from_millis(20)).unwrap();
+    let link = demo.link();
+    std::thread::spawn(move || demo.run());
+    client.post("/api/addons", json!({ "link": link }));
+    let (_, found) = client.get("/api/addons/search?q=bravo&limit=10");
+    let bravo = found["groups"][0]["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["title"] == "bravo")
+        .unwrap()
+        .clone();
+    let (_, files) = client.get("/api/tracks?offset=0&limit=10");
+    let file = |title: &str| {
+        files["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["title"] == title)
+            .unwrap()["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let streams =
+        || client.get("/api/addons/use?since=0").1["addons"]["demo.folder"]["streams"].clone();
+
+    // Online: a file, the add-on's song, another file. Near the first one's end, the add-on's song is asked for and
+    // handed to the engine, ready to follow without a gap.
+    client.post(
+        "/api/player/play",
+        json!({ "items": [{ "id": file("first") }, { "addon": "demo.folder", "track": bravo }, { "id": file("second") }] }),
+    );
+    client.player_until("first to play", |s| {
+        s["track"]["title"] == "first" && s["status"] == "playing"
+    });
+    client.post("/api/player/seek", json!({ "seconds": 45 }));
+    until("the add-on's song to be asked for", || streams() == 1);
+    std::thread::sleep(Duration::from_millis(400));
+
+    // Offline: it is taken back. The song playing plays on; when it ends, the add-on's song is passed over (the add-on
+    // is not asked again) and the next file plays.
+    client.post("/api/offline", json!({ "offline": true }));
+    let (_, still) = client.get("/api/player");
+    assert_eq!(
+        (still["track"]["title"].as_str(), still["status"].as_str()),
+        (Some("first"), Some("playing"))
+    );
+    client.post("/api/player/seek", json!({ "seconds": 59.5 }));
+    let next = client.player_until("the song after first", |s| {
+        s["status"] == "playing" && s["track"]["title"] != "first"
+    });
+    assert_eq!(next["track"]["title"], "second", "{next}");
+    assert_eq!(streams(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
