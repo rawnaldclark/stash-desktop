@@ -34,7 +34,7 @@ macro_rules! blocked_kind {
 pub(crate) use blocked_kind;
 
 /// What is not played: one song (every copy of it), or every song of an artist.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BlockKind {
     Song,
     Artist,
@@ -56,12 +56,12 @@ impl BlockKind {
         }
     }
 
-    /// The key it is kept by; None when the words leave nothing to know it by (a name of only signs).
     /// Whether a song with these words is one the choice kept under `key` covers.
     pub fn covers(self, key: &str, title: &str, artist: &str) -> bool {
         self.key(title, artist).as_deref() == Some(key)
     }
 
+    /// The key it is kept by; None when the words leave nothing to know it by (a name of only signs).
     pub fn key(self, title: &str, artist: &str) -> Option<String> {
         let artist_key = fold(artist);
         match self {
@@ -95,32 +95,30 @@ impl Library {
         on: bool,
         now_ms: i64,
     ) -> Result<Option<String>> {
-        let Some(key) = kind.key(title, artist) else {
-            return Ok(None);
-        };
-        if on {
-            let title = if kind == BlockKind::Song { title } else { "" };
-            self.conn.execute(
-                "INSERT INTO blocked(kind, key, title, artist, at_ms) VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(kind, key) DO NOTHING",
-                params![
-                    kind.as_str(),
-                    key,
-                    crate::identity::clean_text(title, 300),
-                    crate::identity::clean_text(artist, 300),
-                    now_ms
-                ],
-            )?;
-        } else {
-            self.conn.execute(
-                "DELETE FROM blocked WHERE kind = ?1 AND key = ?2",
-                params![kind.as_str(), key],
-            )?;
-        }
-        Ok(Some(key))
+        put_block(&self.conn, kind, title, artist, on, now_ms)
     }
 
-    /// Every song and artist the listener chose not to play, the latest first.
+    /// Chooses not to play several songs (each by its words), or to play them again, in one go. Answers the keys they
+    /// are kept under, each once (words with nothing to know a song by are left out).
+    pub fn set_songs_blocked(
+        &mut self,
+        songs: &[(String, String)],
+        on: bool,
+        now_ms: i64,
+    ) -> Result<Vec<String>> {
+        let tx = self.conn.transaction()?;
+        let mut keys = Vec::with_capacity(songs.len());
+        for (title, artist) in songs {
+            if let Some(key) = put_block(&tx, BlockKind::Song, title, artist, on, now_ms)? {
+                keys.push(key);
+            }
+        }
+        tx.commit()?;
+        keys.sort_unstable();
+        keys.dedup();
+        Ok(keys)
+    }
+
     /// Plays a song or an artist again by the key it is kept under (what was kept of its words may be shorter than
     /// they were). Answers whether there was such a choice.
     pub fn unblock_key(&mut self, kind: BlockKind, key: &str) -> Result<bool> {
@@ -130,6 +128,7 @@ impl Library {
         )? > 0)
     }
 
+    /// Every song and artist the listener chose not to play, the latest first.
     pub fn blocks(&self) -> Result<Vec<Blocked>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT kind, key, title, artist, at_ms FROM blocked ORDER BY at_ms DESC, kind, key",
@@ -221,6 +220,41 @@ impl Library {
             .conn
             .query_row("SELECT EXISTS (SELECT 1 FROM blocked)", [], |r| r.get(0))?)
     }
+}
+
+/// Puts one choice not to play in, or (`on` false) takes it out, on `conn` (the library's own, or a transaction of it).
+/// Answers the key it is kept by; None when the words leave nothing to know it by.
+fn put_block(
+    conn: &rusqlite::Connection,
+    kind: BlockKind,
+    title: &str,
+    artist: &str,
+    on: bool,
+    now_ms: i64,
+) -> Result<Option<String>> {
+    let Some(key) = kind.key(title, artist) else {
+        return Ok(None);
+    };
+    if on {
+        let title = if kind == BlockKind::Song { title } else { "" };
+        conn.execute(
+            "INSERT INTO blocked(kind, key, title, artist, at_ms) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(kind, key) DO NOTHING",
+            params![
+                kind.as_str(),
+                key,
+                crate::identity::clean_text(title, 300),
+                crate::identity::clean_text(artist, 300),
+                now_ms
+            ],
+        )?;
+    } else {
+        conn.execute(
+            "DELETE FROM blocked WHERE kind = ?1 AND key = ?2",
+            params![kind.as_str(), key],
+        )?;
+    }
+    Ok(Some(key))
 }
 
 #[cfg(test)]

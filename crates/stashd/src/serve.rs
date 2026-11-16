@@ -36,6 +36,8 @@ use url::Url;
 
 /// The largest page a list may ask for.
 const PAGE_CAP: usize = 500;
+/// The most songs one change acts on at once (as many as can be picked in a list).
+pub(crate) const PICKS_CAP: usize = 5000;
 /// The largest body the API reads.
 const BODY_CAP: u64 = 4 * 1024 * 1024;
 /// The most tracks one queue holds.
@@ -248,6 +250,17 @@ impl Lacks {
             .retain(|(song, _), _| *song != id);
     }
 
+    /// Forgets the "no"s that were not believed for the songs `ids` (every song, when none are named): the listener
+    /// asks to try them again.
+    pub(crate) fn forget_doubted(&self, ids: &[i64]) {
+        self.missed
+            .lock()
+            .unwrap()
+            .retain(|(song, _), (_, believed)| {
+                *believed || !(ids.is_empty() || ids.contains(song))
+            });
+    }
+
     /// Forgets what the add-on was found not to have (it was added again, or switched back on).
     pub(crate) fn forget_addon(&self, addon: &str) {
         self.missed.lock().unwrap().retain(|(_, a), _| a != addon);
@@ -364,6 +377,8 @@ pub(crate) fn through_addons<T>(
     // give it.
     let mut said_no: Vec<&str> = Vec::new();
     let mut had_it = false;
+    // Whether an add-on was asked anything this time (not only "no"s remembered from before).
+    let mut any_asked = false;
     // A name the add-on gave before says nothing of how it answers when asked; a song it was asked for does.
     let found = |addon_id: &str, asked: bool| {
         if asked {
@@ -384,6 +399,7 @@ pub(crate) fn through_addons<T>(
             .find(|(source, _)| source == addon_id)
             .map(|(_, theirs)| theirs.clone());
         if let Some(track) = &known {
+            any_asked = true;
             match act(addon, addon_id, track) {
                 Ok(done) => {
                     found(addon_id, false);
@@ -404,12 +420,16 @@ pub(crate) fn through_addons<T>(
                 }
             }
         }
-        // A "no" from a little while ago counts only if it was believed when it was said.
+        // A "no" from a little while ago counts only if it was believed when it was said. One that was not is asked
+        // again once the add-on is finding other songs: its answer counts then.
         if let Some(believed) = lacks.remembered(id, addon_id) {
             if believed {
                 said_no.push(addon_id);
+                continue;
             }
-            continue;
+            if !lacks.finding(addon_id) {
+                continue;
+            }
         }
         let resolving = addon.offers_resource("resolve");
         let asked = if resolving {
@@ -429,6 +449,7 @@ pub(crate) fn through_addons<T>(
         } else {
             continue;
         };
+        any_asked = true;
         let track = match asked {
             Ok(Some(track)) => track,
             // It does not have the song, or what it answered cannot be this song.
@@ -503,6 +524,7 @@ pub(crate) fn through_addons<T>(
             Failure {
                 doubtful: !had_it
                     && (said_no.is_empty() || !said_no.iter().all(|a| lacks.finding(a))),
+                asked: any_asked,
                 ..gone("none of your add-ons has it")
             }
         }
@@ -2078,9 +2100,24 @@ fn lists_route(state: &State, request: &mut Request, path: &str) -> Result<Optio
                     answer = json!({ "added": library.add_to_playlist(id, &ids, now)? });
                     true
                 }
-                "remove" => {
-                    library.remove_from_playlist(id, number("index").unwrap_or(usize::MAX), now)?
-                }
+                // Several at once (`places`: each place, and the song there), or one by its place.
+                "remove" => match body.get("places").and_then(Value::as_array) {
+                    Some(places) => {
+                        let places: Vec<(usize, i64)> = places
+                            .iter()
+                            .filter_map(|p| {
+                                Some((p.get("index")?.as_u64()? as usize, p.get("id")?.as_i64()?))
+                            })
+                            .take(PICKS_CAP)
+                            .collect();
+                        library.remove_many_from_playlist(id, &places, now)?
+                    }
+                    None => library.remove_from_playlist(
+                        id,
+                        number("index").unwrap_or(usize::MAX),
+                        now,
+                    )?,
+                },
                 "move" => library.move_in_playlist(
                     id,
                     number("from").unwrap_or(usize::MAX),

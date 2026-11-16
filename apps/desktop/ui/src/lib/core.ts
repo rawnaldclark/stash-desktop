@@ -183,7 +183,9 @@ export type Blocked = { kind: 'song' | 'artist'; key: string; title: string; art
 export type BlockedAnswer = { rows: Blocked[]; songs?: { id: number; blocked: 'song' | 'artist' | null }[]; edits?: number };
 export const blocks = () => get<BlockedAnswer>('/api/blocks').then((a) => a.rows);
 /** To play one again, `key` (as the list gives it) may stand for its words. */
-export const setBlocked = (b: { kind: 'song' | 'artist'; title?: string; artist?: string; blocked: boolean; key?: string }) => post<BlockedAnswer>('/api/blocks', b);
+/** `songs`: several songs at once (kind "song"), each by its words. */
+export const setBlocked = (b: { kind: 'song' | 'artist'; title?: string; artist?: string; blocked: boolean; key?: string; songs?: { title: string; artist: string }[] }) =>
+	post<BlockedAnswer>('/api/blocks', b);
 
 // ---- Lists kept on this computer (a playlist, or the liked songs)
 
@@ -249,6 +251,8 @@ export const deletePlaylist = (id: number) => post<Changed>(`/api/playlists/${id
 export const addToPlaylist = (id: number, ids: number[]) => post<Changed>(`/api/playlists/${id}/add`, { ids });
 /** Takes the song at place `index` (0 is the top) out of a playlist. */
 export const removeFromPlaylist = (id: number, index: number) => post<Changed>(`/api/playlists/${id}/remove`, { index });
+/** Several songs out at once, each by its place and the song there: only while every place still holds it (`done` false otherwise, and nothing goes). */
+export const removeFromPlaylistAt = (id: number, places: { index: number; id: number }[]) => post<Changed>(`/api/playlists/${id}/remove`, { places });
 export const moveInPlaylist = (id: number, from: number, to: number) => post<Changed>(`/api/playlists/${id}/move`, { from, to });
 
 // ---- Bringing a library in from another Stash, and writing this one out for them

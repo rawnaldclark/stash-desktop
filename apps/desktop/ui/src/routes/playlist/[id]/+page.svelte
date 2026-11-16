@@ -13,7 +13,7 @@
 	import { L, ui } from '../../../lib/ui/state.svelte';
 	import { songs, totalLength } from '../../../lib/ui/format';
 	import { describe } from '../../../lib/desktop/smart';
-	import { folderHref, playlistMenu, under } from '../../../lib/desktop/folders';
+	import { folderHref, playlistMenu, under } from '../../../lib/desktop/playlist-folders';
 
 	const pl = $derived(L.playlists.find((p) => p.id === page.params.id));
 	/** A followed mix is its owner's (it came in with an imported library): it plays; its songs are not edited here. */

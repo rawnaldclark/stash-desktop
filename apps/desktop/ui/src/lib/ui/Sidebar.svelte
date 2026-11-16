@@ -9,7 +9,7 @@
 	import { library } from '../app';
 	import type { Playlist } from '../api';
 	import { carry } from './carry';
-	import { atEvent, folderMenu, moveTo, newMenu, playlistMenu, playlistsWord, under } from '../desktop/folders';
+	import { atEvent, folderMenu, moveTo, newMenu, playlistMenu, playlistsWord, under } from '../desktop/playlist-folders';
 	import { L } from './state.svelte';
 	import { songs } from './format';
 	import type { IconName } from './icons';

@@ -919,6 +919,35 @@ impl Library {
         })
     }
 
+    /// Takes several songs out of a playlist at once, each named by its place and the song there. Only while every place
+    /// still holds that song (the playlist may have changed since they were chosen): otherwise nothing is taken out,
+    /// and the answer is false.
+    pub fn remove_many_from_playlist(
+        &mut self,
+        id: i64,
+        places: &[(usize, i64)],
+        now_ms: i64,
+    ) -> Result<bool> {
+        self.reorder(id, now_ms, |items| {
+            if places.is_empty()
+                || places
+                    .iter()
+                    .any(|&(place, track)| items.get(place) != Some(&track))
+            {
+                return false;
+            }
+            let out: std::collections::HashSet<usize> =
+                places.iter().map(|&(place, _)| place).collect();
+            let mut place = 0;
+            items.retain(|_| {
+                let keep = !out.contains(&place);
+                place += 1;
+                keep
+            });
+            true
+        })
+    }
+
     /// Moves the song at place `from` to place `to`.
     pub fn move_in_playlist(
         &mut self,

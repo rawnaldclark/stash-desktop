@@ -162,6 +162,9 @@ export interface LibraryAPI {
 	removeFromPlaylist(id: string, index: number): Promise<void>;
 	/** Moves the song at `from` to position `to` (both in range; otherwise ignored). */
 	moveInPlaylist(id: string, from: number, to: number): Promise<void>;
+	/** Takes several songs out of a playlist at once, each by its place and the song there. False when the playlist
+	 * changed since they were picked: then nothing is taken out. */
+	removeFromPlaylistAt(id: string, picks: { index: number; item: LibraryItem }[]): Promise<boolean>;
 	/** The listener's playlist folders, in their order. */
 	folders: Readable<PlaylistFolder[]>;
 	/** A new folder, after the others (with `playlist`, that playlist goes in it). Answers its id. */

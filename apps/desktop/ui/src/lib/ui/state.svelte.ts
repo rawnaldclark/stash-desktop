@@ -101,7 +101,7 @@ class Lib {
 export const L = new Lib();
 
 /** `group`: the menu is for a set of songs (a Home album card): queue, playlist and like act on all of them, `item` (the first) names the artist and album. */
-export type MenuState = { x: number; y: number; item: LibraryItem; group?: LibraryItem[]; queueIndex?: number; queueLength?: number; playlistId?: string; playlistIndex?: number; playlistLength?: number; /** On Library › Downloads: the song is saved, or on its way. */ download?: 'saved' | 'waiting'; anchor?: HTMLElement | null; /** The songs are the ones the listener picked in a list (Ctrl or Shift+click): their places in it. */ picks?: number[]; /** Opens on "Add to playlist" at once. */ view?: 'playlists'; /** Opens above the point (from the bar along the bottom). */ up?: boolean };
+export type MenuState = { x: number; y: number; item: LibraryItem; group?: LibraryItem[]; queueIndex?: number; queueLength?: number; playlistId?: string; playlistIndex?: number; playlistLength?: number; /** On Library › Downloads: the song is saved, or on its way. */ download?: 'saved' | 'waiting'; anchor?: HTMLElement | null; /** The songs are the ones the listener picked in a list (Ctrl or Shift+click): their places in it. */ picks?: number[]; /** Songs picked on Library › Downloads: the ones saved, and the ones still on the way. */ downloads?: { saved: LibraryItem[]; waiting: LibraryItem[] }; /** Opens on "Add to playlist" at once. */ view?: 'playlists'; /** Opens above the point (from the bar along the bottom). */ up?: boolean };
 
 /** One entry of a menu of choices. `checked`: one of a set (the folder a playlist is in). `ask`: asks for a name in place,
  * and `make`s with it. */

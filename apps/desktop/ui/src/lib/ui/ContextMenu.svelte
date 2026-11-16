@@ -3,9 +3,9 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { library, notPlayed, player, saveSongs, unsaveSongs } from '../app';
+	import { library, notPlayed, notPlayedSongs, player, saveSongs, unsaveSongs } from '../app';
 	import { NF } from '../desktop/unfound.svelte';
-	import { LIB_REF, sameCopy } from '../identity';
+	import { LIB_REF } from '../identity';
 	import { P } from './pick.svelte';
 	import { said } from '../core';
 	import { albumHref, albumLink, artistHref, artistLink } from '../identity';
@@ -13,7 +13,8 @@
 	import type { IconName } from './icons';
 	import { L, ui } from './state.svelte';
 
-	let view = $state<'main' | 'playlists'>('main');
+	/** The main entries; the playlists to add to; or, before saved files are deleted, the question. */
+	let view = $state<'main' | 'playlists' | 'remove'>('main');
 	let el = $state<HTMLElement>();
 	let pos = $state({ x: 0, y: 0 });
 	let naming = $state(false);
@@ -96,7 +97,7 @@
 		if (e.key === 'Escape') {
 			e.preventDefault();
 			e.stopPropagation();
-			if (view === 'playlists') {
+			if (view !== 'main') {
 				view = 'main';
 				tick().then(() => el?.querySelector<HTMLElement>('[role="menuitem"]')?.focus());
 			} else close();
@@ -139,37 +140,38 @@
 	 * not to be played before are left as they were. */
 	function dontPlayPicked(on: boolean) {
 		const songs = on ? targets.filter((t) => !L.blockedOf(t)) : targets;
-		const each = async (to: boolean) => {
-			for (const t of songs) await notPlayed('song', t, to);
-		};
-		void each(on).then(
+		// All of them in one go (the core takes them together, and cleans the queue once).
+		void notPlayedSongs(songs, on).then(
 			() =>
 				on
-					? ui.toast(`Stash won’t play ${songs.length === 1 ? 'that song' : `these ${songs.length} songs`} on its own`, { label: 'Undo', run: () => void each(false) })
+					? ui.toast(`Stash won’t play ${songs.length === 1 ? 'that song' : `these ${songs.length} songs`} on its own`, {
+							label: 'Undo',
+							run: () => void notPlayedSongs(songs, false).catch((e) => ui.toast(said(e)))
+						})
 					: ui.toast(`${songs.length === 1 ? 'That song plays' : `These ${songs.length} songs play`} again`),
 			(e) => ui.toast(said(e))
 		);
 		close();
 	}
 
-	/** Takes the picked songs out of the playlist, the last first so the places before stay where they are. Only while the
-	 * playlist still has them at those places: it may have changed since they were picked. */
+	/** Takes the picked songs out of the playlist in one go. The core takes them out only while the playlist still has
+	 * them at those places: it may have changed since they were picked. */
 	function removePicked() {
 		if (!m?.playlistId || !m.picks) return;
 		const id = m.playlistId;
-		const picks = m.picks;
-		const songs = targets;
-		const now = L.playlists.find((p) => p.id === id)?.items ?? [];
+		const picks = m.picks.map((index, i) => ({ index, item: targets[i] }));
 		P.clear();
-		if (!picks.every((place, i) => now[place] && songs[i] && sameCopy(now[place], songs[i]))) {
-			ui.toast('That playlist changed after the songs were picked. Pick them again.');
-			close();
-			return;
-		}
-		const last = [...picks].sort((a, b) => b - a);
-		change(async () => {
-			for (const place of last) await library.removeFromPlaylist(id, place);
-		}, `Removed ${picks.length} songs from this playlist`);
+		void library.removeFromPlaylistAt(id, picks).then(
+			(done) => ui.toast(done ? `Removed ${picks.length} songs from this playlist` : 'That playlist changed after the songs were picked. Pick them again.'),
+			() => {} // said by the shell (the core's own words)
+		);
+		close();
+	}
+	/** Songs picked on Downloads: the saved ones, deleted from this computer once the listener says so. */
+	function removeSaved() {
+		const saved = m?.downloads?.saved ?? [];
+		P.clear();
+		change(() => unsaveSongs(saved), `Removed ${saved.length === 1 ? 'a song' : `${saved.length} songs`} from this computer`);
 	}
 
 	function createAndAdd() {
@@ -185,8 +187,8 @@
 
 <svelte:window onpointerdown={(e) => { if (m && el && !el.contains(e.target as Node)) close(false); }} onresize={() => m && close(false)} />
 
-{#snippet entry(icon: IconName, label: string, fn: () => void)}
-	<button type="button" role="menuitem" class="mi" onclick={fn}><Icon name={icon} /><span>{label}</span></button>
+{#snippet entry(icon: IconName, label: string, fn: () => void, danger = false)}
+	<button type="button" role="menuitem" class="mi" class:mi-danger={danger} onclick={fn}><Icon name={icon} /><span>{label}</span></button>
 {/snippet}
 
 {#if m}
@@ -214,7 +216,22 @@
 			{:else}
 				{@render entry(L.isLiked(m.item) ? 'favorite' : 'favorite_border', L.isLiked(m.item) ? 'Remove from Likes' : 'Like', () => run(() => L.toggleLike(m.item)))}
 			{/if}
-			{#if m.download === 'saved'}
+			{#if m.downloads}
+				<!-- Picked on Downloads: each song by its own state. -->
+				{@const { saved, waiting } = m.downloads}
+				{#if waiting.length}
+					{@render entry('close', waiting.length === 1 ? 'Don’t save the one on the way' : `Don’t save the ${waiting.length} on the way`, () => {
+						P.clear();
+						change(() => unsaveSongs(waiting), 'Taken off Downloads');
+					})}
+				{/if}
+				{#if saved.length}
+					{@render entry('delete', `Remove ${saved.length === 1 ? 'the saved one' : `${saved.length} saved songs`} from this computer`, () => {
+						view = 'remove';
+						tick().then(() => el?.querySelector<HTMLElement>('[role="menuitem"]')?.focus());
+					})}
+				{/if}
+			{:else if m.download === 'saved'}
 				{@render entry('delete', 'Remove from this computer', () => {
 					if (picked) P.clear();
 					change(() => unsaveSongs(targets), 'Removed from this computer');
@@ -264,6 +281,11 @@
 				{#if m.playlistLength !== undefined && m.playlistIndex < m.playlistLength - 1}{@render entry('arrow_downward', 'Move down', () => run(() => library.moveInPlaylist(m.playlistId!, m.playlistIndex!, m.playlistIndex! + 1)))}{/if}
 				{@render entry('delete', 'Remove from this playlist', () => run(() => library.removeFromPlaylist(m.playlistId!, m.playlistIndex!)))}
 			{/if}
+		{:else if view === 'remove'}
+			{@const n = m.downloads?.saved.length ?? 0}
+			<p class="mh">Delete {n === 1 ? 'its file' : `their ${n} files`} from this computer?</p>
+			{@render entry('delete', n === 1 ? 'Delete the file' : `Delete ${n} files`, removeSaved, true)}
+			{@render entry('close', 'Keep them', () => close())}
 		{:else}
 			<p class="mh">Add to playlist</p>
 			{#each L.playlists.filter((x) => !x.followed && !x.rules) as p (p.id)}

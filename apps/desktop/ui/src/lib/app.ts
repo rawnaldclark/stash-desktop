@@ -120,6 +120,14 @@ export async function notPlayed(kind: 'song' | 'artist', item: { title: string; 
 	const said = await core.setBlocked(
 		!on && key ? { kind, key, blocked: false } : { kind, title: kind === 'song' ? item.title : undefined, artist: item.artist, blocked: on }
 	);
+	return tookBlocks(said);
+}
+/** Chooses not to play several songs (each by its words: every copy of it), or to play them again, in one go. */
+export async function notPlayedSongs(items: { title: string; artist: string }[], on: boolean): Promise<core.Blocked[]> {
+	return tookBlocks(await core.setBlocked({ kind: 'song', songs: items.map((i) => ({ title: i.title, artist: i.artist })), blocked: on }));
+}
+/** Takes in the core's answer to a choice not to play: the rows it covers are marked at once. */
+function tookBlocks(said: core.BlockedAnswer): core.Blocked[] {
 	if (said.songs?.length) {
 		blockedNow.update((now) => {
 			const next = new Map(now);
@@ -670,6 +678,14 @@ const library: LibraryAPI = {
 				}
 			})
 		),
+	removeFromPlaylistAt: (id, picks) =>
+		change(async () => {
+			const places = picks.map((p) => ({ index: p.index, id: libIdOf(p.item) }));
+			if (places.some((p) => p.id === null)) return false;
+			const c = await core.removeFromPlaylistAt(pid(id), places as { index: number; id: number }[]);
+			await took(c, [pid(id)]);
+			return c.done === true;
+		}),
 	moveInPlaylist: (id, from, to) =>
 		quiet(
 			change(async () => {

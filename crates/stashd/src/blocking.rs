@@ -76,12 +76,38 @@ pub(crate) fn clear_queue(state: &State, choices: &[(BlockKind, String)]) {
             .flatten()
             .collect()
     };
+    // An add-on's song is known by its words: its keys are made once, and looked up.
+    let chosen: HashSet<(BlockKind, &str)> = choices
+        .iter()
+        .map(|(kind, key)| (*kind, key.as_str()))
+        .collect();
     player.retain(|item| match item.id {
         Some(id) => !rows.contains(&id),
-        None => !choices
-            .iter()
-            .any(|(kind, key)| kind.covers(key, &item.title, &item.artist)),
+        None => ![BlockKind::Song, BlockKind::Artist]
+            .into_iter()
+            .any(|kind| {
+                kind.key(&item.title, &item.artist)
+                    .is_some_and(|key| chosen.contains(&(kind, key.as_str())))
+            }),
     });
+}
+
+/// The answer to a change: every choice as it is now, how the songs it touched are chosen now (so the window marks
+/// them at once), and the count of changes.
+fn answered(state: &State, ids: &[i64]) -> Result<Reply> {
+    let (rows, songs) = {
+        let library = state.library.lock().unwrap();
+        (library.blocks()?, library.blocked_kinds(ids)?)
+    };
+    let songs: Vec<Value> = songs
+        .into_iter()
+        .map(|(id, kind)| json!({ "id": id, "blocked": kind }))
+        .collect();
+    let edits = state.edits.load(std::sync::atomic::Ordering::Relaxed);
+    Ok(reply_json(
+        200,
+        json!({ "rows": rows, "songs": songs, "edits": edits }),
+    ))
 }
 
 /// `/api/blocks`. GET: every song and artist the listener chose not to play, the latest first. POST `{kind: "song" |
@@ -113,6 +139,37 @@ pub(crate) fn route(state: &State, request: &mut Request, path: &str) -> Result<
             let Some(on) = body.get("blocked").and_then(Value::as_bool) else {
                 return Ok(Some(refuse(400, "blocked is true or false")));
             };
+            // Several songs at once (picked in a list), each by its words.
+            if let Some(songs) = body
+                .get("songs")
+                .and_then(Value::as_array)
+                .filter(|_| kind == BlockKind::Song)
+            {
+                let songs: Vec<(String, String)> = songs
+                    .iter()
+                    .filter_map(|s| {
+                        let words = |name: &str| Some(s.get(name)?.as_str()?.trim().to_string());
+                        Some((words("title")?, words("artist")?))
+                    })
+                    .take(crate::serve::PICKS_CAP)
+                    .collect();
+                let (keys, ids) = {
+                    let mut library = state.library.lock().unwrap();
+                    let keys = library.set_songs_blocked(&songs, on, now_ms())?;
+                    let mut ids = Vec::new();
+                    for key in &keys {
+                        ids.extend(library.ids_blocked_by(BlockKind::Song, key)?);
+                    }
+                    (keys, ids)
+                };
+                if on {
+                    let choices: Vec<(BlockKind, String)> =
+                        keys.into_iter().map(|key| (BlockKind::Song, key)).collect();
+                    clear_queue(state, &choices);
+                }
+                state.edited();
+                return answered(state, &ids).map(Some);
+            }
             let given = Some(text("key")).filter(|k| !k.is_empty());
             let (key, ids) = {
                 let mut library = state.library.lock().unwrap();
@@ -147,19 +204,7 @@ pub(crate) fn route(state: &State, request: &mut Request, path: &str) -> Result<
             }
             // The songs' rows say which are chosen not to be played: every window reads its lists again.
             state.edited();
-            let (rows, songs) = {
-                let library = state.library.lock().unwrap();
-                (library.blocks()?, library.blocked_kinds(&ids)?)
-            };
-            let songs: Vec<Value> = songs
-                .into_iter()
-                .map(|(id, kind)| json!({ "id": id, "blocked": kind }))
-                .collect();
-            let edits = state.edits.load(std::sync::atomic::Ordering::Relaxed);
-            return Ok(Some(reply_json(
-                200,
-                json!({ "rows": rows, "songs": songs, "edits": edits }),
-            )));
+            return answered(state, &ids).map(Some);
         }
         _ => return Ok(None),
     }

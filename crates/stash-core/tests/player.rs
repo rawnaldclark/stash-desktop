@@ -918,8 +918,14 @@ fn tracks_are_taken_out_wherever_they_are_in_one_go() {
         s.resting && now(s) == Some("T1".into())
     });
     assert_eq!(player.retain(without(&["T1"])), 1);
-    let gone = until(&player, "nothing to show", |s| s.track.is_none());
-    assert_eq!((gone.status, titles()), ("idle", vec!["T0".to_string()]));
+    // It rests on the one track left, from its start (as a queue that played out rests on its last track), and stays so.
+    let left = player.state();
+    assert_eq!(
+        (now(&left), left.resting, left.position_ms, titles()),
+        (Some("T0".into()), true, 0, vec!["T0".to_string()])
+    );
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(now(&player.state()), Some("T0".into()));
 
     // A queue kept from last time rests on a track (nothing plays yet): it goes, and the player rests on the next track
     // kept, from its start. Play then starts that one.

@@ -757,7 +757,7 @@ On the built page served by the core: a new scratch library of 12 made-up files,
 
 ## 28. Second review: saving, "Don't play", the filter
 
-A reviewer read sections 24–26 and found these. All are fixed.
+A reviewer read sections 24–26 and found these. All are fixed. (The rules for trouble that may be the song's own changed after a third review: see §30.)
 
 ### Saving
 
@@ -886,3 +886,79 @@ Deleting a folder keeps its playlists: they come out of it. The deletion is said
   - **Deleting:** Summer was deleted from its menu and its playlists stayed. Undo brought it back with Road in it.
   - **In the narrow rail:** the folder is a tile, and its playlists' tiles are smaller (32 px against 40).
   - No errors in the page.
+
+## 30. Third review: saving's tries, group actions, Downloads picks
+
+A reviewer read sections 27 and 28 (picking songs, the second review's fixes) and found these. All are fixed. The saving rules below replace §28's strikes and unbelieved "no"s.
+
+### Saving: whose trouble it is
+
+Every way a song can fail to be saved now falls into one of three kinds.
+
+| Kind | What it covers | What happens |
+|---|---|---|
+| **Everyone's** | An allowance spent, too many asks (from the add-on or the file's server), a key refused, no add-on to ask, the downloads folder not writable | Saving waits (as long as asked, else a minute doubling to an hour). The song goes to the back of the line. It is never given up for this, so a spent allowance on a long kept list fails nothing. |
+| **The song's own** | No add-on has it (believed), a file that cannot be kept, a link that is bad in itself | It fails at once. |
+| **Maybe either** | An add-on or the file's server out of reach, busy (502–504) or stopping mid-file; "no"s from add-ons that are not finding other songs either; a request the add-on refused, or answered with what the contract does not allow | See below. |
+
+Trouble that may be either:
+
+- **Each try that asked something counts against the song.** The song is given up on at its third.
+- **A refusal is given up on at once**, unless the song before it had the same refusal.
+- **Two songs in a row with the same trouble look like everyone's,** so saving waits instead of asking for the next song at once. A plan that lapsed and refuses every request no longer fails a whole list in a minute.
+- **The same song twice in a row** (it is the only one left) also waits, so nothing is asked over and over.
+- **Every try still counts.** So two songs that each have trouble of their own are not tried for ever, and neither is the last song in line whose file's server keeps failing.
+- **An unbelieved "no" is asked again once the add-on is finding other songs:** its answer counts then.
+  - A try that only met "no"s remembered from before asked nothing. It does not count, and it waits.
+  - Try again forgets the unbelieved "no"s of the songs it retries.
+
+### Group actions
+
+- **"Remove N from this playlist" is one change in the core:** each place with the song there. Nothing is taken out when any place holds another song now (the playlist changed since they were picked), and the window says so. A refusal is said, not hidden behind "Removed".
+- **"Don't play these N songs" is one change too.** The core keeps them in one go, cleans the queue once, and answers once; Undo is one change.
+- **The queue is cleaned by looking each add-on song's words up once**, not by comparing them with every choice.
+
+### Library › Downloads picks
+
+- **The menu used the first picked song's state for all of them.** A pick with one song still on the way offered "Don't save", which deleted the saved files too.
+  - **Now each song goes by its own state.** The menu offers "Don't save the N on the way" (taking only those off the list) and "Remove N saved songs from this computer" apart.
+  - **Removing asks first:** "Delete their N files from this computer?" Keep them deletes nothing.
+- **The picks go when the songs at their places change.** The list is read every second, in an order that follows each song's state.
+
+### The player
+
+- **`Player::retain` does a new start's bookkeeping under the same hold of the player's state.** It used to hand it to `start_at` after letting go, so a second call in between (an import and a "Don't play" at once) could index past the queue's end and poison the player's lock. A place past the end is never used.
+- **A played-out queue whose last song goes now rests on the last song left**, from its start, at once. It used to rest on nothing for a moment, until `settle` put it there.
+  - The test checked that passing moment.
+  - It now checks the state that stays.
+
+### Checked
+
+- **Tests in stashd** (`saving::tests`):
+  - **Which kind each add-on code and miss falls into**, with `retry_after` passed along and whether anything was asked.
+  - **A song alone:** tried at once, then after a wait, then given up.
+  - **Two songs in a row:** they wait, still count, and are given up at their third.
+  - **Remembered "no"s:** tries that asked nothing do not count.
+  - **Refusals:**
+    - The first refusal fails at once.
+    - In a run, refused songs wait and fail at their third.
+    - Another refusal code is not the same run.
+  - **Try again** starts every song over.
+- **The Not found API test**, rewritten for the new rule:
+  - India, asked while the add-on found nothing, waited ("your add-ons are not finding songs just now"), with 1 queued and 0 failed, and was not listed.
+  - Once Golf was found, India was asked again, believed, failed, and listed.
+  - Hotel was listed too.
+  - After the add-on was switched off and on, both stayed listed.
+- **Group API checks:**
+  - **"Don't play" for 2 songs plus one with no letters:** the two were marked "song", the third was passed over, and the queue around them kept only the song playing, at place 0. Played again together, the choices went back to 1.
+  - **Removal by places:** a stale place removed nothing (`done` false), and two right places left the third song.
+- **Player test:** the resting track's removal left the player resting on the last song left at 0 ms, and still so 600 ms later.
+- **On the built page:**
+  - **Library › Downloads** with 2 saved songs and 1 waiting, all picked:
+    - The pick survived a read of the list.
+    - The menu offered "Don't save the one on the way" and "Remove 2 saved songs from this computer".
+    - Remove asked first, and Keep them deleted nothing.
+    - Not saving the one on the way left both files.
+    - Deleting after the question removed both files.
+  - **Picking checks:** "Remove 2 from this playlist" (one change) left the right songs. "Don't play these 3 songs" dimmed 3 rows and made 3 choices; Undo took all 3 back.
+  - **The "Don't play" checks** passed again.

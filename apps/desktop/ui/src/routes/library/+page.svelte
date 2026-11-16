@@ -15,7 +15,7 @@
 	import Songs from '../../lib/desktop/Songs.svelte';
 	import { fold } from '../../lib/identity';
 	import Card from '../../lib/ui/Card.svelte';
-	import { atEvent, deleteFolder, folderHref, folderMenu, playlistMenu, playlistsWord } from '../../lib/desktop/folders';
+	import { atEvent, deleteFolder, folderHref, folderMenu, playlistMenu, playlistsWord } from '../../lib/desktop/playlist-folders';
 	import Icon from '../../lib/ui/Icon.svelte';
 	import TrackRow from '../../lib/ui/TrackRow.svelte';
 	import { L, LS, ui } from '../../lib/ui/state.svelte';

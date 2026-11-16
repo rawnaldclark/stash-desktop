@@ -1,12 +1,13 @@
 <!-- Library › Downloads: songs saved to this computer, and those on their way. What is saved plays with no connection; the
      rest plays through the add-ons until it is saved. A song is saved from its menu, or a whole list from Liked or a playlist. -->
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { itemOfRow, library, player } from '../app';
 	import * as core from '../core';
 	import Icon from '../ui/Icon.svelte';
 	import TrackRow from '../ui/TrackRow.svelte';
-	import type { PickList } from '../ui/pick.svelte';
+	import { P, type PickList } from '../ui/pick.svelte';
+	import type { LibraryItem } from '../api';
 	import { songs } from '../ui/format';
 	import { ui } from '../ui/state.svelte';
 	import { trouble } from './folders.svelte';
@@ -101,8 +102,26 @@
 		count: () => items.length,
 		between: (a, b) => items.slice(a, b + 1),
 		from: 'Downloads',
-		extra: (places) => (rows[places[0]] ? extra(rows[places[0]]) : {})
+		// One song: by its state. Several: each by its own (the menu offers not saving the ones on the way, and deleting
+		// the saved ones, apart).
+		extra: (places) => {
+			if (places.length === 1) return rows[places[0]] ? extra(rows[places[0]]) : {};
+			const saved: LibraryItem[] = [];
+			const waiting: LibraryItem[] = [];
+			for (const p of places) {
+				const r = rows[p];
+				if (r) (r.state === 'saved' ? saved : waiting).push(items[p]);
+			}
+			return { downloads: { saved, waiting } };
+		}
 	};
+	// The list is read again every second, in an order that follows each song's state: when the songs at the places
+	// change, the picks go.
+	const idsNow = $derived(rows.map((r) => r.id).join(','));
+	$effect(() => {
+		void idsNow;
+		untrack(() => P.forget('downloads'));
+	});
 </script>
 
 {#if d}

@@ -93,6 +93,8 @@ pub struct Failure {
     pub doubtful: bool,
     /// No add-on could be asked at all (none added, or none switched on that can).
     pub nothing_to_ask: bool,
+    /// An add-on was asked for the song this time (not only "no"s remembered from before).
+    pub asked: bool,
 }
 
 /// Asks where a track plays from: its add-on, or for a song known by its description, the listener's add-ons in turn.
@@ -1084,11 +1086,16 @@ impl Player {
 
     /// Takes every track `keep` says no to out of the queue, wherever it is (before the playing track too: the queue may
     /// start over), in one go. The playing (or starting) track taken out makes way for the next track kept, or
-    /// playback ends when none is; the track the player rests on, for the next one kept. Answers how many went.
+    /// playback ends when none is; the track the player rests on, for the next one kept (or the last one left). Answers
+    /// how many went.
+    ///
+    /// All of it happens under one hold of the player's state, a new start's own bookkeeping too: two calls at once
+    /// (from two threads) each see a queue whose places hold.
     pub fn retain(&self, keep: impl Fn(&QueueItem) -> bool) -> usize {
         enum Then {
             Nothing,
-            Start(usize),
+            /// A start begun: its generation, and whether it waits for an add-on.
+            Start(u64, bool),
             End,
         }
         let (gone, then) = {
@@ -1098,8 +1105,15 @@ impl Player {
             if gone == 0 {
                 return 0;
             }
-            let current = shared.index().or(shared.starting);
+            let current = shared
+                .index()
+                .or(shared.starting)
+                .filter(|&c| c < out.len());
             let resting = shared.resting().map(|(place, _)| place);
+            let begin = |shared: &mut Shared, place: usize| match Self::begin(shared, place, None) {
+                Some((generation, waits)) => Then::Start(generation, waits),
+                None => Then::Nothing,
+            };
             // Where a kept track ends up: after the kept tracks before it. And the first track kept from a place on.
             let kept_before = |place: usize| out[..place].iter().filter(|o| !**o).count();
             let next_kept = |place: usize| (place..out.len()).find(|&p| !out[p]).map(kept_before);
@@ -1118,7 +1132,7 @@ impl Player {
                 Some(c) if out[c] => {
                     shared.version += 1;
                     match next_kept(c) {
-                        Some(place) => Then::Start(place),
+                        Some(place) => begin(&mut shared, place),
                         None => {
                             shared.generation += 1;
                             shared.slots.clear();
@@ -1130,12 +1144,16 @@ impl Player {
                     }
                 }
                 Some(c) => match self.after_edit(&mut shared, current, Some(kept_before(c))) {
-                    Some(start) => Then::Start(start),
+                    Some(start) => begin(&mut shared, start),
                     None => Then::Nothing,
                 },
                 None => {
+                    // Resting on a track that went: on the next one kept, else on the last one left (as a queue that
+                    // played out rests on its last track).
                     if let Some(rest) = resting.filter(|r| out[*r]) {
-                        let next = next_kept(rest).map(|place| shared.queue[place].qid);
+                        let next = next_kept(rest)
+                            .map(|place| shared.queue[place].qid)
+                            .or_else(|| shared.queue.last().map(|t| t.qid));
                         shared.rest = next.map(|qid| (qid, 0.0));
                     }
                     let _ = self.after_edit(&mut shared, None, None);
@@ -1146,7 +1164,7 @@ impl Player {
         };
         match then {
             Then::Nothing => {}
-            Then::Start(place) => self.start_at(place),
+            Then::Start(generation, waits) => self.go(generation, waits),
             Then::End => {
                 let _ = self.ctx.engine.stop();
             }
@@ -1255,10 +1273,19 @@ impl Player {
 
     /// Plays the queue from `place` on, and that track from `seconds` in.
     fn start_at_from(&self, place: usize, seconds: Option<f64>) {
-        let (generation, waits) = {
-            let mut shared = self.ctx.shared.lock().unwrap();
+        let begun = Self::begin(&mut self.ctx.shared.lock().unwrap(), place, seconds);
+        if let Some((generation, waits)) = begun {
+            self.go(generation, waits);
+        }
+    }
+
+    /// A start's bookkeeping, under the hold of the player's state: the engine's tracks are let go, and the track at
+    /// `place` is the one starting. Answers the start's generation and whether it waits for an add-on; None when there
+    /// is no such place. [`Player::go`] hands it to the engine, once the state is let go.
+    fn begin(shared: &mut Shared, place: usize, seconds: Option<f64>) -> Option<(u64, bool)> {
+        {
             if place >= shared.queue.len() {
-                return;
+                return None;
             }
             shared.generation += 1;
             shared.slots.clear();
@@ -1276,8 +1303,12 @@ impl Player {
             shared.retry = None;
             shared.rest = None;
             shared.last = Some(shared.queue[place].qid);
-            (shared.generation, shared.queue[place].asks())
-        };
+            Some((shared.generation, shared.queue[place].asks()))
+        }
+    }
+
+    /// Hands a start begun (see [`Player::begin`]) to the engine.
+    fn go(&self, generation: u64, waits: bool) {
         if waits {
             // What was playing stops now, not when the add-on has answered.
             let _ = self.ctx.engine.stop();

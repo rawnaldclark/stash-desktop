@@ -982,6 +982,49 @@ fn what_is_done_here_goes_out_as_a_library_file() {
         (Some(0), Some(0), Some(0), Some(0))
     );
 
+    // Several songs out of a playlist at once, each by its place and the song there; not when a place holds another song
+    // now (the playlist changed since they were picked): then nothing goes.
+    let batch = client.post("/api/playlists", json!({ "name": "Batch" }))["id"]
+        .as_i64()
+        .unwrap();
+    client.post(
+        &format!("/api/playlists/{batch}/add"),
+        json!({ "ids": [alpha, bravo, charlie] }),
+    );
+    let titles_of = |id: i64| -> Vec<String> {
+        client
+            .get(&format!("/api/playlists/{id}/tracks?offset=0&limit=10"))
+            .1["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["title"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let stale = client.post(
+        &format!("/api/playlists/{batch}/remove"),
+        json!({ "places": [{ "index": 0, "id": alpha }, { "index": 1, "id": charlie }] }),
+    );
+    assert_eq!(
+        (stale["done"].as_bool(), titles_of(batch)),
+        (
+            Some(false),
+            vec!["alpha", "bravo", "charlie"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        )
+    );
+    let removed = client.post(
+        &format!("/api/playlists/{batch}/remove"),
+        json!({ "places": [{ "index": 2, "id": charlie }, { "index": 0, "id": alpha }] }),
+    );
+    assert_eq!(
+        (removed["done"].as_bool(), titles_of(batch)),
+        (Some(true), vec!["bravo".to_string()])
+    );
+    client.post(&format!("/api/playlists/{batch}/delete"), json!({}));
+
     // The folder deleted: its playlist stays, out of any folder.
     let gone = client.post(&format!("/api/folders/{night}/delete"), json!({}));
     assert_eq!(
@@ -2617,13 +2660,15 @@ fn songs_no_add_on_finds_wait_to_be_fixed_by_hand() {
             .unwrap()
     };
     let (golf, hotel, india) = (id("golf"), id("hotel"), id("india"));
+    // Until nothing is coming in, and nothing waits to be saved or saving waits.
     let save = |ids: &[i64]| {
         client.post("/api/downloads", json!({ "ids": ids }));
         client.post("/api/downloads/retry", json!({ "ids": ids }));
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let (_, list) = client.get("/api/downloads");
-            if list["counts"]["queued"] == 0 && list["counts"]["saving"] == 0 {
+            let c = &list["counts"];
+            if c["saving"] == 0 && (c["queued"] == 0 || !list["held"].is_null()) {
                 return list;
             }
             assert!(Instant::now() < deadline, "still saving: {list}");
@@ -2632,16 +2677,40 @@ fn songs_no_add_on_finds_wait_to_be_fixed_by_hand() {
     };
     let unfound = || client.get("/api/unfound").1;
 
-    // An add-on's "I don't have it" counts only once it is finding other songs it is asked for.
-    save(&[india]);
+    // An add-on's "I don't have it" counts only once it is finding other songs it is asked for. Until then India
+    // waits: asked once, its "no" is not believed; tried again, the "no" is remembered, nothing is asked, and saving
+    // waits instead of asking over and over.
+    let list = save(&[india]);
+    assert_eq!(
+        (
+            list["counts"]["queued"].as_u64(),
+            list["counts"]["failed"].as_u64(),
+            list["held"]["why"].as_str()
+        ),
+        (
+            Some(1),
+            Some(0),
+            Some("your add-ons are not finding songs just now")
+        ),
+        "{list}"
+    );
     assert_eq!(unfound()["open"], 0);
+    // Golf is found (Try again ends the wait). The add-on is finding songs now: India is asked again, its "no" is
+    // believed, and it is listed.
     let list = save(&[golf]);
-    assert_eq!(list["counts"]["saved"], 1, "{list}");
-    // Hotel is asked now, and listed. India's "no" was said before, when it was not believed: it is not asked
-    // again for a while, and does not count.
-    save(&[india, hotel]);
+    assert_eq!(
+        (
+            list["counts"]["saved"].as_u64(),
+            list["counts"]["failed"].as_u64()
+        ),
+        (Some(1), Some(1)),
+        "{list}"
+    );
     assert_eq!(unfound()["open"], 1, "{}", unfound());
-    // Switched off and on again, the add-on is asked again, and now its "no" for India is believed.
+    // Hotel is asked, and listed too.
+    save(&[hotel]);
+    assert_eq!(unfound()["open"], 2, "{}", unfound());
+    // Switched off and on again, the add-on is asked again, and its "no" for India is still believed.
     client.post(
         "/api/addons/enabled",
         json!({ "id": "demo.folder", "enabled": false }),
@@ -4762,6 +4831,64 @@ fn songs_and_artists_chosen_not_to_be_played_are_left_out() {
         "/api/blocks",
         json!({ "kind": "artist", "artist": artist, "blocked": false }),
     );
+
+    // Several songs at once (picked in a list): chosen not to be played in one go, each by its words (one with nothing
+    // to know it by is passed over), and they leave the queue; played again in one go.
+    let picked = json!([
+        { "title": theirs[0]["title"], "artist": theirs[0]["artist"] },
+        { "title": theirs[1]["title"], "artist": theirs[1]["artist"] },
+        { "title": "!!!", "artist": "?" }
+    ]);
+    let three = vec![
+        json!({ "id": theirs[0]["id"] }),
+        json!({ "id": theirs[1]["id"] }),
+        json!({ "id": keeper["id"] }),
+    ];
+    client.post("/api/player/play", json!({ "items": three, "start": 2 }));
+    client.player_until("the third song again", |s| {
+        s["track"]["title"] == keeper["title"] && s["status"] == "playing"
+    });
+    let said = client.post(
+        "/api/blocks",
+        json!({ "kind": "song", "songs": picked, "blocked": true }),
+    );
+    let mut marked: Vec<(i64, String)> = said["songs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["id"].as_i64().unwrap(),
+                s["blocked"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    marked.sort_unstable();
+    let mut two = vec![
+        (theirs[0]["id"].as_i64().unwrap(), "song".to_string()),
+        (theirs[1]["id"].as_i64().unwrap(), "song".to_string()),
+    ];
+    two.sort_unstable();
+    assert_eq!(
+        (marked, said["rows"].as_array().map(Vec::len)),
+        (two, Some(3)),
+        "{said}"
+    );
+    let (_, now) = client.get("/api/player");
+    assert_eq!(
+        (queued(), &now["track"]["title"], &now["index"]),
+        (
+            vec![keeper["title"].as_str().unwrap().to_string()],
+            &keeper["title"],
+            &json!(0)
+        ),
+        "{now}"
+    );
+    let again = client.post(
+        "/api/blocks",
+        json!({ "kind": "song", "songs": picked, "blocked": false }),
+    );
+    assert_eq!(again["rows"].as_array().map(Vec::len), Some(1), "{again}");
 
     // Refused: no kind, no artist, a name with nothing to know it by.
     assert_eq!(

@@ -133,16 +133,23 @@ pub fn kind_of(head: &[u8]) -> Option<&'static str> {
 pub enum Trouble {
     /// The listener took it off the list while it came in.
     Cancelled,
-    /// In words, for the list.
+    /// The song's own (in words, for the list): it is given up on.
     Failed(String),
-    /// Not the song's own trouble: the add-on's allowance is spent, it (or the file's server) could not be reached or
-    /// is overwhelmed, or the downloads folder cannot be written (a full disk, a drive unplugged). The song waits its
-    /// turn again, and saving waits a while before it asks again: as many seconds as the second field says, when an
-    /// add-on or server said.
+    /// Everyone's, never the song's: the add-on's allowance is spent or its key refused, too many asks, no add-on can
+    /// be asked, the downloads folder cannot be written (a full disk, a drive unplugged). The song waits its turn
+    /// again, and saving waits a while before it asks again: as many seconds as the second field says, when an add-on
+    /// or server said.
     Held(String, Option<u32>),
+    /// A server (the add-on's, or the file's) could not be reached, was busy, or stopped sending: maybe everyone's
+    /// trouble, maybe this song's. Tried again later, and given up on at last.
+    Busy(String, Option<u32>),
     /// "No" from add-ons that are not finding other songs either: maybe the song's own answer, maybe theirs (a broken
-    /// lookup, a spent allowance that answers "nothing"). The song is tried again later.
-    Later(String),
+    /// lookup, a spent allowance that answers "nothing"). Tried again later; the flag says whether an add-on was asked
+    /// this time (not only "no"s remembered from before).
+    Later(String, bool),
+    /// The add-on refused the request, or answered it with what the contract does not allow (its code): the song's
+    /// own, unless other songs get the same.
+    Refused(String, crate::addons::Code),
 }
 
 /// The downloads folder could not be written: not the song's trouble, and saving waits (a full disk, a drive that
@@ -203,15 +210,22 @@ pub fn fetch(
     let mut answer = agent.get(url).call().map_err(|e| {
         let why = format!("the file could not be fetched: {e}");
         if passing(&e) {
-            Trouble::Held(why, None)
+            Trouble::Busy(why, None)
         } else {
             Trouble::Failed(why)
         }
     })?;
     let status = answer.status().as_u16();
-    // Too many asks, or a server overwhelmed or in between: asked again later. Anything else is this file's own answer.
-    if matches!(status, 429 | 502..=504) {
+    // Too many asks: everyone's. A server overwhelmed or in between: asked again later. Anything else is this file's own
+    // answer.
+    if status == 429 {
         return Err(Trouble::Held(
+            format!("the file's server answered {status}"),
+            retry_after(&answer),
+        ));
+    }
+    if matches!(status, 502..=504) {
+        return Err(Trouble::Busy(
             format!("the file's server answered {status}"),
             retry_after(&answer),
         ));
@@ -245,7 +259,7 @@ pub fn fetch(
         }
         let n = body
             .read(&mut buffer)
-            .map_err(|e| Trouble::Held(format!("the file stopped coming in: {e}"), None))?;
+            .map_err(|e| Trouble::Busy(format!("the file stopped coming in: {e}"), None))?;
         if n == 0 {
             break;
         }

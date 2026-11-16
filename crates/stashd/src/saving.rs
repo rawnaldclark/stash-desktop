@@ -10,7 +10,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -40,33 +40,48 @@ pub(crate) struct Saving {
     bell: (Mutex<bool>, Condvar),
     /// The lists kept on this computer are to be looked at again.
     lists: AtomicBool,
-    /// Saving waits after trouble that is not a song's own (see [`Held`]).
+    /// Saving waits (see [`Held`]).
     held: Mutex<Option<Held>>,
-    /// Songs saved since Stash started, and for each song held: how many were saved when it was last held, and how many
-    /// times it was held again after others were saved (its trouble is its own after all: see [`Saving::struck`]).
-    saved: AtomicU64,
-    strikes: Mutex<HashMap<i64, (u64, u32)>>,
-    /// "No"s that were not believed (see [`Saving::later`]): how many each song has had, and the song the last one was
-    /// for, while nothing else has happened since.
-    doubts: Mutex<(HashMap<i64, u32>, Option<i64>)>,
+    /// Trouble that may be a song's own (see [`Saving::unsure`]).
+    tries: Mutex<Tries>,
 }
 
-/// What comes of a "no" that was not believed.
+/// Trouble that may be the song's own or everyone's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unsure {
+    /// A server (the add-on's, or the file's) could not be reached, was busy, or stopped sending.
+    Busy,
+    /// "No" from add-ons that are not finding other songs either.
+    Doubt,
+    /// The add-on refused the request, or answered it with what the contract does not allow.
+    Refused(Code),
+}
+
+/// For each song, how many of its tries had trouble that may be its own; and the trouble of the song tried last, while
+/// nothing else came between (a song saved, a song failed for its own reasons, trouble that is everyone's).
+#[derive(Default)]
+struct Tries {
+    counts: HashMap<i64, u32>,
+    last: Option<(i64, Unsure)>,
+}
+
+/// What saving does next with a song that had trouble that may be its own.
 #[derive(Debug, PartialEq, Eq)]
-enum Doubt {
-    /// The song goes to the back of the line, and the next is tried at once.
+enum Step {
+    /// To the back of the line; the next song is tried at once.
     Next,
-    /// Two songs in a row had one: the add-ons may be broken, and saving waits before it asks again.
+    /// To the back of the line, and saving waits before it asks again.
     Wait,
-    /// The song's third: it is given up on (its "no"s are not counted as "not found": they were not believed).
+    /// Given up on.
     GiveUp,
 }
 
-/// A song given up on after this many "no"s that were not believed.
-const DOUBTS: u32 = 3;
+/// A song is given up on at its third try with trouble that may be its own.
+const TRIES: u32 = 3;
 
-/// Saving waits: the add-on's allowance is spent, it (or a file's server) could not be reached, no add-on can be asked,
-/// or the downloads folder cannot be written. Nothing is asked until `until`; then the song first in line is tried (the
+/// Saving waits: after trouble that is everyone's (the add-on's allowance is spent or its key refused, too many asks,
+/// no add-on can be asked, the downloads folder cannot be written), when two songs in a row had the same trouble, or
+/// when the one song left had trouble again. Nothing is asked until `until`; then the song first in line is tried (the
 /// one held went to the back). Each time it is held again it waits twice as long, up to an hour, or as long as the
 /// add-on asked; a song saved ends it, and so do the listener's "Try again", an add-on added or switched on, and a new
 /// downloads folder.
@@ -82,8 +97,8 @@ const HELD_FIRST: Duration = Duration::from_secs(60);
 const HELD_MOST: Duration = Duration::from_secs(3600);
 /// The shortest wait an add-on's own "ask again in" is taken for.
 const HELD_LEAST: Duration = Duration::from_secs(5);
-/// A song held again this many times after other songs were saved in between is given up on.
-const STRIKES: u32 = 2;
+/// Why saving waits after "no"s that were not believed.
+const NOT_FINDING: &str = "your add-ons are not finding songs just now";
 
 #[derive(Clone, Copy, serde::Serialize)]
 struct Progress {
@@ -126,58 +141,48 @@ impl Saving {
 
     /// The song was saved.
     fn saved_one(&self, id: i64) {
-        self.saved.fetch_add(1, Ordering::Relaxed);
-        self.strikes.lock().unwrap().remove(&id);
-        let mut doubts = self.doubts.lock().unwrap();
-        doubts.0.remove(&id);
-        doubts.1 = None;
+        let mut tries = self.tries.lock().unwrap();
+        tries.counts.remove(&id);
+        tries.last = None;
     }
 
-    /// Something other than a "no" that was not believed came of a song: the run of them ends.
+    /// Something else came of a song than trouble that may be its own (it failed for its own reasons, or the trouble
+    /// was everyone's): a run of such trouble ends.
     fn settled(&self) {
-        self.doubts.lock().unwrap().1 = None;
+        self.tries.lock().unwrap().last = None;
     }
 
-    /// A "no" that was not believed, for the song `id`: tried again later, at once unless the last song had one too
-    /// (with nothing else in between); given up on at its third. A "no" said a little while ago is not asked again
-    /// (see `Lacks`), so trying again costs no allowance until the add-on is asked anew.
-    fn later(&self, id: i64) -> Doubt {
-        let mut doubts = self.doubts.lock().unwrap();
-        let (counts, last) = &mut *doubts;
-        let n = counts.entry(id).or_insert(0);
-        *n += 1;
-        if *n >= DOUBTS {
-            counts.remove(&id);
-            *last = None;
-            return Doubt::GiveUp;
+    /// Trouble that may be the song's own (`kind`), for the song `id`. Each try that asked something (`asked`) counts
+    /// against the song: it is given up on at its third, or at once for a refusal the song before did not have. Trouble
+    /// that is everyone's never comes here (see [`Trouble::Held`]), so a spent allowance gives no song up.
+    ///
+    /// When the song before had the same trouble, it is likely everyone's (the add-on or the line is down, its lookup
+    /// is broken, it refuses every request), and saving waits instead of asking for the next song at once; it waits too
+    /// when the same song comes again (it is the only one left), so nothing is asked over and over.
+    fn unsure(&self, id: i64, kind: Unsure, asked: bool) -> Step {
+        let mut tries = self.tries.lock().unwrap();
+        let Tries { counts, last } = &mut *tries;
+        let run = matches!(*last, Some((other, k)) if other != id && k == kind);
+        let again = matches!(*last, Some((other, _)) if other == id);
+        *last = Some((id, kind));
+        if asked {
+            let n = counts.entry(id).or_insert(0);
+            *n += 1;
+            let most = match kind {
+                Unsure::Refused(_) if !run => 1,
+                _ => TRIES,
+            };
+            if *n >= most {
+                counts.remove(&id);
+                return Step::GiveUp;
+            }
         }
-        let run = last.is_some_and(|other| other != id);
-        *last = Some(id);
-        if run { Doubt::Wait } else { Doubt::Next }
-    }
-
-    /// Notes that the song was held. True when it has now been held [`STRIKES`] more times after other songs were
-    /// saved in between: trouble that lets other songs through is the song's own, and it is given up on. Trouble
-    /// that holds every song (an allowance spent, no connection) never gives one up.
-    fn struck(&self, id: i64) -> bool {
-        let saved = self.saved.load(Ordering::Relaxed);
-        let mut strikes = self.strikes.lock().unwrap();
-        let (at, struck) = strikes.entry(id).or_insert((saved, 0));
-        if saved > *at {
-            *struck += 1;
-        }
-        *at = saved;
-        if *struck >= STRIKES {
-            strikes.remove(&id);
-            return true;
-        }
-        false
+        if run || again { Step::Wait } else { Step::Next }
     }
 
     /// The listener asks to try again: every song starts with a clean slate.
     fn forgive(&self) {
-        self.strikes.lock().unwrap().clear();
-        *self.doubts.lock().unwrap() = (HashMap::new(), None);
+        *self.tries.lock().unwrap() = Tries::default();
         self.release();
     }
 
@@ -267,45 +272,55 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
 fn save(state: &State, id: i64, stop: &AtomicBool) {
     let outcome = fetch_and_keep(state, id, stop);
     *state.saving.now.lock().unwrap() = None;
+    let failed = |why: &str| {
+        let _ = state.library.lock().unwrap().download_failed(id, why);
+    };
+    let back = || {
+        let _ = state.library.lock().unwrap().download_held(id, now_ms());
+    };
+    // Trouble that may be the song's own: tried again later, given up on at last (see `Saving::unsure`). `waits` says
+    // why saving waits, when it does.
+    let unsure =
+        |kind: Unsure, why: String, waits: String, after: Option<u32>, asked: bool| match state
+            .saving
+            .unsure(id, kind, asked)
+        {
+            Step::GiveUp => failed(&why),
+            Step::Next => back(),
+            Step::Wait => {
+                back();
+                state.saving.hold(waits, after);
+            }
+        };
     match outcome {
         Ok(()) => {
             state.saving.release();
             state.saving.saved_one(id);
         }
+        // The song's own: given up on.
         Err(Trouble::Failed(why)) => {
             state.saving.settled();
-            let _ = state.library.lock().unwrap().download_failed(id, &why);
+            failed(&why);
         }
-        // Held again after other songs were saved: the trouble is the song's own after all.
-        Err(Trouble::Held(why, _)) if state.saving.struck(id) => {
-            state.saving.settled();
-            let _ = state.library.lock().unwrap().download_failed(id, &why);
-        }
-        // Not the song's own trouble: it waits its turn again at the back of the line, and saving waits before it
-        // asks again (an add-on whose allowance is spent is not asked for every song on the list).
+        // Everyone's: the song waits its turn again at the back of the line, and saving waits before it asks again (an
+        // add-on whose allowance is spent is not asked for every song on the list). It never gives a song up.
         Err(Trouble::Held(why, after)) => {
             state.saving.settled();
-            let _ = state.library.lock().unwrap().download_held(id, now_ms());
+            back();
             state.saving.hold(why, after);
         }
-        // "No" from add-ons that are not finding other songs either: the song is tried again later.
-        Err(Trouble::Later(why)) => match state.saving.later(id) {
-            Doubt::GiveUp => {
-                let _ = state.library.lock().unwrap().download_failed(id, &why);
-            }
-            Doubt::Next => {
-                let _ = state.library.lock().unwrap().download_held(id, now_ms());
-            }
-            Doubt::Wait => {
-                let _ = state.library.lock().unwrap().download_held(id, now_ms());
-                state.saving.hold(why, None);
-            }
-        },
+        Err(Trouble::Busy(why, after)) => unsure(Unsure::Busy, why.clone(), why, after, true),
+        Err(Trouble::Later(why, asked)) => {
+            unsure(Unsure::Doubt, why, NOT_FINDING.into(), None, asked)
+        }
+        Err(Trouble::Refused(why, code)) => {
+            unsure(Unsure::Refused(code), why.clone(), why, None, true)
+        }
         // Stopped because Stash went offline: it waits for the connection, first on the list as it was.
         Err(Trouble::Cancelled) if crate::serve::offline(state) => {
             let _ = state.library.lock().unwrap().requeue_downloads();
         }
-        _ => {}
+        Err(Trouble::Cancelled) => {}
     }
 }
 
@@ -468,31 +483,21 @@ fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<(), Troub
     }
 }
 
-/// What saving does when the add-ons did not give the song. Given up on: a song no add-on has (when that is believed),
-/// and an add-on's answer about this song itself (a request it refused, a file it cannot give as asked). Waited out:
-/// trouble that is not the song's own (an allowance spent, too many asks, a key refused, an add-on down or out of
-/// reach), no add-on to ask, and the library not read. Tried again later: "no"s from add-ons that are not finding
-/// other songs either.
+/// What saving makes of the add-ons not giving the song (see `save`). Everyone's: an allowance spent, too many asks, a
+/// key refused, no add-on to ask, the library not read. Maybe the song's own: an add-on down, out of reach or too slow;
+/// "no"s from add-ons that are not finding other songs either; a request the add-on refused, or answered with what the
+/// contract does not allow. The song's own: no add-on has it (when that is believed).
 fn trouble_of(failure: Failure) -> Trouble {
     match failure.code {
-        Some(code) => {
-            let passing = matches!(
-                code,
-                Code::QuotaExceeded
-                    | Code::RateLimited
-                    | Code::Unauthorized
-                    | Code::Unavailable
-                    | Code::Timeout
-                    | Code::Network
-            );
-            if passing {
-                Trouble::Held(failure.message, failure.retry_after)
-            } else {
-                Trouble::Failed(failure.message)
-            }
+        Some(Code::QuotaExceeded | Code::RateLimited | Code::Unauthorized) => {
+            Trouble::Held(failure.message, failure.retry_after)
         }
+        Some(Code::Unavailable | Code::Timeout | Code::Network) => {
+            Trouble::Busy(failure.message, failure.retry_after)
+        }
+        Some(code) => Trouble::Refused(failure.message, code),
         None if failure.nothing_to_ask || !failure.miss => Trouble::Held(failure.message, None),
-        None if failure.doubtful => Trouble::Later(failure.message),
+        None if failure.doubtful => Trouble::Later(failure.message, failure.asked),
         None => Trouble::Failed(failure.message),
     }
 }
@@ -675,7 +680,9 @@ pub(crate) fn route(
                 .lock()
                 .unwrap()
                 .retry_downloads(&ids, now_ms())?;
-            // The listener asks to try again: saving does not wait out trouble it had with an add-on.
+            // The listener asks to try again: saving does not wait out trouble it had with an add-on, and the add-ons
+            // are asked again for those songs where their "no" was not believed.
+            state.lacks.forget_doubted(&ids);
             state.saving.forgive();
             state.saving.ring();
             Ok(Some(reply_json(200, listed(state, 0, 0)?)))
@@ -733,106 +740,125 @@ mod tests {
             code,
             retry_after: Some(30),
             doubtful,
-            nothing_to_ask: false,
+            asked: true,
+            ..Default::default()
         }
     }
 
     #[test]
-    fn trouble_that_is_not_the_songs_own_is_waited_out_and_its_own_gives_it_up() {
-        let held = |t: Trouble| matches!(t, Trouble::Held(_, _));
-        for code in [
-            Code::QuotaExceeded,
-            Code::RateLimited,
-            Code::Unauthorized,
-            Code::Unavailable,
-            Code::Timeout,
-            Code::Network,
-        ] {
+    fn trouble_is_everyones_the_songs_own_or_either() {
+        // Everyone's: waited out, with the add-on's "ask again in".
+        for code in [Code::QuotaExceeded, Code::RateLimited, Code::Unauthorized] {
             assert!(
-                held(trouble_of(failure(Some(code), false, false))),
+                matches!(
+                    trouble_of(failure(Some(code), false, false)),
+                    Trouble::Held(_, Some(30))
+                ),
                 "{code:?}"
             );
         }
-        // The add-on's answer about this song: a file it cannot give as asked, a request it refused.
-        for code in [
-            Code::InvalidResponse,
-            Code::BadRequest,
-            Code::Refused,
-            Code::NotFound,
-        ] {
+        // Either: an add-on down, out of reach or too slow...
+        for code in [Code::Unavailable, Code::Timeout, Code::Network] {
             assert!(
-                !held(trouble_of(failure(Some(code), false, false))),
+                matches!(
+                    trouble_of(failure(Some(code), false, false)),
+                    Trouble::Busy(_, Some(30))
+                ),
                 "{code:?}"
             );
         }
-        // No add-on has it: believed, given up on; doubted, tried later; no add-on to ask, waited out.
+        // ...or a request it refused, or answered with nonsense.
+        for code in [Code::InvalidResponse, Code::BadRequest, Code::Refused] {
+            assert!(
+                matches!(trouble_of(failure(Some(code), false, false)), Trouble::Refused(_, c) if c == code),
+                "{code:?}"
+            );
+        }
+        // No add-on has it: believed, the song's own; doubted, either (and whether anything was asked); no add-on to
+        // ask, everyone's.
         assert!(matches!(
             trouble_of(failure(None, true, false)),
             Trouble::Failed(_)
         ));
         assert!(matches!(
             trouble_of(failure(None, true, true)),
-            Trouble::Later(_)
+            Trouble::Later(_, true)
         ));
-        assert!(held(trouble_of(Failure {
-            nothing_to_ask: true,
-            ..failure(None, true, false)
-        })));
-        // The add-on's "ask again in" goes along.
         assert!(matches!(
-            trouble_of(failure(Some(Code::RateLimited), false, false)),
-            Trouble::Held(_, Some(30))
+            trouble_of(Failure {
+                asked: false,
+                ..failure(None, true, true)
+            }),
+            Trouble::Later(_, false)
+        ));
+        assert!(matches!(
+            trouble_of(Failure {
+                nothing_to_ask: true,
+                ..failure(None, true, false)
+            }),
+            Trouble::Held(_, None)
         ));
     }
 
     #[test]
-    fn a_song_held_again_after_others_were_saved_is_given_up_on() {
+    fn trouble_that_may_be_the_songs_own_is_tried_three_times() {
         let saving = Saving::default();
-        // Trouble that holds every song (nothing saved in between) never gives one up.
-        for _ in 0..10 {
-            assert!(!saving.struck(1));
-            assert!(!saving.struck(2));
+        // One song alone, its file's server down: tried again at once, then after a wait, then given up on.
+        assert_eq!(saving.unsure(1, Unsure::Busy, true), Step::Next);
+        assert_eq!(saving.unsure(1, Unsure::Busy, true), Step::Wait);
+        assert_eq!(saving.unsure(1, Unsure::Busy, true), Step::GiveUp);
+        // Two songs in a row with the same trouble: likely everyone's, and saving waits. Each try still counts, so two
+        // songs that both have trouble of their own are not tried for ever.
+        saving.settled();
+        assert_eq!(saving.unsure(2, Unsure::Busy, true), Step::Next);
+        assert_eq!(saving.unsure(3, Unsure::Busy, true), Step::Wait);
+        assert_eq!(saving.unsure(2, Unsure::Busy, true), Step::Wait);
+        assert_eq!(saving.unsure(3, Unsure::Busy, true), Step::Wait);
+        assert_eq!(saving.unsure(2, Unsure::Busy, true), Step::GiveUp);
+        assert_eq!(saving.unsure(3, Unsure::Busy, true), Step::GiveUp);
+        // A try that asked nothing (only "no"s remembered from before) does not count, and waits when it comes again.
+        saving.settled();
+        assert_eq!(saving.unsure(4, Unsure::Doubt, true), Step::Next);
+        for _ in 0..5 {
+            assert_eq!(saving.unsure(4, Unsure::Doubt, false), Step::Wait);
         }
-        // Song 1 is held, others are saved, it is held again: once is a strike, twice gives it up.
-        saving.saved_one(3);
-        assert!(!saving.struck(1));
-        saving.saved_one(4);
-        assert!(saving.struck(1));
-        // Given up on, it starts over if it comes back; saved, its strikes go.
-        assert!(!saving.struck(1));
-        saving.saved_one(5);
-        assert!(!saving.struck(2));
-        saving.saved_one(2);
+        assert_eq!(saving.unsure(4, Unsure::Doubt, true), Step::Wait);
+        assert_eq!(saving.unsure(4, Unsure::Doubt, true), Step::GiveUp);
+        // Other trouble is not the same run. A song saved ends a run, not another song's count.
+        assert_eq!(saving.unsure(5, Unsure::Busy, true), Step::Next);
         saving.saved_one(6);
-        assert!(!saving.struck(2));
-        // "Try again" forgives every song.
-        saving.saved_one(7);
+        assert_eq!(saving.unsure(5, Unsure::Busy, true), Step::Next);
+        assert_eq!(saving.unsure(5, Unsure::Busy, true), Step::GiveUp);
+        // "Try again" starts every song over.
         saving.forgive();
-        assert!(!saving.struck(1));
+        assert_eq!(saving.unsure(7, Unsure::Busy, true), Step::Next);
+        assert_eq!(saving.unsure(7, Unsure::Busy, true), Step::Wait);
+        saving.forgive();
+        assert_eq!(saving.unsure(7, Unsure::Busy, true), Step::Next);
+        assert_eq!(saving.unsure(7, Unsure::Busy, true), Step::Wait);
+        assert_eq!(saving.unsure(7, Unsure::Busy, true), Step::GiveUp);
     }
 
     #[test]
-    fn a_no_that_is_not_believed_is_tried_later_and_two_in_a_row_wait() {
+    fn a_refusal_is_the_songs_own_unless_the_song_before_had_it_too() {
         let saving = Saving::default();
-        // One song alone: tried again at once, given up on at its third.
-        assert_eq!(saving.later(1), Doubt::Next);
-        assert_eq!(saving.later(1), Doubt::Next);
-        assert_eq!(saving.later(1), Doubt::GiveUp);
-        // Two songs in a row: the add-ons may be broken, saving waits.
-        assert_eq!(saving.later(2), Doubt::Next);
-        assert_eq!(saving.later(3), Doubt::Wait);
-        // Something else in between (a song saved, one failed, trouble) ends the run.
+        let refused = Unsure::Refused(Code::BadRequest);
+        // The first song refused is given up on at once.
+        assert_eq!(saving.unsure(1, refused, true), Step::GiveUp);
+        // The next song refused the same way: the add-on refuses every request (a plan that lapsed). Saving waits and
+        // the song stays in line, given up on only at its third.
+        assert_eq!(saving.unsure(2, refused, true), Step::Wait);
+        assert_eq!(saving.unsure(3, refused, true), Step::Wait);
+        assert_eq!(saving.unsure(2, refused, true), Step::Wait);
+        assert_eq!(saving.unsure(3, refused, true), Step::Wait);
+        assert_eq!(saving.unsure(2, refused, true), Step::GiveUp);
+        // After something else, and for another refusal, it is the song's own again.
         saving.settled();
-        assert_eq!(saving.later(4), Doubt::Next);
-        saving.saved_one(9);
-        assert_eq!(saving.later(2), Doubt::Next);
-        assert_eq!(saving.later(2), Doubt::GiveUp);
-        // "Try again" starts every song over: song 4, at its second, would be given up on at its next.
-        assert_eq!(saving.later(4), Doubt::Next);
-        saving.forgive();
-        assert_eq!(saving.later(4), Doubt::Next);
-        assert_eq!(saving.later(4), Doubt::Next);
-        assert_eq!(saving.later(4), Doubt::GiveUp);
+        assert_eq!(saving.unsure(4, refused, true), Step::GiveUp);
+        assert_eq!(
+            saving.unsure(5, Unsure::Refused(Code::InvalidResponse), true),
+            Step::GiveUp
+        );
     }
 
     #[test]
