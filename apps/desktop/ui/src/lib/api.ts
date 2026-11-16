@@ -21,6 +21,8 @@ export type PlayOptions = {
 	from?: string;
 	/** The library's songs that play with no connection only (Library › Songs, "On this computer"): `offset` counts among them. */
 	here?: boolean;
+	/** The library's row of the song at `offset`: the list may have moved since it was read, and the core finds it. */
+	id?: number;
 };
 
 export interface PlayerState {

@@ -79,12 +79,20 @@ pub struct Located {
 }
 
 /// Why an add-on's track could not be located.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Failure {
     pub message: String,
     /// The add-on answered that it cannot give this track (the queue moves on), as opposed to trouble reaching or
     /// using the add-on (asking again may help).
     pub miss: bool,
+    /// The add-on's trouble, when that is why: its code, and how long it asked to be left alone (in seconds).
+    pub code: Option<crate::addons::Code>,
+    pub retry_after: Option<u32>,
+    /// A miss that may not be one: the add-ons that said "no" are not finding other songs either (their lookup may be
+    /// broken, or their allowance spent).
+    pub doubtful: bool,
+    /// No add-on could be asked at all (none added, or none switched on that can).
+    pub nothing_to_ask: bool,
 }
 
 /// Asks where a track plays from: its add-on, or for a song known by its description, the listener's add-ons in turn.
@@ -507,7 +515,7 @@ impl Ctx {
             }),
             None => Err(Failure {
                 message: "this player has no add-ons".into(),
-                miss: false,
+                ..Default::default()
             }),
         }
     }
@@ -1072,6 +1080,78 @@ impl Player {
             }
         }
         true
+    }
+
+    /// Takes every track `keep` says no to out of the queue, wherever it is (before the playing track too: the queue may
+    /// start over), in one go. The playing (or starting) track taken out makes way for the next track kept, or
+    /// playback ends when none is; the track the player rests on, for the next one kept. Answers how many went.
+    pub fn retain(&self, keep: impl Fn(&QueueItem) -> bool) -> usize {
+        enum Then {
+            Nothing,
+            Start(usize),
+            End,
+        }
+        let (gone, then) = {
+            let mut shared = self.ctx.shared.lock().unwrap();
+            let out: Vec<bool> = shared.queue.iter().map(|t| !keep(t)).collect();
+            let gone = out.iter().filter(|o| **o).count();
+            if gone == 0 {
+                return 0;
+            }
+            let current = shared.index().or(shared.starting);
+            let resting = shared.resting().map(|(place, _)| place);
+            // Where a kept track ends up: after the kept tracks before it. And the first track kept from a place on.
+            let kept_before = |place: usize| out[..place].iter().filter(|o| !**o).count();
+            let next_kept = |place: usize| (place..out.len()).find(|&p| !out[p]).map(kept_before);
+            let dropped: std::collections::HashSet<u64> = shared
+                .queue
+                .iter()
+                .zip(&out)
+                .filter(|(_, o)| **o)
+                .map(|(t, _)| t.qid)
+                .collect();
+            shared.queue.retain(|t| !dropped.contains(&t.qid));
+            if let Some(original) = shared.original.as_mut() {
+                original.retain(|qid| !dropped.contains(qid));
+            }
+            let then = match current {
+                Some(c) if out[c] => {
+                    shared.version += 1;
+                    match next_kept(c) {
+                        Some(place) => Then::Start(place),
+                        None => {
+                            shared.generation += 1;
+                            shared.slots.clear();
+                            shared.pos = None;
+                            shared.starting = None;
+                            shared.ahead = shared.queue.len();
+                            Then::End
+                        }
+                    }
+                }
+                Some(c) => match self.after_edit(&mut shared, current, Some(kept_before(c))) {
+                    Some(start) => Then::Start(start),
+                    None => Then::Nothing,
+                },
+                None => {
+                    if let Some(rest) = resting.filter(|r| out[*r]) {
+                        let next = next_kept(rest).map(|place| shared.queue[place].qid);
+                        shared.rest = next.map(|qid| (qid, 0.0));
+                    }
+                    let _ = self.after_edit(&mut shared, None, None);
+                    Then::Nothing
+                }
+            };
+            (gone, then)
+        };
+        match then {
+            Then::Nothing => {}
+            Then::Start(place) => self.start_at(place),
+            Then::End => {
+                let _ = self.ctx.engine.stop();
+            }
+        }
+        gone
     }
 
     /// Takes back what the engine was handed beyond the track playing, so the tracks after it are asked for again: what

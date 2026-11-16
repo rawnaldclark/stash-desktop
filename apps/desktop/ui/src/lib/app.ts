@@ -114,8 +114,11 @@ export async function goOffline(on: boolean): Promise<void> {
 export const blockedNow = writable(new Map<number, 'song' | 'artist' | null>());
 /** Chooses not to play a song (`kind` "song": every copy of its words) or every song of its artist, or (`on` false) to
  * play it again. The rows it covers are marked at once; answers every song and artist chosen not to be played. */
-export async function notPlayed(kind: 'song' | 'artist', item: { title: string; artist: string }, on: boolean): Promise<core.Blocked[]> {
-	const said = await core.setBlocked({ kind, title: kind === 'song' ? item.title : undefined, artist: item.artist, blocked: on });
+export async function notPlayed(kind: 'song' | 'artist', item: { title: string; artist: string }, on: boolean, key?: string): Promise<core.Blocked[]> {
+	// Played again by the key it is kept under, when it is known (Settings › Not played): what was kept of its words may be shorter.
+	const said = await core.setBlocked(
+		!on && key ? { kind, key, blocked: false } : { kind, title: kind === 'song' ? item.title : undefined, artist: item.artist, blocked: on }
+	);
 	if (said.songs?.length) {
 		blockedNow.update((now) => {
 			const next = new Map(now);
@@ -405,7 +408,7 @@ const player: PlayerAPI = {
 		if (!entries.length) return Promise.resolve();
 		return command(() => core.playEntries(entries, Math.min(start, entries.length - 1), opts?.from));
 	},
-	playLibrary: (offset, opts) => command(() => core.playLibrary(offset, opts?.from, opts?.here)),
+	playLibrary: (offset, opts) => command(() => core.playLibrary(offset, opts?.from, opts?.here, opts?.id)),
 	play: () => void command(() => core.setPaused(false)),
 	pause: () => void command(() => core.setPaused(true)),
 	toggle: () => {
@@ -449,6 +452,11 @@ const history = writable<HistoryEntry[]>([]);
 const counts = writable<Counts | null>(null);
 const loaded = writable(false);
 const changed = writable(0);
+/** Every list reads its rows again: their own word on what the listener chose not to play is the newest now. */
+function relisted(): void {
+	blockedNow.set(new Map());
+	changed.update((n) => n + 1);
+}
 
 const HISTORY_MAX = 500;
 
@@ -562,7 +570,7 @@ export function unsaveSongs(items: LibraryItem[]): Promise<void> {
 		const ids = items.map(libIdOf).filter((id): id is number => id !== null);
 		await core.unsaveSongs(ids);
 		await loadLibrary().catch(() => {});
-		changed.update((n) => n + 1);
+		relisted();
 	});
 }
 
@@ -672,7 +680,7 @@ const library: LibraryAPI = {
 		),
 	reload: async () => {
 		await loadLibrary().catch(() => {});
-		changed.update((n) => n + 1);
+		relisted();
 	}
 };
 

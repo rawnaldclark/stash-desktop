@@ -453,8 +453,23 @@ impl Library {
     /// - more: titles that start with what was typed come first, in title order, then other matches. Typing on
     ///   narrows it into the ranked case.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<TrackRow>> {
+        self.search_among(query, limit, false)
+    }
+
+    /// [`Library::search`] among the songs that play with no connection only ("On this computer").
+    pub fn search_here(&self, query: &str, limit: usize) -> Result<Vec<TrackRow>> {
+        self.search_among(query, limit, true)
+    }
+
+    fn search_among(&self, query: &str, limit: usize, only_here: bool) -> Result<Vec<TrackRow>> {
         let Some(fts) = fts_query(query) else {
             return Ok(Vec::new());
+        };
+        // Only the songs here: the filter goes where the rows are read, so the limit counts songs here.
+        let and_here = if only_here {
+            concat!(" AND ", here!())
+        } else {
+            ""
         };
         let mut probe = self
             .conn
@@ -465,13 +480,19 @@ impl Library {
 
         if matched.len() <= RANK_CAP {
             // The hits and their order come from the index alone; only the rows shown are then read.
+            let (inner, outer) = if only_here {
+                ("", " LIMIT ?2")
+            } else {
+                (" LIMIT ?2", "")
+            };
             let sql = format!(
                 "WITH hits AS (
                      SELECT rowid, rank FROM tracks_fts
                      WHERE tracks_fts MATCH ?1 AND rank MATCH 'bm25(10.0, 5.0, 2.0)'
-                     ORDER BY rank LIMIT ?2)
+                     ORDER BY rank{inner})
                  SELECT {TRACK_COLUMNS} FROM hits JOIN tracks t ON t.id = hits.rowid {TRACK_JOINS}
-                 ORDER BY hits.rank"
+                 WHERE 1{and_here}
+                 ORDER BY hits.rank{outer}"
             );
             let mut stmt = self.conn.prepare_cached(&sql)?;
             let rows = stmt
@@ -484,7 +505,7 @@ impl Library {
         let typed = sort_key(query);
         let sql = format!(
             "SELECT {TRACK_COLUMNS} FROM tracks t {TRACK_JOINS}
-             WHERE t.sort_key >= ?1 AND t.sort_key < ?2
+             WHERE t.sort_key >= ?1 AND t.sort_key < ?2{and_here}
              ORDER BY t.sort_key, t.id LIMIT ?3"
         );
         let mut by_title = self.conn.prepare_cached(&sql)?;
@@ -495,7 +516,9 @@ impl Library {
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         if rows.len() < limit {
-            let sql = format!("SELECT {TRACK_COLUMNS} FROM tracks t {TRACK_JOINS} WHERE t.id = ?1");
+            let sql = format!(
+                "SELECT {TRACK_COLUMNS} FROM tracks t {TRACK_JOINS} WHERE t.id = ?1{and_here}"
+            );
             let mut by_id = self.conn.prepare_cached(&sql)?;
             for id in matched {
                 if rows.len() >= limit {
@@ -504,7 +527,9 @@ impl Library {
                 if rows.iter().any(|r| r.id == id) {
                     continue;
                 }
-                rows.push(by_id.query_row([id], track_row)?);
+                if let Some(row) = by_id.query_row([id], track_row).optional()? {
+                    rows.push(row);
+                }
             }
         }
         Ok(rows)
@@ -558,8 +583,12 @@ impl Library {
 
     /// How many tracks play with no connection.
     pub fn here_count(&self) -> Result<u64> {
+        // The files here, and the other songs with a copy kept from playing them: two plain counts, not a look for a
+        // copy for every song (the window asks now and then while the list shows).
         Ok(self.conn.query_row(
-            concat!("SELECT COUNT(*) FROM tracks t WHERE ", here!()),
+            "SELECT (SELECT COUNT(*) FROM tracks WHERE origin = 'file' AND missing_since IS NULL)
+                  + (SELECT COUNT(DISTINCT pc.track_id) FROM played_copies pc JOIN tracks t ON t.id = pc.track_id
+                     WHERE NOT (t.origin = 'file' AND t.missing_since IS NULL))",
             [],
             |r| r.get::<_, i64>(0),
         )? as u64)

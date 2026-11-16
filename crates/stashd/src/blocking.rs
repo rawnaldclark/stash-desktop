@@ -2,7 +2,9 @@
 //!
 //! Stash never plays them on its own. A list played through leaves them out, and so does a group of songs added to Up
 //! next; autoplay never picks them (`Library::autoplay_picks`). One song chosen by itself still plays: the listener
-//! asked for that very song. Choosing not to play a song takes it out of Up next, and skips it if it is playing.
+//! asked for that very song. Choosing not to play a song takes it out of the queue, and skips it if it is playing.
+
+use std::collections::HashSet;
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -18,7 +20,7 @@ pub(crate) const ALL_BLOCKED: &str = "You chose not to play any of those songs";
 
 /// Whether a queued song is one the listener chose not to play: a song of the library by its row, an add-on's by its
 /// words.
-fn blocked(library: &Library, item: &QueueItem, rows: &std::collections::HashSet<i64>) -> bool {
+fn blocked(library: &Library, item: &QueueItem, rows: &HashSet<i64>) -> bool {
     match item.id {
         Some(id) => rows.contains(&id),
         None => library
@@ -57,38 +59,35 @@ pub(crate) fn leave_out(
     Ok(Some((kept, begins)))
 }
 
-/// After a choice not to play: the songs it covers leave Up next, and the song playing is skipped if it is one.
-fn clear_queue(state: &State) {
+/// After new choices not to play (each a kind and the key it is kept under): the songs they cover leave the queue,
+/// wherever they are in it (before the song playing too: the queue may start over, and a queue kept from last time
+/// rests on one), and the song playing is skipped if it is one. Only what these choices cover: a song chosen not to be
+/// played before, and then played or added by itself, stays.
+pub(crate) fn clear_queue(state: &State, choices: &[(BlockKind, String)]) {
     let Ok(player) = &state.player else { return };
-    let now = player.state();
-    let Some(index) = now.index else { return };
-    let from_here = player.queue_at(index, now.queue_len.saturating_sub(index));
-    let out: Vec<bool> = {
+    if choices.is_empty() {
+        return;
+    }
+    let rows: HashSet<i64> = {
         let library = state.library.lock().unwrap();
-        let ids: Vec<i64> = from_here.iter().filter_map(|i| i.id).collect();
-        let rows = library.blocked_of(&ids).unwrap_or_default();
-        from_here
+        choices
             .iter()
-            .map(|i| blocked(&library, i, &rows))
+            .filter_map(|(kind, key)| library.ids_blocked_by(*kind, key).ok())
+            .flatten()
             .collect()
     };
-    // The last first, so the places before stay where they are.
-    for (offset, _) in out
-        .iter()
-        .enumerate()
-        .skip(1)
-        .rev()
-        .filter(|(_, out)| **out)
-    {
-        player.remove_at(index + offset);
-    }
-    if out.first() == Some(&true) {
-        let _ = player.next();
-    }
+    player.retain(|item| match item.id {
+        Some(id) => !rows.contains(&id),
+        None => !choices
+            .iter()
+            .any(|(kind, key)| kind.covers(key, &item.title, &item.artist)),
+    });
 }
 
 /// `/api/blocks`. GET: every song and artist the listener chose not to play, the latest first. POST `{kind: "song" |
-/// "artist", title (a song's), artist, blocked}`: chooses not to play it (`blocked` true) or to play it again.
+/// "artist", title (a song's), artist, blocked}`: chooses not to play it (`blocked` true) or to play it again; to play
+/// one again, `key` (as the list gives it) may stand for the words. The answer says how the library's songs it covers
+/// are chosen now, so the window marks them at once.
 pub(crate) fn route(state: &State, request: &mut Request, path: &str) -> Result<Option<Reply>> {
     if path != "/api/blocks" {
         return Ok(None);
@@ -114,35 +113,44 @@ pub(crate) fn route(state: &State, request: &mut Request, path: &str) -> Result<
             let Some(on) = body.get("blocked").and_then(Value::as_bool) else {
                 return Ok(Some(refuse(400, "blocked is true or false")));
             };
-            let (title, artist) = (text("title"), text("artist"));
-            if artist.is_empty() || (kind == BlockKind::Song && title.is_empty()) {
-                return Ok(Some(refuse(
-                    400,
-                    "a song needs its title and artist, an artist its name",
-                )));
-            }
-            let (key, songs) = {
+            let given = Some(text("key")).filter(|k| !k.is_empty());
+            let (key, ids) = {
                 let mut library = state.library.lock().unwrap();
-                let key = library.set_blocked(kind, &title, &artist, on, now_ms())?;
-                // The library's songs it covers, as they are now: the window marks them at once.
-                let songs = match &key {
-                    Some(key) => library.blocked_kinds(&library.ids_blocked_by(kind, key)?)?,
-                    None => Vec::new(),
+                let key = match given {
+                    // Played again by the key it is kept under: what was kept of its words may be shorter than they were.
+                    Some(key) if !on => {
+                        library.unblock_key(kind, &key)?;
+                        Some(key)
+                    }
+                    _ => {
+                        let (title, artist) = (text("title"), text("artist"));
+                        if artist.is_empty() || (kind == BlockKind::Song && title.is_empty()) {
+                            return Ok(Some(refuse(
+                                400,
+                                "a song needs its title and artist, an artist its name",
+                            )));
+                        }
+                        library.set_blocked(kind, &title, &artist, on, now_ms())?
+                    }
                 };
-                (key, songs)
+                let Some(key) = key else {
+                    return Ok(Some(refuse(
+                        400,
+                        "those words have no letters or numbers to know it by",
+                    )));
+                };
+                let ids = library.ids_blocked_by(kind, &key)?;
+                (key, ids)
             };
-            if key.is_none() {
-                return Ok(Some(refuse(
-                    400,
-                    "those words have no letters or numbers to know it by",
-                )));
-            }
             if on {
-                clear_queue(state);
+                clear_queue(state, &[(kind, key)]);
             }
             // The songs' rows say which are chosen not to be played: every window reads its lists again.
             state.edited();
-            let rows = state.library.lock().unwrap().blocks()?;
+            let (rows, songs) = {
+                let library = state.library.lock().unwrap();
+                (library.blocks()?, library.blocked_kinds(&ids)?)
+            };
             let songs: Vec<Value> = songs
                 .into_iter()
                 .map(|(id, kind)| json!({ "id": id, "blocked": kind }))

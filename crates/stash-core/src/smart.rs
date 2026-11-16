@@ -424,9 +424,15 @@ impl Library {
             return Ok(Vec::new());
         };
         let (filter, order, values) = rules.sql(now_ms);
+        // The page's songs are picked first, by the rules and the order alone; their columns (which look more up for
+        // each song: whether it is here, whether it is chosen not to be played) are read for the page only. The order
+        // ends on the song's id, so the page comes out as it was picked.
         let sql = format!(
-            "SELECT {TRACK_COLUMNS_FOR_LISTS} FROM tracks t {TRACK_JOINS_FOR_LISTS}
-             WHERE {filter} ORDER BY {order} LIMIT {take} OFFSET {offset}"
+            "SELECT {TRACK_COLUMNS_FOR_LISTS}
+             FROM (SELECT t.id FROM tracks t {TRACK_JOINS_FOR_LISTS}
+                   WHERE {filter} ORDER BY {order} LIMIT {take} OFFSET {offset}) p
+             JOIN tracks t ON t.id = p.id {TRACK_JOINS_FOR_LISTS}
+             ORDER BY {order}"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt

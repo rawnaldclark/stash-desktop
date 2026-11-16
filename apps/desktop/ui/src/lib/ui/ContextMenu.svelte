@@ -7,6 +7,7 @@
 	import { NF } from '../desktop/unfound.svelte';
 	import { LIB_REF, sameCopy } from '../identity';
 	import { P } from './pick.svelte';
+	import { said } from '../core';
 	import { albumHref, albumLink, artistHref, artistLink } from '../identity';
 	import Icon from './Icon.svelte';
 	import type { IconName } from './icons';
@@ -129,7 +130,7 @@
 				on
 					? ui.toast(`Stash won’t play ${what} on its own`, { label: 'Undo', run: () => void notPlayed(kind, item, false) })
 					: ui.toast(`${what} plays again`),
-			() => {}
+			(e) => ui.toast(said(e))
 		);
 		close();
 	}
@@ -146,7 +147,7 @@
 				on
 					? ui.toast(`Stash won’t play ${songs.length === 1 ? 'that song' : `these ${songs.length} songs`} on its own`, { label: 'Undo', run: () => void each(false) })
 					: ui.toast(`${songs.length === 1 ? 'That song plays' : `These ${songs.length} songs play`} again`),
-			() => {}
+			(e) => ui.toast(said(e))
 		);
 		close();
 	}

@@ -32,6 +32,8 @@
 		void L.changed;
 		let gone = false;
 		const read = () =>
+			// Not while the window is hidden: nobody sees the number.
+			!document.hidden &&
 			core
 				.hereCount()
 				.then((n) => {
@@ -88,6 +90,8 @@
 	});
 	$effect(() => {
 		const text = query;
+		// Read here, not in the answer: the chip turned (or Stash going offline) asks again.
+		const onlyHere = here;
 		if (text.trim() === '') {
 			results = [];
 			resultsFor = null;
@@ -95,9 +99,9 @@
 		}
 		const stop = new AbortController();
 		core
-			.searchTracks(text, 100, stop.signal)
+			.searchTracks(text, 100, stop.signal, onlyHere)
 			.then((rows) => {
-				results = here ? rows.filter((r) => r.here) : rows;
+				results = rows;
 				resultsFor = text;
 			})
 			.catch(() => {});
@@ -146,7 +150,7 @@
 
 {#snippet songRow(track: core.TrackRow | undefined, index: number)}
 	{#if track}
-		<TrackRow item={itemOfRow(track)} album {pick} at={index} onplay={() => void player.playLibrary(index, { from: FROM, here })} />
+		<TrackRow item={itemOfRow(track)} album {pick} at={index} onplay={() => void player.playLibrary(index, { from: FROM, here, id: track.id })} />
 	{:else}
 		<div class="trk-row has-cv has-al" aria-hidden="true"><div class="trk-main"><span class="cv trk-cv"></span><span class="tr-t"><b class="ph"></b></span></div></div>
 	{/if}

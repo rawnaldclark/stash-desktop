@@ -19,7 +19,7 @@
 	async function again(b: core.Blocked) {
 		busy = true;
 		try {
-			rows = await notPlayed(b.kind, { title: b.title, artist: b.artist }, false);
+			rows = await notPlayed(b.kind, { title: b.title, artist: b.artist }, false, b.key);
 			ui.toast(`${b.kind === 'artist' ? b.artist : `“${b.title}”`} plays again`);
 		} catch (e) {
 			ui.toast(core.said(e));

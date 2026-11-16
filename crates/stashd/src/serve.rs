@@ -11,7 +11,7 @@
 //! Several requests are answered at once, so an add-on that is slow to answer holds up its own answer and nothing
 //! else.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -23,6 +23,7 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use stash_core::addons::{Addon, AddonError, Code, Delivery, StreamRequest, Track};
 use stash_core::audio::{Output, find_library};
+use stash_core::blocks::BlockKind;
 use stash_core::import::ImportError;
 use stash_core::import::Song;
 use stash_core::player::{
@@ -332,6 +333,7 @@ pub(crate) fn through_addons<T>(
     let gone = |why: &str| Failure {
         message: why.to_string(),
         miss: true,
+        ..Default::default()
     };
     let described = library
         .lock()
@@ -339,7 +341,7 @@ pub(crate) fn through_addons<T>(
         .describe(id)
         .map_err(|e| Failure {
             message: e.to_string(),
-            miss: false,
+            ..Default::default()
         })?
         .ok_or_else(|| gone("it is no longer in the library"))?;
     let addons: Vec<Arc<Loaded>> = registry
@@ -349,8 +351,12 @@ pub(crate) fn through_addons<T>(
         .filter(|a| a.usable().is_some_and(&can))
         .cloned()
         .collect();
+    // No add-on to ask (none added, or switched off): not the song's own trouble.
     if addons.is_empty() {
-        return Err(gone(none));
+        return Err(Failure {
+            nothing_to_ask: true,
+            ..gone(none)
+        });
     }
     // Trouble with an add-on is not "it does not have the song": it is said, and asking again may help.
     let mut trouble: Option<AddonError> = None;
@@ -467,7 +473,9 @@ pub(crate) fn through_addons<T>(
     Err(match trouble {
         Some(e) => Failure {
             message: e.in_words(),
-            miss: false,
+            code: Some(e.code),
+            retry_after: e.retry_after,
+            ..Default::default()
         },
         None => {
             // Noted only when every add-on that can play songs and be asked for one said no (on the way to saving, an
@@ -491,7 +499,12 @@ pub(crate) fn through_addons<T>(
             {
                 let _ = library.lock().unwrap().note_unfound(id, now_ms());
             }
-            gone("none of your add-ons has it")
+            // Believed only when an add-on had it but could not give it, or the ones that said no are finding others.
+            Failure {
+                doubtful: !had_it
+                    && (said_no.is_empty() || !said_no.iter().all(|a| lacks.finding(a))),
+                ..gone("none of your add-ons has it")
+            }
         }
     })
 }
@@ -517,6 +530,7 @@ fn resolver(
         let gone = |why: &str| Failure {
             message: why.to_string(),
             miss: true,
+            ..Default::default()
         };
         // Offline, no add-on is asked: a song plays only from a copy kept here. What cannot play is passed over.
         let offline = offline.load(Ordering::Relaxed);
@@ -553,6 +567,9 @@ fn resolver(
                     Err(Failure {
                         message: e.in_words(),
                         miss: e.is_miss(),
+                        code: Some(e.code),
+                        retry_after: e.retry_after,
+                        ..Default::default()
                     })
                 }
             };
@@ -1340,10 +1357,27 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
                     library.artist_track_ids(artist, offset, count)?
                 } else if body.get("liked").and_then(Value::as_bool) == Some(true) {
                     library.liked_ids_at(offset, count)?
-                } else if body.get("here").and_then(Value::as_bool) == Some(true) {
-                    library.here_track_ids_at(offset, count)?
                 } else {
-                    library.track_ids_at(offset, count)?
+                    let here = body.get("here").and_then(Value::as_bool) == Some(true);
+                    let at = |offset: usize, count: usize| {
+                        if here {
+                            library.here_track_ids_at(offset, count)
+                        } else {
+                            library.track_ids_at(offset, count)
+                        }
+                    };
+                    let mut ids = at(offset, count)?;
+                    // The song clicked (`id`), when the list moved since the window read it (a song saved or added in
+                    // between): it is looked for near where it was, and the list plays from it.
+                    if let Some(want) = body.get("id").and_then(Value::as_i64)
+                        && ids.first() != Some(&want)
+                    {
+                        let from = offset.saturating_sub(50);
+                        if let Some(place) = at(from, 101)?.iter().position(|i| *i == want) {
+                            ids = at(from + place, count)?;
+                        }
+                    }
+                    ids
                 };
                 (library.queue_items(&ids)?, 0)
             };
@@ -1820,6 +1854,9 @@ fn addons_route(
                 &addon.manifest_json(),
             )?;
             state.lacks.forget_addon(&addon.manifest.id);
+            // Songs waiting to be saved may be found now.
+            state.saving.release();
+            state.saving.ring();
         }
         "/api/addons/remove" => {
             state.library.lock().unwrap().remove_addon(id)?;
@@ -1833,6 +1870,8 @@ fn addons_route(
                 .set_addon_enabled(id, enabled)?;
             if enabled {
                 state.lacks.forget_addon(id);
+                state.saving.release();
+                state.saving.ring();
             }
         }
         "/api/addons/order" => {
@@ -2077,7 +2116,28 @@ fn import_route(state: &State, request: &mut Request) -> Result<Reply> {
         Err(e) => return Ok(refused(&e)),
     };
     let mut library = state.library.lock().unwrap();
+    let keys = |library: &Library| -> stash_core::Result<HashSet<(&'static str, String)>> {
+        Ok(library
+            .blocks()?
+            .into_iter()
+            .map(|b| (b.kind, b.key))
+            .collect())
+    };
+    let before = keys(&library)?;
     let summary = library.import(&incoming)?;
+    // Songs the listener chose not to play on the phone leave the queue here too.
+    let new: Vec<(BlockKind, String)> = if summary.blocks_added > 0 {
+        keys(&library)?
+            .into_iter()
+            .filter(|b| !before.contains(b))
+            .filter_map(|(kind, key)| BlockKind::from_word(kind).map(|kind| (kind, key)))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let counts = library.counts()?;
+    drop(library);
+    crate::blocking::clear_queue(state, &new);
     state.edited();
     Ok(reply_json(
         200,
@@ -2085,7 +2145,7 @@ fn import_route(state: &State, request: &mut Request) -> Result<Reply> {
             "source": incoming.source,
             "generator": incoming.generator,
             "summary": summary,
-            "counts": library.counts()?,
+            "counts": counts,
         }),
     ))
 }
@@ -2309,10 +2369,16 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         }
         (Method::Get, "/api/search") => {
             let (query, library) = (param("q").unwrap_or_default(), library());
+            // `here=1`: among the songs that play with no connection only (Library › Songs, "On this computer").
+            let rows = if param("here").as_deref() == Some("1") {
+                library.search_here(&query, limit(50))?
+            } else {
+                library.search(&query, limit(50))?
+            };
             reply_json(
                 200,
                 json!({
-                    "rows": library.search(&query, limit(50))?,
+                    "rows": rows,
                     "albums": library.search_albums(&query, 12)?,
                     "artists": library.search_artists(&query, 12)?,
                 }),

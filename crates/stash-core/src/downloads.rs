@@ -135,15 +135,49 @@ pub enum Trouble {
     Cancelled,
     /// In words, for the list.
     Failed(String),
-    /// Not the song's own trouble: the add-on's allowance is spent, or it (or the file's server) could not be reached
-    /// or is overwhelmed. The song waits its turn again, and saving waits a while before it asks again.
-    Held(String),
+    /// Not the song's own trouble: the add-on's allowance is spent, it (or the file's server) could not be reached or
+    /// is overwhelmed, or the downloads folder cannot be written (a full disk, a drive unplugged). The song waits its
+    /// turn again, and saving waits a while before it asks again: as many seconds as the second field says, when an
+    /// add-on or server said.
+    Held(String, Option<u32>),
+    /// "No" from add-ons that are not finding other songs either: maybe the song's own answer, maybe theirs (a broken
+    /// lookup, a spent allowance that answers "nothing"). The song is tried again later.
+    Later(String),
 }
 
+/// The downloads folder could not be written: not the song's trouble, and saving waits (a full disk, a drive that
+/// was unplugged).
 impl From<std::io::Error> for Trouble {
     fn from(e: std::io::Error) -> Self {
-        Trouble::Failed(format!("the file could not be written: {e}"))
+        Trouble::Held(
+            format!("the downloads folder could not be written: {e}"),
+            None,
+        )
     }
+}
+
+/// Whether a request that got no answer may get one later: the line or the server (it could not be reached, it took
+/// too long, it stopped sending), as opposed to the link itself (a bad address, a redirect to http, too many
+/// redirects, a certificate that does not hold).
+fn passing(e: &ureq::Error) -> bool {
+    matches!(
+        e,
+        ureq::Error::Io(_)
+            | ureq::Error::Timeout(_)
+            | ureq::Error::HostNotFound
+            | ureq::Error::ConnectionFailed
+            | ureq::Error::BodyStalled
+            | ureq::Error::ConnectProxyFailed(_)
+    )
+}
+
+/// How long a server asked to be left alone (`Retry-After` in seconds), when it said.
+fn retry_after(answer: &ureq::http::Response<ureq::Body>) -> Option<u32> {
+    answer
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u32>().ok())
 }
 
 /// Fetches `url` into `part`, saying how far it got (`progress(bytes, of)`) and stopping when `cancelled` says so.
@@ -166,16 +200,21 @@ pub fn fetch(
         .https_only(!is_loopback(url))
         .build()
         .into();
-    let mut answer = agent
-        .get(url)
-        .call()
-        .map_err(|e| Trouble::Held(format!("the file could not be fetched: {e}")))?;
+    let mut answer = agent.get(url).call().map_err(|e| {
+        let why = format!("the file could not be fetched: {e}");
+        if passing(&e) {
+            Trouble::Held(why, None)
+        } else {
+            Trouble::Failed(why)
+        }
+    })?;
     let status = answer.status().as_u16();
-    // Too many asks, or a server in trouble: asked again later. Anything else is this file's own answer.
-    if status == 429 || status >= 500 {
-        return Err(Trouble::Held(format!(
-            "the file's server answered {status}"
-        )));
+    // Too many asks, or a server overwhelmed or in between: asked again later. Anything else is this file's own answer.
+    if matches!(status, 429 | 502..=504) {
+        return Err(Trouble::Held(
+            format!("the file's server answered {status}"),
+            retry_after(&answer),
+        ));
     }
     if !(200..300).contains(&status) {
         return Err(Trouble::Failed(format!(
@@ -206,7 +245,7 @@ pub fn fetch(
         }
         let n = body
             .read(&mut buffer)
-            .map_err(|e| Trouble::Held(format!("the file stopped coming in: {e}")))?;
+            .map_err(|e| Trouble::Held(format!("the file stopped coming in: {e}"), None))?;
         if n == 0 {
             break;
         }

@@ -57,6 +57,11 @@ impl BlockKind {
     }
 
     /// The key it is kept by; None when the words leave nothing to know it by (a name of only signs).
+    /// Whether a song with these words is one the choice kept under `key` covers.
+    pub fn covers(self, key: &str, title: &str, artist: &str) -> bool {
+        self.key(title, artist).as_deref() == Some(key)
+    }
+
     pub fn key(self, title: &str, artist: &str) -> Option<String> {
         let artist_key = fold(artist);
         match self {
@@ -116,6 +121,15 @@ impl Library {
     }
 
     /// Every song and artist the listener chose not to play, the latest first.
+    /// Plays a song or an artist again by the key it is kept under (what was kept of its words may be shorter than
+    /// they were). Answers whether there was such a choice.
+    pub fn unblock_key(&mut self, kind: BlockKind, key: &str) -> Result<bool> {
+        Ok(self.conn.execute(
+            "DELETE FROM blocked WHERE kind = ?1 AND key = ?2",
+            params![kind.as_str(), key],
+        )? > 0)
+    }
+
     pub fn blocks(&self) -> Result<Vec<Blocked>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT kind, key, title, artist, at_ms FROM blocked ORDER BY at_ms DESC, kind, key",

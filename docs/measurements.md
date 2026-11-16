@@ -754,3 +754,72 @@ On the built page served by the core: a new scratch library of 12 made-up files,
 - **The bar's Add to playlist** opened on the playlists, above the bar.
 - **Going to Settings** let the picks go.
 - No errors in the page, light and dark.
+
+## 28. Second review: saving, "Don't play", the filter
+
+A reviewer read sections 24–26 and found these. All are fixed.
+
+### Saving
+
+- **Trouble belongs to one song or it does not.**
+  - An add-on's quota, rate limit, refused key, being down or out of reach, and no add-on to ask at all make saving wait.
+  - The add-on's answer about the song itself does not: a file it cannot give as asked (encrypted, DASH, another codec), a request it refused, "not found". Those fail the song, and no allowance is spent asking again and again.
+  - The file's own fetch waits for the line or the server: no connection, a timeout, a stall, a missing host, 429, 502–504. It fails for the link itself: a bad address, a redirect to http, too many redirects, a certificate.
+- **The downloads folder not being writable makes saving wait**, not fail every song. That covers a full disk or an unplugged drive.
+- **A song held goes to the back of the line**, so the songs after it are tried first. A song held again after other songs were saved in between is given up on at its second strike: the trouble was its own.
+- **Saving waits as long as the add-on asked** (`retry_after`, at least 5 seconds, at most an hour). Otherwise it waits a minute, doubling up to an hour.
+- **These end the wait at once:** Try again, an add-on added or switched on, or a new downloads folder.
+- **A "no" from add-ons that are not finding other songs either** (a broken lookup, or a spent allowance that answers "nothing") is no longer final:
+  - The song goes to the back of the line, and the next one is tried at once.
+  - Two songs in a row with such a "no", and nothing else between, make saving wait.
+  - A song is given up on at its third. That costs no extra allowance, since a recent "no" is not asked again.
+  - It is not listed under Not found, since it was not believed.
+- **Try again on every failed song gives them back to the listener.** They are no list's any more, so letting a list go does not take them off.
+
+### "Don't play"
+
+- **The queue is cleaned in one go**, under the player's lock, wherever the songs are. Songs before the one playing go too, since the queue may start over.
+- **It also works while the player rests or is still asking an add-on**, as with a queue kept from last time when Stash opens. The song it rests on gives way to the next one kept.
+- **Only what the new choice covers leaves.** A song chosen not to be played and then played by itself keeps playing when another artist is chosen out.
+- **The phone's blocklist, on import, takes its songs out of the queue too.**
+- **"Play again" in Settings goes by the key the choice is kept under**, so a name over 300 characters can be played again.
+- **A refusal from the menu is said** (a title with no letters).
+- **The window's marks of what was chosen are dropped whenever the lists are read again**, so a newer word from the core wins.
+
+### Library › Songs
+
+- **Searching with "On this computer" asks the core for songs here only**, and the chip turned (or going offline) asks again. A common word no longer says "nothing matches" while songs here do.
+- **A click plays the song clicked** even when the list moved since the window read it: the core looks for that song near its old place.
+- **The count of songs here** is two plain counts, not a look for a copy per song. The window does not ask while it is hidden.
+- **A kept list's progress is read again when Stash comes back online.**
+- **Smart playlists pick the page's songs first** and read their columns for the page only.
+
+### Checked
+
+- **Tests in stashd** (`saving::tests`):
+  - Each add-on code waits or fails as above, with the add-on's `retry_after` passed along.
+  - Trouble that holds every song never gives one up. A song held again after others were saved fails at its second strike, and Try again forgives.
+  - Unbelieved "no"s: one song alone is tried again and given up at its third; two songs in a row wait; anything in between ends the run.
+  - The wait follows `retry_after`, with a floor of 5 seconds.
+- **The allowance API test, extended:**
+  - With the only add-on switched off, saving waited ("there is no add-on to save it from") with 3 queued and 0 failed.
+  - Switched on with its allowance spent, saving asked at once and waited again ("allowance").
+  - Allowance back and Try again: all 3 saved.
+- **The saving API test:** with no add-on left, the song waited instead of failing; an add-on added again saved it.
+- **The Not found API test passed unchanged:**
+  - An unbelieved "no" did not list India.
+  - After Golf was found, Hotel's "no" listed it.
+  - After the add-on was switched off and on, India's "no" listed it.
+- **Player test** `tracks_are_taken_out_wherever_they_are_in_one_go`:
+  - Songs before and after the playing one went, and it played on a place up.
+  - The playing one went, and the next kept one played.
+  - With none kept after it, playback ended and the queue stayed.
+  - A played-out queue's last song went, and nothing was shown.
+  - A kept queue resting on a song that went rested on the next one kept, from its start, and Play started it.
+- **The "Don't play" API test, extended:**
+  - A song played by itself kept playing when an artist was chosen out.
+  - Play again by key left one block.
+  - The artist's two songs before the playing one left the queue, leaving only it, at place 0.
+  - Playing from offset 0 with the third row's id queued that song first.
+- **The kept-list API test:** a search for every song's artist with `here=1` found the 4 here, and 6 without it.
+- **On the built page:** the "Don't play", picking, kept-list and "On this computer" checks all passed again, with no errors in the page.

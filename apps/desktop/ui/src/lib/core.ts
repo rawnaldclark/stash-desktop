@@ -129,7 +129,9 @@ export const tracksAt = (offset: number, limit: number, signal?: AbortSignal) =>
 export const tracksHereAt = (offset: number, limit: number, signal?: AbortSignal) => rows<TrackRow>(`/api/tracks?here=1&offset=${offset}&limit=${limit}`, signal);
 /** How many songs play with no connection. */
 export const hereCount = async () => (await get<{ count: number }>('/api/tracks/here')).count;
-export const searchTracks = (query: string, limit: number, signal?: AbortSignal) => rows<TrackRow>(`/api/search?q=${encodeURIComponent(query)}&limit=${limit}`, signal);
+/** `here`: among the songs that play with no connection only (the core filters, so `limit` counts those). */
+export const searchTracks = (query: string, limit: number, signal?: AbortSignal, here = false) =>
+	rows<TrackRow>(`/api/search?q=${encodeURIComponent(query)}&limit=${limit}${here ? '&here=1' : ''}`, signal);
 /** What the library has for the text: songs (at most `limit`), and the albums and artists it names (a dozen of each). */
 export const searchLibrary = (query: string, limit: number, signal?: AbortSignal) =>
 	get<{ rows: TrackRow[]; albums: AlbumRow[]; artists: ArtistRow[] }>(`/api/search?q=${encodeURIComponent(query)}&limit=${limit}`, signal);
@@ -167,7 +169,8 @@ export const previewRules = (rules: SmartRules) => post<{ count: number; rows: T
 export type Blocked = { kind: 'song' | 'artist'; key: string; title: string; artist: string; at_ms: number };
 export type BlockedAnswer = { rows: Blocked[]; songs?: { id: number; blocked: 'song' | 'artist' | null }[]; edits?: number };
 export const blocks = () => get<BlockedAnswer>('/api/blocks').then((a) => a.rows);
-export const setBlocked = (b: { kind: 'song' | 'artist'; title?: string; artist: string; blocked: boolean }) => post<BlockedAnswer>('/api/blocks', b);
+/** To play one again, `key` (as the list gives it) may stand for its words. */
+export const setBlocked = (b: { kind: 'song' | 'artist'; title?: string; artist?: string; blocked: boolean; key?: string }) => post<BlockedAnswer>('/api/blocks', b);
 
 // ---- Lists kept on this computer (a playlist, or the liked songs)
 
@@ -442,7 +445,8 @@ export const player = (signal?: AbortSignal) => get<Partial<CorePlayer>>('/api/p
 /** Replaces the queue with these songs, in this order, and plays from `start`. */
 export const playEntries = (items: PlayEntry[], start: number, from?: string) => told('/api/player/play', { items, start, ...(from ? { from } : {}) });
 /** Plays the whole library (title order) from row `offset` on. */
-export const playLibrary = (offset: number, from?: string, here = false) => told('/api/player/play', { offset, ...(from ? { from } : {}), ...(here ? { here: true } : {}) });
+export const playLibrary = (offset: number, from?: string, here = false, id?: number) =>
+	told('/api/player/play', { offset, ...(from ? { from } : {}), ...(here ? { here: true } : {}), ...(id !== undefined ? { id } : {}) });
 export const setPaused = (paused: boolean) => told('/api/player/pause', { paused });
 export const nextTrack = () => told('/api/player/next', {});
 export const previousTrack = () => told('/api/player/previous', {});

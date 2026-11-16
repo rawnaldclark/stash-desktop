@@ -389,12 +389,13 @@ impl Library {
         Ok(next)
     }
 
-    /// The song coming in waits its turn again, first in line (not its own trouble: the add-on's allowance is spent,
-    /// or it could not be reached).
-    pub fn download_held(&mut self, id: i64) -> Result<()> {
+    /// The song coming in waits its turn again, at the back of the line (not its own trouble, it seems: the add-on's
+    /// allowance is spent, it could not be reached, the downloads folder could not be written).
+    pub fn download_held(&mut self, id: i64, now_ms: i64) -> Result<()> {
+        // To the back of the line: the songs after it are tried first (the trouble may be its own after all).
         self.conn.execute(
-            "UPDATE downloads SET state = 'queued' WHERE track_id = ?1 AND state = 'saving'",
-            [id],
+            "UPDATE downloads SET state = 'queued', asked_at = ?2 WHERE track_id = ?1 AND state = 'saving'",
+            params![id, now_ms],
         )?;
         Ok(())
     }
@@ -540,8 +541,9 @@ impl Library {
     /// there is the listener's own now.
     pub fn retry_downloads(&mut self, ids: &[i64], now_ms: i64) -> Result<usize> {
         if ids.is_empty() {
+            // Asked for again by hand: no list's to take back (a list let go since would otherwise drop them).
             return Ok(self.conn.execute(
-                "UPDATE downloads SET state = 'queued', error = NULL, asked_at = ?1 WHERE state = 'failed'",
+                "UPDATE downloads SET state = 'queued', error = NULL, asked_at = ?1, by_list = 0 WHERE state = 'failed'",
                 [now_ms],
             )?);
         }

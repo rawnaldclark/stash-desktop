@@ -2284,19 +2284,33 @@ fn songs_from_add_ons_are_saved_as_files_and_given_back() {
         json!({ "queued": 0, "saving": 0, "saved": 0, "failed": 0 })
     );
 
-    // With no add-on left that can save it, it fails, and says why.
+    // With no add-on left that can save it, it waits, and saving says why: nothing is marked as not saved (an add-on
+    // switched off for a while would otherwise fail every song on the list).
     client.post("/api/addons/remove", json!({ "id": "demo.folder" }));
     client.post("/api/addons/remove", json!({ "id": "demo.folder.eclipse" }));
     client.post("/api/downloads", json!({ "ids": [echo] }));
-    let list = until_settled();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let list = loop {
+        let (_, list) = client.get("/api/downloads");
+        if !list["held"].is_null() {
+            break list;
+        }
+        assert!(Instant::now() < deadline, "saving did not wait: {list}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
     assert_eq!(
         (
             list["counts"]["failed"].as_u64(),
-            list["rows"][0]["error"].as_str()
+            list["counts"]["queued"].as_u64(),
+            list["held"]["why"].as_str()
         ),
-        (Some(1), Some("there is no add-on to save it from")),
+        (Some(0), Some(1), Some("there is no add-on to save it from")),
         "{list}"
     );
+    // An add-on added again: saving goes on at once (it does not wait out its minute), and the song is saved.
+    client.post("/api/addons", json!({ "link": link }));
+    let list = until_settled();
+    assert_eq!(list["counts"]["saved"].as_u64(), Some(1), "{list}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -4177,6 +4191,18 @@ fn a_list_kept_on_this_computer_saves_its_songs_and_those_that_come_later() {
     // Without it, every song.
     let (_, all) = client.get("/api/tracks?offset=0&limit=10");
     assert_eq!(all["rows"].as_array().unwrap().len(), 6, "{all}");
+    // Searched among them: every song's artist finds the four here, and all six without it.
+    let (_, found) = client.get("/api/search?q=unknown&here=1");
+    assert_eq!(found["rows"].as_array().unwrap().len(), 4, "{found}");
+    assert!(
+        found["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["here"] == true)
+    );
+    let (_, found) = client.get("/api/search?q=unknown");
+    assert_eq!(found["rows"].as_array().unwrap().len(), 6, "{found}");
 
     // Refused: a switch with no true or false, and a playlist there is not.
     assert_eq!(client.send(&road_kept, json!({ "on": "yes" })).0, 400);
@@ -4365,26 +4391,49 @@ fn an_add_on_whose_allowance_is_spent_holds_saving_and_fails_nothing() {
         .unwrap();
     client.post(&format!("/api/playlists/{list}/add"), json!({ "ids": ids }));
 
-    // The allowance is spent: the first song is refused, and saving waits instead of asking for every song. Nothing
-    // is marked as not saved, so the kept list is not left short.
-    spent.store(true, std::sync::atomic::Ordering::Relaxed);
+    let held_for = |words: &str| -> serde_json::Value {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let (_, now) = client.get("/api/downloads");
+            if now["held"]["why"]
+                .as_str()
+                .is_some_and(|why| why.contains(words))
+            {
+                break now;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "saving did not wait for {words:?}: {now}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+
+    // No add-on to save from (the only one is switched off): saving waits instead of failing every song.
+    client.post(
+        "/api/addons/enabled",
+        json!({ "id": "demo.folder", "enabled": false }),
+    );
     client.post(
         &format!("/api/playlists/{list}/download"),
         json!({ "on": true }),
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let held = loop {
-        let (_, now) = client.get("/api/downloads");
-        if !now["held"].is_null() {
-            break now;
-        }
-        assert!(Instant::now() < deadline, "saving did not wait: {now}");
-        std::thread::sleep(Duration::from_millis(50));
-    };
-    assert!(
-        held["held"]["why"].as_str().unwrap().contains("allowance"),
+    let held = held_for("no add-on");
+    assert_eq!(
+        (&held["counts"]["queued"], &held["counts"]["failed"]),
+        (&json!(3), &json!(0)),
         "{held}"
     );
+
+    // Switched on while its allowance is spent: saving asks at once (it does not wait out its minute), the first song
+    // is refused, and saving waits instead of asking for every song. Nothing is marked as not saved, so the kept list
+    // is not left short.
+    spent.store(true, std::sync::atomic::Ordering::Relaxed);
+    client.post(
+        "/api/addons/enabled",
+        json!({ "id": "demo.folder", "enabled": true }),
+    );
+    held_for("allowance");
     std::thread::sleep(Duration::from_millis(500));
     let (_, now) = client.get("/api/downloads");
     assert_eq!(
@@ -4477,6 +4526,18 @@ fn songs_and_artists_chosen_not_to_be_played_are_left_out() {
             .map(|r| r["title"].as_str().unwrap().to_string())
             .collect()
     };
+
+    // Played from a row whose place moved since the window read it: the song clicked plays, not the one now there.
+    client.post(
+        "/api/player/play",
+        json!({ "offset": 0, "id": all[2]["id"] }),
+    );
+    assert_eq!(
+        queued().first().map(String::as_str),
+        all[2]["title"].as_str(),
+        "{:?}",
+        queued()
+    );
 
     // A song chosen not to be played: its row says so, and the library played through leaves it out.
     let said = client.post(
@@ -4579,6 +4640,65 @@ fn songs_and_artists_chosen_not_to_be_played_are_left_out() {
     let (_, listed) = client.get("/api/blocks");
     assert_eq!(listed["rows"].as_array().unwrap().len(), 1, "{listed}");
     assert_eq!(rows().iter().filter(|r| !r["blocked"].is_null()).count(), 1);
+
+    // The song chosen not to be played, played by itself again: choosing not to play an artist leaves it playing (only
+    // what a choice covers leaves the queue).
+    client.post("/api/player/play", json!({ "ids": [other["id"]] }));
+    client.player_until("the song chosen by itself", |s| {
+        s["track"]["title"] == other["title"] && s["status"] == "playing"
+    });
+    client.post(
+        "/api/blocks",
+        json!({ "kind": "artist", "artist": artist, "blocked": true }),
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    let (_, still) = client.get("/api/player");
+    assert_eq!(still["track"]["title"], other["title"], "{still}");
+
+    // Played again by the key the list gives (what was kept of a long name may be shorter than it was).
+    let (_, listed) = client.get("/api/blocks");
+    let row = listed["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"] == "artist")
+        .expect("the artist's row")
+        .clone();
+    client.post(
+        "/api/blocks",
+        json!({ "kind": "artist", "key": row["key"], "blocked": false }),
+    );
+    let (_, listed) = client.get("/api/blocks");
+    assert_eq!(listed["rows"].as_array().unwrap().len(), 1, "{listed}");
+
+    // The artist's songs before the one playing leave the queue too: it may start over.
+    let before: Vec<Value> = vec![
+        json!({ "id": theirs[0]["id"] }),
+        json!({ "id": theirs[1]["id"] }),
+        json!({ "id": keeper["id"] }),
+    ];
+    client.post("/api/player/play", json!({ "items": before, "start": 2 }));
+    client.player_until("the third song, by someone else", |s| {
+        s["track"]["title"] == keeper["title"] && s["status"] == "playing"
+    });
+    client.post(
+        "/api/blocks",
+        json!({ "kind": "artist", "artist": artist, "blocked": true }),
+    );
+    let (_, now) = client.get("/api/player");
+    assert_eq!(
+        (queued(), &now["track"]["title"], &now["index"]),
+        (
+            vec![keeper["title"].as_str().unwrap().to_string()],
+            &keeper["title"],
+            &json!(0)
+        ),
+        "{now}"
+    );
+    client.post(
+        "/api/blocks",
+        json!({ "kind": "artist", "artist": artist, "blocked": false }),
+    );
 
     // Refused: no kind, no artist, a name with nothing to know it by.
     assert_eq!(

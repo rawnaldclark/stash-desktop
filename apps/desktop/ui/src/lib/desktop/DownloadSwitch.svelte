@@ -36,6 +36,8 @@
 	$effect(() => {
 		void list;
 		void count;
+		// Back online, songs come in again: how far is read, and read again while they do.
+		void ui.offline;
 		void read();
 	});
 	onDestroy(() => {

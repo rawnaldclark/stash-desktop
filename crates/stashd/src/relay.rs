@@ -248,7 +248,9 @@ impl Relays {
             Ok(upstream) => upstream,
             Err(trouble) => {
                 let why = match trouble {
-                    downloads::Trouble::Failed(why) | downloads::Trouble::Held(why) => why,
+                    downloads::Trouble::Failed(why)
+                    | downloads::Trouble::Held(why, _)
+                    | downloads::Trouble::Later(why) => why,
                     downloads::Trouble::Cancelled => "cancelled".into(),
                 };
                 let _ = request.respond(plain(502, &why));
