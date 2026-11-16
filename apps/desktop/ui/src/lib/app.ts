@@ -223,6 +223,7 @@ function take(a: core.CorePlayer): void {
 		shuffle: a.shuffle,
 		repeat: a.repeat,
 		error: old !== null && a.error === old ? null : a.error,
+		errorId: a.error_id,
 		from: a.from,
 		available: a.available,
 		reason: a.reason ?? null,

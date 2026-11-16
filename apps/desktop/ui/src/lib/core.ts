@@ -271,6 +271,8 @@ export type CorePlayer = {
 	signal: Signal | null;
 	/** The last song that could not be played, and why. */
 	error: string | null;
+	/** That song's row in the library, when it is one. */
+	error_id: number | null;
 	/** Nothing plays and the player rests on `track` (status "paused"): the queue ended there, or it was brought back from last time. Play starts it. */
 	resting: boolean;
 };
@@ -295,6 +297,7 @@ export const IDLE: CorePlayer = {
 	from: null,
 	signal: null,
 	error: null,
+	error_id: null,
 	resting: false
 };
 

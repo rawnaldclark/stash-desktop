@@ -2391,10 +2391,12 @@ fn autoplay_goes_on_with_songs_like_the_last_when_the_queue_ends() {
         "/api/player/play",
         json!({ "items": [{ "id": id("two") }, { "id": id("nowhere") }] }),
     );
-    until(
+    let grown = until(
         "the queue to grow past the song that can't be played",
         &|s| s["queue_len"].as_u64().is_some_and(|n| n > 2),
     );
+    // The player says which song it passed over (the window offers to find it).
+    assert_eq!(grown["error_id"].as_i64(), Some(id("nowhere")), "{grown}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

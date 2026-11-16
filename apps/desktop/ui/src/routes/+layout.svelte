@@ -84,9 +84,14 @@
 	$effect(() => {
 		const e = S.v.error;
 		if (e && e !== lastError) {
-			ui.toast(/[.!?]$/.test(e) ? e : `${e}.`);
-			// A song that could not be played may now be known not to play.
-			void NF.refresh();
+			const said = /[.!?]$/.test(e) ? e : `${e}.`;
+			ui.toast(said);
+			// A song that could not be played may now be known not to play: then the message offers to find it.
+			const id = S.v.errorId;
+			void NF.refresh().then(() => {
+				if (id == null || !NF.marked.has(id) || ui.toastText !== said) return;
+				ui.toast(said, { label: 'Find it', run: () => void goto(`/library?tab=notfound&song=${id}`) });
+			});
 		}
 		lastError = e;
 	});

@@ -204,6 +204,8 @@ pub struct PlayerState {
     pub signal: Option<Signal>,
     /// The last track that could not be played, and why.
     pub error: Option<String>,
+    /// That track's row in the library, when it is one.
+    pub error_id: Option<i64>,
     /// Nothing plays and the player rests on `track` (`status` is "paused"): the queue ended there, the track
     /// could not be played, or the queue was brought back from last time. Play starts it.
     pub resting: bool,
@@ -254,6 +256,7 @@ struct Shared {
     /// The output's own word on how it opened, e.g. "… @ 48000hz (shared)".
     accepted: Option<String>,
     error: Option<String>,
+    error_id: Option<i64>,
     /// A seek asked for while the next track was still loading; it is done when the track has loaded.
     pending_seek: Option<f64>,
     heard: Option<Heard>,
@@ -320,6 +323,12 @@ pub struct Kept {
 }
 
 impl Shared {
+    /// Notes that `item` could not be played, and why.
+    fn fail(&mut self, item: &QueueItem, why: &str) {
+        self.error = Some(could_not(item, why));
+        self.error_id = item.id;
+    }
+
     /// Where the player rests while nothing plays and nothing is starting: the queue place, and the seconds into it.
     fn resting(&self) -> Option<(usize, f64)> {
         if self.slot().is_some() || self.starting.is_some() {
@@ -547,14 +556,14 @@ impl Ctx {
                             shared.ahead = place + 1;
                         }
                         Err(e) => {
-                            shared.error = Some(could_not(&item, &e.to_string()));
+                            shared.fail(&item, &e.to_string());
                             shared.starting = None;
                         }
                     }
                     return;
                 }
                 Err(failure) => {
-                    shared.error = Some(could_not(&item, &failure.message));
+                    shared.fail(&item, &failure.message);
                     if !failure.miss {
                         shared.starting = None;
                         return;
@@ -595,14 +604,14 @@ impl Ctx {
                         tier: located.tier,
                         addon: located.addon,
                     }),
-                    Err(e) => shared.error = Some(could_not(&item, &e.to_string())),
+                    Err(e) => shared.fail(&item, &e.to_string()),
                 }
                 shared.ahead = place + 1;
                 shared.tries = 0;
                 shared.not_before = None;
             }
             Err(failure) if failure.miss => {
-                shared.error = Some(could_not(&item, &failure.message));
+                shared.fail(&item, &failure.message);
                 shared.ahead = place + 1;
                 shared.tries = 0;
                 shared.not_before = None;
@@ -610,7 +619,7 @@ impl Ctx {
             Err(failure) => {
                 shared.tries += 1;
                 if shared.tries >= TRIES {
-                    shared.error = Some(could_not(&item, &failure.message));
+                    shared.fail(&item, &failure.message);
                     shared.gave_up = true;
                 } else {
                     shared.not_before = Some(Instant::now() + RETRY_AFTER);
@@ -637,6 +646,7 @@ impl Ctx {
             shared.gave_up = false;
             shared.pending_seek = None;
             shared.error = None;
+            shared.error_id = None;
             shared.generation
         };
         let _ = self.engine.stop();
@@ -790,10 +800,12 @@ impl Player {
                             Event::EndFile(EndReason::Error(code)) => {
                                 let reason = ctx.engine.mpv().error_text(code);
                                 let mut shared = ctx.shared.lock().unwrap();
-                                let what = shared
+                                let failed = shared
                                     .index()
                                     .or(shared.starting)
-                                    .and_then(|i| shared.queue.get(i))
+                                    .and_then(|i| shared.queue.get(i));
+                                let failed_id = failed.and_then(|t| t.id);
+                                let what = failed
                                     .map(|t| t.title.clone())
                                     .unwrap_or_else(|| "A track".into());
                                 // The engine's own words, without any address in them: a stream's address is the
@@ -818,6 +830,7 @@ impl Player {
                                     "{what} could not be played: {}",
                                     said.join("; ")
                                 ));
+                                shared.error_id = failed_id;
                                 // A stream that did not start is asked for once more: its link may have run out, or
                                 // the first try at its server failed. A file that cannot be played stays that way.
                                 let place = shared.index().or(shared.starting);
@@ -1131,6 +1144,7 @@ impl Player {
             shared.not_before = None;
             shared.gave_up = false;
             shared.error = None;
+            shared.error_id = None;
             shared.pending_seek = seconds.filter(|s| *s > 0.05);
             shared.retried.clear();
             shared.retry = None;
@@ -1462,7 +1476,7 @@ impl Player {
             tier,
             served_by,
             accepted,
-            error,
+            (error, error_id),
             queue,
             resting,
             nothing_after,
@@ -1485,7 +1499,7 @@ impl Player {
                 shared.slot().and_then(|s| s.tier.clone()),
                 shared.slot().and_then(|s| s.addon.clone()),
                 shared.accepted.clone(),
-                shared.error.clone(),
+                (shared.error.clone(), shared.error_id),
                 (
                     shared.version,
                     shared.shuffle,
@@ -1608,6 +1622,7 @@ impl Player {
             replaygain,
             signal,
             error,
+            error_id,
             resting: resting.is_some(),
             nothing_after,
         }

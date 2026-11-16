@@ -132,6 +132,8 @@ class UIState {
 		return this.theme === 'light' || (this.theme === 'system' && this.systemLight);
 	}
 	toastText = $state<string | null>(null);
+	/** A button on the message, when there is something to do about it. */
+	toastAction = $state<{ label: string; run: () => void } | null>(null);
 	menu = $state<MenuState | null>(null);
 	/** The text in the header search box (shared with the Search page). */
 	q = $state('');
@@ -161,10 +163,15 @@ class UIState {
 		if (this.panelOpen && this.panelTab === t) this.panelOpen = false;
 		else this.setTab(t);
 	}
-	toast(text: string) {
+	toast(text: string, action: { label: string; run: () => void } | null = null) {
 		this.toastText = text;
+		this.toastAction = action;
 		clearTimeout(this.toastTimer);
-		this.toastTimer = setTimeout(() => (this.toastText = null), 3800);
+		// A message with something to do stays longer.
+		this.toastTimer = setTimeout(() => {
+			this.toastText = null;
+			this.toastAction = null;
+		}, action ? 7000 : 3800);
 	}
 	openMenu(m: MenuState) {
 		this.menu = m;
