@@ -450,6 +450,8 @@ fn read_copy(
                 updated_at_ms: Some(newest.unwrap_or(created).max(created)),
                 follow_id: follow.map(|(share, _, _)| share.clone()),
                 follow_version: follow.map(|(_, version, _)| *version),
+                // The phone has no smart playlists.
+                rules: None,
                 follow_shared_by: follow.and_then(|(_, _, by)| by.clone()),
             });
         }

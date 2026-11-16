@@ -19,6 +19,7 @@ pub mod played;
 pub mod player;
 pub mod scan;
 pub mod shuffle;
+pub mod smart;
 pub mod synth;
 pub mod usage;
 pub mod youtube_title;

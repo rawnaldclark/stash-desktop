@@ -127,6 +127,10 @@ fn playlist(value: &Value) -> Option<Playlist> {
         follow_id: follow.as_ref().map(|(id, _, _)| id.clone()),
         follow_version: follow.as_ref().map(|(_, version, _)| *version),
         follow_shared_by: follow.and_then(|(_, _, by)| by),
+        // A smart playlist's rules, from another desktop Stash; rules that cannot be used make it a plain playlist.
+        rules: value
+            .get("rules")
+            .and_then(|rules| crate::smart::Rules::read(rules).ok()),
     })
 }
 

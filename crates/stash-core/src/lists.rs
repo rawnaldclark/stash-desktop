@@ -659,8 +659,13 @@ impl Library {
         let tx = self.conn.transaction()?;
         let mut added = 0;
         {
+            // A smart playlist's songs are its rules': none are added by hand.
             let exists: Option<i64> = tx
-                .query_row("SELECT id FROM playlists WHERE id = ?1", [id], |r| r.get(0))
+                .query_row(
+                    "SELECT id FROM playlists WHERE id = ?1 AND rules IS NULL",
+                    [id],
+                    |r| r.get(0),
+                )
                 .optional()?;
             if exists.is_none() {
                 return Ok(0);
@@ -704,6 +709,17 @@ impl Library {
         change: impl FnOnce(&mut Vec<i64>) -> bool,
     ) -> Result<bool> {
         let tx = self.conn.transaction()?;
+        let smart: bool = tx
+            .query_row(
+                "SELECT rules IS NOT NULL FROM playlists WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if smart {
+            return Ok(false);
+        }
         let mut items: Vec<i64> = tx
             .prepare(
                 "SELECT track_id FROM playlist_items WHERE playlist_id = ?1 ORDER BY position",
@@ -868,13 +884,30 @@ impl Library {
                 "SELECT id, external_id, name, created_at_ms, updated_at_ms, follow_id, follow_version, follow_shared_by
                  FROM playlists WHERE external_id IS NOT NULL ORDER BY position, id",
             )?;
+            let one = format!("SELECT {SONG} FROM tracks t {JOINS} WHERE t.id = ?1");
+            let mut song_of = self.conn.prepare(&one)?;
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
                 let mut items = Vec::new();
-                let mut songs = items_of.query([row.get::<_, i64>(0)?])?;
-                while let Some(song_row) = songs.next()? {
-                    if let Some(item) = song(song_row)? {
-                        items.push(item);
+                let id: i64 = row.get(0)?;
+                // A smart playlist travels as the songs it holds now, with its rules: other Stashes keep the songs,
+                // this one the rules.
+                let rules = self.smart_rules(id)?;
+                if let Some(rules) = &rules {
+                    for track in self.smart_track_ids(rules, 0, MAX_PLAYLIST_ITEMS, now_ms)? {
+                        let mut songs = song_of.query([track])?;
+                        if let Some(song_row) = songs.next()?
+                            && let Some(item) = song(song_row)?
+                        {
+                            items.push(item);
+                        }
+                    }
+                } else {
+                    let mut songs = items_of.query([id])?;
+                    while let Some(song_row) = songs.next()? {
+                        if let Some(item) = song(song_row)? {
+                            items.push(item);
+                        }
                     }
                 }
                 let created: i64 = row.get::<_, Option<i64>>(3)?.unwrap_or(now_ms);
@@ -885,6 +918,9 @@ impl Library {
                     "createdAt": created,
                     "updatedAt": row.get::<_, Option<i64>>(4)?.unwrap_or(created),
                 });
+                if let Some(rules) = rules {
+                    playlist["rules"] = json!(rules);
+                }
                 // A shared mix someone else owns travels as a follow: the other side follows it again.
                 if let Some(follow) = row.get::<_, Option<String>>(5)? {
                     let mut told = json!({ "id": follow, "version": row.get::<_, Option<i64>>(6)?.unwrap_or(1).max(1), "checkedAt": 0 });

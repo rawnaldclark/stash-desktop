@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
@@ -274,6 +274,11 @@ const V12: &str = "
     CREATE INDEX addon_events_at ON addon_events(at_ms);
 ";
 
+/// Version 13: a smart playlist keeps its rules (`smart.rs`) and no songs of its own.
+const V13: &str = "
+    ALTER TABLE playlists ADD COLUMN rules TEXT;
+";
+
 /// Opens (or creates) the library at `path` and migrates it to [`SCHEMA_VERSION`].
 pub fn open(path: &std::path::Path) -> Result<Connection> {
     prepare(Connection::open(path)?)
@@ -286,6 +291,18 @@ pub fn open_in_memory() -> Result<Connection> {
 
 fn prepare(mut conn: Connection) -> Result<Connection> {
     conn.execute_batch(PRAGMAS)?;
+    // Text as smart playlists compare it: no case, no accents (`smart::plain`).
+    conn.create_scalar_function(
+        "stash_plain",
+        1,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            Ok(ctx
+                .get::<Option<String>>(0)?
+                .map(|text| crate::smart::plain(&text)))
+        },
+    )?;
     migrate(&mut conn)?;
     Ok(conn)
 }
@@ -384,6 +401,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V12)?;
         tx.pragma_update(None, "user_version", 12)?;
+        tx.commit()?;
+    }
+    if found < 13 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V13)?;
+        tx.pragma_update(None, "user_version", 13)?;
         tx.commit()?;
     }
     Ok(())

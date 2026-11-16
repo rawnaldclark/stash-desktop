@@ -48,6 +48,8 @@ pub struct Playlist {
     pub follow_id: Option<String>,
     pub follow_version: Option<i64>,
     pub follow_shared_by: Option<String>,
+    /// A smart playlist's rules (another desktop Stash wrote it): it is made with them and without its songs.
+    pub rules: Option<crate::smart::Rules>,
 }
 
 /// Everything one file holds.
@@ -266,6 +268,15 @@ impl Merger<'_> {
         Ok(())
     }
 
+    fn is_smart(&self, id: i64) -> crate::Result<bool> {
+        Ok(self
+            .tx
+            .prepare_cached("SELECT rules IS NOT NULL FROM playlists WHERE id = ?1")?
+            .query_row([id], |r| r.get(0))
+            .optional()?
+            .unwrap_or(false))
+    }
+
     fn playlist(&mut self, playlist: &Playlist) -> crate::Result<()> {
         let here: Option<i64> = match &playlist.follow_id {
             Some(follow) => self
@@ -289,8 +300,8 @@ impl Merger<'_> {
                 self.tx
                     .prepare_cached(
                         "INSERT INTO playlists(external_id, name, created_at_ms, updated_at_ms, follow_id, follow_version,
-                                               follow_shared_by, position)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, (SELECT IFNULL(MAX(position), 0) + 1 FROM playlists))",
+                                               follow_shared_by, rules, position)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, (SELECT IFNULL(MAX(position), 0) + 1 FROM playlists))",
                     )?
                     .execute(params![
                         playlist.external_id,
@@ -299,21 +310,32 @@ impl Merger<'_> {
                         playlist.updated_at_ms,
                         playlist.follow_id,
                         playlist.follow_version,
-                        playlist.follow_shared_by
+                        playlist.follow_shared_by,
+                        playlist.rules.as_ref().map(crate::smart::Rules::to_json)
                     ])?;
                 let id = self.tx.last_insert_rowid();
                 for (position, song) in playlist.items.iter().enumerate() {
                     let track = self.track(song)?;
-                    self.tx.prepare_cached(add_item)?.execute(params![
-                        id,
-                        position as i64,
-                        track
-                    ])?;
+                    // A smart playlist's songs come into the library for its rules to find, not into the playlist.
+                    if playlist.rules.is_none() {
+                        self.tx.prepare_cached(add_item)?.execute(params![
+                            id,
+                            position as i64,
+                            track
+                        ])?;
+                    }
                 }
                 self.summary.playlists_added += 1;
             }
             // A shared mix someone else owns that is here already is left as it is.
             Some(_) if playlist.follow_id.is_some() => {}
+            // So is a smart playlist, here or in the file: this one's rules stay, and the songs come into the library
+            // for them to find.
+            Some(id) if playlist.rules.is_some() || self.is_smart(id)? => {
+                for song in &playlist.items {
+                    self.track(song)?;
+                }
+            }
             // One that is here gains the songs it does not have, at the end.
             Some(id) => {
                 let mut has: HashSet<i64> = self

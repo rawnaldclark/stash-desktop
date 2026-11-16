@@ -139,6 +139,9 @@ pub struct PlaylistRow {
     pub external_id: Option<String>,
     pub created_at_ms: Option<i64>,
     pub updated_at_ms: Option<i64>,
+    /// A smart playlist's rules (`smart.rs`): it fills itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<crate::smart::Rules>,
 }
 
 /// What the library knows a song by, for asking an add-on for it.
@@ -554,10 +557,10 @@ impl Library {
     pub fn playlists(&self) -> Result<Vec<PlaylistRow>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT p.id, p.name, (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id), p.follow_id IS NOT NULL,
-                    p.external_id, p.created_at_ms, p.updated_at_ms
+                    p.external_id, p.created_at_ms, p.updated_at_ms, p.rules
              FROM playlists p ORDER BY p.position, p.id",
         )?;
-        let rows = stmt
+        let mut rows = stmt
             .query_map([], |r| {
                 Ok(PlaylistRow {
                     id: r.get(0)?,
@@ -567,9 +570,20 @@ impl Library {
                     external_id: r.get(4)?,
                     created_at_ms: r.get(5)?,
                     updated_at_ms: r.get(6)?,
+                    rules: r
+                        .get::<_, Option<String>>(7)?
+                        .and_then(|json| serde_json::from_str(&json).ok())
+                        .and_then(|v| crate::smart::Rules::read(&v).ok()),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        // A smart playlist has as many songs as its rules pick now.
+        let now = crate::smart::clock_ms();
+        for row in &mut rows {
+            if let Some(rules) = &row.rules {
+                row.tracks = self.smart_count(rules, now)?;
+            }
+        }
         Ok(rows)
     }
 
@@ -580,6 +594,9 @@ impl Library {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<TrackRow>> {
+        if let Some(rules) = self.smart_rules(playlist)? {
+            return self.smart_tracks_at(&rules, offset, limit, crate::smart::clock_ms());
+        }
         let sql = format!(
             "SELECT {TRACK_COLUMNS}
              FROM (SELECT track_id, position FROM playlist_items WHERE playlist_id = ?1 ORDER BY position LIMIT ?2 OFFSET ?3) i
@@ -599,6 +616,9 @@ impl Library {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<i64>> {
+        if let Some(rules) = self.smart_rules(playlist)? {
+            return self.smart_track_ids(&rules, offset, limit, crate::smart::clock_ms());
+        }
         let mut stmt = self.conn.prepare_cached(
             "SELECT track_id FROM playlist_items WHERE playlist_id = ?1 ORDER BY position LIMIT ?2 OFFSET ?3",
         )?;
