@@ -56,6 +56,8 @@ const TEXT_CAP: usize = 300;
 const MISS_MEMORY: Duration = Duration::from_secs(6 * 3600);
 /// How long after it last found a song an add-on's "I don't have it" is believed (see [`Lacks`]).
 const FINDING: Duration = Duration::from_secs(30 * 60);
+/// How recent an add-on's last answer must be for a "no" it gave before to say the line is up now.
+const HEARD_LATELY: Duration = Duration::from_secs(5 * 60);
 /// The most tracks of an add-on one search shows, and one play request queues.
 const ADDON_TRACKS_CAP: usize = 200;
 
@@ -242,6 +244,8 @@ pub(crate) struct Lacks {
     /// For the window: when each add-on last gave a song, and its last trouble (when, in words).
     found_at: Mutex<HashMap<String, i64>>,
     troubles: Mutex<HashMap<String, (i64, String)>>,
+    /// When each add-on last answered anything (whatever it said): it could be reached then.
+    heard: Mutex<HashMap<String, Instant>>,
 }
 
 impl Lacks {
@@ -284,6 +288,23 @@ impl Lacks {
             .unwrap()
             .insert(addon.to_string(), Instant::now());
         self.gave(addon);
+    }
+
+    /// The add-on answered (whatever it said): it could be reached.
+    fn heard(&self, addon: &str) {
+        self.heard
+            .lock()
+            .unwrap()
+            .insert(addon.to_string(), Instant::now());
+    }
+
+    /// Whether the add-on answered anything in the last few minutes: the line to it was up.
+    fn heard_lately(&self, addon: &str) -> bool {
+        self.heard
+            .lock()
+            .unwrap()
+            .get(addon)
+            .is_some_and(|at| at.elapsed() < HEARD_LATELY)
     }
 
     /// The add-on said it does not have the song; `believed`: it said so while finding others.
@@ -382,8 +403,12 @@ pub(crate) fn through_addons<T>(
     let mut had_it = false;
     // Whether an add-on was asked anything this time (not only "no"s remembered from before).
     let mut any_asked = false;
-    // Whether an add-on said no a little while ago, believed or not: it could be reached then.
-    let mut remembered_no = false;
+    // Whether an add-on answered anything this time (whatever it said): the line was up. The add-ons whose "no" from
+    // a little while ago was remembered (believed or not), and those that could not be reached this time: a "no" from
+    // before says the line is up only when its add-on answered lately and was not just found out of reach.
+    let mut answered_now = false;
+    let mut remembered_from: Vec<&str> = Vec::new();
+    let mut unreached: Vec<&str> = Vec::new();
     // A name the add-on gave before says nothing of how it answers when asked; a song it was asked for does.
     let found = |addon_id: &str, asked: bool| {
         if asked {
@@ -405,7 +430,11 @@ pub(crate) fn through_addons<T>(
             .map(|(_, theirs)| theirs.clone());
         if let Some(track) = &known {
             any_asked = true;
-            match act(addon, addon_id, track) {
+            let result = act(addon, addon_id, track);
+            if let Err(e) = &result {
+                note_answer(lacks, addon_id, e, &mut answered_now, &mut unreached);
+            }
+            match result {
                 Ok(done) => {
                     found(addon_id, false);
                     return Ok((done, addon_id.to_string()));
@@ -428,7 +457,7 @@ pub(crate) fn through_addons<T>(
         // A "no" from a little while ago counts only if it was believed when it was said. One that was not is asked
         // again once the add-on is finding other songs: its answer counts then.
         if let Some(believed) = lacks.remembered(id, addon_id) {
-            remembered_no = true;
+            remembered_from.push(addon_id);
             if believed {
                 said_no.push(addon_id);
                 continue;
@@ -438,6 +467,11 @@ pub(crate) fn through_addons<T>(
             }
         }
         let resolving = addon.offers_resource("resolve");
+        // An add-on that finds songs only by their ISRC is not asked for a song without one: its "no" is no answer.
+        let sent = !resolving
+            || std::iter::once(&described.wanted)
+                .chain(&described.also)
+                .any(|reading| addon.asks_for(reading));
         let asked = if resolving {
             // As the song is read, then each other way it may be read (a row from YouTube), until the add-on has it.
             let mut answer = Ok(None);
@@ -456,6 +490,14 @@ pub(crate) fn through_addons<T>(
             continue;
         };
         any_asked = true;
+        match &asked {
+            Ok(_) if sent => {
+                answered_now = true;
+                lacks.heard(addon_id);
+            }
+            Ok(_) => {}
+            Err(e) => note_answer(lacks, addon_id, e, &mut answered_now, &mut unreached),
+        }
         let track = match asked {
             Ok(Some(track)) => track,
             // It does not have the song, or what it answered cannot be this song.
@@ -480,7 +522,11 @@ pub(crate) fn through_addons<T>(
                 continue;
             }
         };
-        match act(addon, addon_id, &track.id) {
+        let result = act(addon, addon_id, &track.id);
+        if let Err(e) = &result {
+            note_answer(lacks, addon_id, e, &mut answered_now, &mut unreached);
+        }
+        match result {
             Ok(done) => {
                 let _ = library.lock().unwrap().set_ref(id, addon_id, &track.id);
                 found(addon_id, true);
@@ -502,7 +548,11 @@ pub(crate) fn through_addons<T>(
             message: e.in_words(),
             code: Some(e.code),
             retry_after: e.retry_after,
-            answered: had_it || !said_no.is_empty() || remembered_no,
+            answered: had_it
+                || answered_now
+                || remembered_from
+                    .iter()
+                    .any(|a| !unreached.contains(a) && lacks.heard_lately(a)),
             ..Default::default()
         },
         None => {
@@ -538,11 +588,38 @@ pub(crate) fn through_addons<T>(
     })
 }
 
-/// Of the trouble an add-on had and the trouble kept so far, the one that says more: an add-on that could not be
-/// reached says least (another's answer says more of the song and of the add-ons).
+/// Of the trouble an add-on had and the trouble kept so far, the one that says more of whether the song can be had.
+/// An add-on that refused the request, or answered it with what the contract does not allow, says least: that may be
+/// its own trouble, and another add-on may have the song. One that could not be reached says a little more: it may
+/// have the song once it is back. One busy, slow or out of its allowance says most. Of two alike, the last.
 fn keep_trouble(kept: &mut Option<AddonError>, e: AddonError) {
-    if e.code != Code::Network || kept.as_ref().is_none_or(|k| k.code == Code::Network) {
+    let says = |code: Code| match code {
+        Code::Network => 1,
+        Code::Unavailable
+        | Code::Timeout
+        | Code::QuotaExceeded
+        | Code::RateLimited
+        | Code::Unauthorized => 2,
+        _ => 0,
+    };
+    if kept.as_ref().is_none_or(|k| says(e.code) >= says(k.code)) {
         *kept = Some(e);
+    }
+}
+
+/// Notes what an add-on's error says of the line to it: it could not be reached (`unreached`), else it answered.
+fn note_answer<'a>(
+    lacks: &Lacks,
+    addon: &'a str,
+    e: &AddonError,
+    answered: &mut bool,
+    unreached: &mut Vec<&'a str>,
+) {
+    if e.code == Code::Network {
+        unreached.push(addon);
+    } else {
+        *answered = true;
+        lacks.heard(addon);
     }
 }
 
@@ -1865,6 +1942,8 @@ fn addons_route(
     }
     let body = body_json(request)?;
     let id = body.get("id").and_then(Value::as_str).unwrap_or_default();
+    // Saving is woken once the list of add-ons is read again, so it asks the add-ons as they now are.
+    let mut wake = false;
     match path {
         // Adds the add-on at `link` (the address of its manifest); one that is there already is read again.
         "/api/addons" => {
@@ -1900,9 +1979,8 @@ fn addons_route(
                 &addon.manifest_json(),
             )?;
             state.lacks.forget_addon(&addon.manifest.id);
-            // Songs waiting to be saved may be found now.
-            state.saving.release();
-            state.saving.ring();
+            // Songs waiting to be saved may be found now (once the list of add-ons holds it).
+            wake = true;
         }
         "/api/addons/remove" => {
             state.library.lock().unwrap().remove_addon(id)?;
@@ -1916,8 +1994,7 @@ fn addons_route(
                 .set_addon_enabled(id, enabled)?;
             if enabled {
                 state.lacks.forget_addon(id);
-                state.saving.release();
-                state.saving.ring();
+                wake = true;
             }
         }
         "/api/addons/order" => {
@@ -1936,6 +2013,10 @@ fn addons_route(
         _ => return Ok(None),
     }
     state.reload_addons()?;
+    if wake {
+        state.saving.release();
+        state.saving.ring();
+    }
     Ok(Some(state.addons_reply()))
 }
 
@@ -2556,5 +2637,46 @@ fn ui_file(root: &Path, path: &str) -> Reply {
             Err(_) => refuse(404, "no such file"),
         },
         Err(_) => refuse(404, "no such file"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn of_two_add_ons_troubles_the_one_that_says_more_of_the_song_is_kept() {
+        let trouble = |code: Code| AddonError {
+            code,
+            message: "trouble".into(),
+            retry_after: None,
+        };
+        let kept = |first: Code, then: Code| {
+            let mut kept = None;
+            keep_trouble(&mut kept, trouble(first));
+            keep_trouble(&mut kept, trouble(then));
+            kept.map(|k| k.code)
+        };
+        // A refusal says least: the add-on out of reach may have the song once it is back.
+        assert_eq!(kept(Code::BadRequest, Code::Network), Some(Code::Network));
+        assert_eq!(
+            kept(Code::Network, Code::InvalidResponse),
+            Some(Code::Network)
+        );
+        // Busy, slow, or out of its allowance says most.
+        assert_eq!(
+            kept(Code::Network, Code::Unavailable),
+            Some(Code::Unavailable)
+        );
+        assert_eq!(
+            kept(Code::QuotaExceeded, Code::Network),
+            Some(Code::QuotaExceeded)
+        );
+        // Of two alike, the last.
+        assert_eq!(
+            kept(Code::BadRequest, Code::InvalidResponse),
+            Some(Code::InvalidResponse)
+        );
+        assert_eq!(kept(Code::Network, Code::Network), Some(Code::Network));
     }
 }

@@ -10,8 +10,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
@@ -52,19 +52,48 @@ pub struct DemoAddon {
 /// Switches a [`DemoAddon`] out of reach and back, also once it runs.
 #[derive(Clone, Default)]
 pub struct Reach {
+    door: Arc<(Mutex<Door>, Condvar)>,
+}
+
+/// The door in front of the add-on's server (see [`door`]).
+#[derive(Default)]
+struct Door {
     /// Asked for: out of reach.
-    gone: Arc<AtomicBool>,
+    gone: bool,
     /// As it is: the add-on's port is shut.
-    shut: Arc<AtomicBool>,
+    shut: bool,
+    /// The add-on's own port.
+    port: u16,
+    /// Why the port could not be listened on again, when it could not.
+    trouble: Option<String>,
 }
 
 impl Reach {
-    /// Out of reach (true) or back (false). Answers once it is so (the add-on runs), or after a few seconds.
-    pub fn set(&self, gone: bool) {
-        self.gone.store(gone, Ordering::Relaxed);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while self.shut.load(Ordering::Relaxed) != gone && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(2));
+    /// Out of reach (true) or back (false). Answers once it is so (the add-on runs), or why not after a few seconds.
+    pub fn set(&self, gone: bool) -> Result<(), String> {
+        let (door, bell) = &*self.door;
+        let port = {
+            let mut door = door.lock().unwrap();
+            door.gone = gone;
+            door.trouble = None;
+            bell.notify_all();
+            door.port
+        };
+        // The door waits for a connection: one wakes it, to shut.
+        if gone && port != 0 {
+            let _ = TcpStream::connect(("127.0.0.1", port));
+        }
+        let (door, waited) = bell
+            .wait_timeout_while(door.lock().unwrap(), Duration::from_secs(5), |d| {
+                d.shut != gone && d.trouble.is_none()
+            })
+            .unwrap();
+        match &door.trouble {
+            Some(why) => Err(why.clone()),
+            None if waited.timed_out() => {
+                Err("the add-on's port did not open or shut in time".into())
+            }
+            None => Ok(()),
         }
     }
 }
@@ -75,40 +104,63 @@ type Open = Arc<Mutex<HashMap<u64, TcpStream>>>;
 /// The add-on's own port, in front of its server: what comes in is passed through. Out of reach, the door is shut:
 /// nothing listens on the port, so a connection is refused, and the connections open are cut, as when an add-on's
 /// server goes down. (The server cannot do that itself: it keeps every connection it has answered on.)
-fn door(port: u16, mut listener: Option<TcpListener>, inside: SocketAddr, reach: Reach) {
+fn door(mut listener: Option<TcpListener>, inside: SocketAddr, reach: Reach) {
     let open: Open = Default::default();
     let mut next = 0u64;
+    let (state, bell) = &*reach.door;
+    let port = state.lock().unwrap().port;
+    let mut tries = 0u32;
     loop {
-        if reach.gone.load(Ordering::Relaxed) {
-            if listener.take().is_some() {
-                for (_, line) in open.lock().unwrap().drain() {
-                    let _ = line.shutdown(Shutdown::Both);
+        {
+            let mut door = state.lock().unwrap();
+            if door.gone {
+                if listener.take().is_some() {
+                    for (_, line) in open.lock().unwrap().drain() {
+                        let _ = line.shutdown(Shutdown::Both);
+                    }
                 }
+                door.shut = true;
+                bell.notify_all();
+                // Shut until it is asked to open.
+                drop(bell.wait_while(door, |d| d.gone).unwrap());
+                continue;
             }
-            reach.shut.store(true, Ordering::Relaxed);
-            std::thread::sleep(Duration::from_millis(5));
-            continue;
         }
         let listening = match listener.as_ref() {
             Some(listening) => listening,
             // Open again, on the same port.
             None => match TcpListener::bind(("127.0.0.1", port)) {
                 Ok(again) => {
-                    let _ = again.set_nonblocking(true);
+                    tries = 0;
                     listener.insert(again)
                 }
-                Err(_) => {
+                Err(e) => {
+                    tries += 1;
+                    if tries == 200 {
+                        state.lock().unwrap().trouble = Some(format!(
+                            "the add-on's port could not be listened on again: {e}"
+                        ));
+                        bell.notify_all();
+                    }
                     std::thread::sleep(Duration::from_millis(5));
                     continue;
                 }
             },
         };
-        reach.shut.store(false, Ordering::Relaxed);
+        {
+            let mut door = state.lock().unwrap();
+            if door.shut {
+                door.shut = false;
+                bell.notify_all();
+            }
+        }
         let Ok((outside, _)) = listening.accept() else {
-            std::thread::sleep(Duration::from_millis(2));
             continue;
         };
-        let _ = outside.set_nonblocking(false);
+        // Woken to shut: the connection that woke it is let go.
+        if state.lock().unwrap().gone {
+            continue;
+        }
         let Ok(within) = TcpStream::connect(inside) else {
             continue;
         };
@@ -233,7 +285,6 @@ impl DemoAddon {
             .ok_or_else(|| anyhow!("the server has no port"))?;
         let listener = TcpListener::bind(("127.0.0.1", port))
             .with_context(|| format!("cannot listen on 127.0.0.1:{port}"))?;
-        listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
         Ok(Self {
             server,
@@ -247,7 +298,11 @@ impl DemoAddon {
             eclipse,
             resolves,
             spent: Default::default(),
-            reach: Reach::default(),
+            reach: {
+                let reach = Reach::default();
+                reach.door.0.lock().unwrap().port = port;
+                reach
+            },
         })
     }
 
@@ -272,13 +327,8 @@ impl DemoAddon {
 
     /// Answers until the program ends.
     pub fn run(mut self) {
-        let (port, listener, inside, reach) = (
-            self.port,
-            self.listener.take(),
-            self.inside,
-            self.reach.clone(),
-        );
-        std::thread::spawn(move || door(port, listener, inside, reach));
+        let (listener, inside, reach) = (self.listener.take(), self.inside, self.reach.clone());
+        std::thread::spawn(move || door(listener, inside, reach));
         for request in self.server.incoming_requests() {
             self.handle(request);
         }

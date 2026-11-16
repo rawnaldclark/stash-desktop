@@ -1353,7 +1353,6 @@ impl<'t> Writer<'t> {
 /// The most credits read for an artist's songs with others (an artist whose name is in many credits, like "X").
 pub const CREDITS_READ: usize = 500;
 
-/// How a name sorts: lower case, without a leading article, so "The Beatles" files under B.
 /// Whether `words` stand in `text` as words of their own: not inside a longer one ("drake" in "drakeo the ruler").
 fn holds_words(text: &str, words: &str) -> bool {
     !words.is_empty()
@@ -1364,6 +1363,7 @@ fn holds_words(text: &str, words: &str) -> bool {
         })
 }
 
+/// How a name sorts: lower case, without a leading article, so "The Beatles" files under B.
 pub fn sort_key(name: &str) -> String {
     let lower = name.trim().to_lowercase();
     for article in ["the ", "a ", "an "] {

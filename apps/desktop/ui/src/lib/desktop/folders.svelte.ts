@@ -4,6 +4,7 @@
  */
 import { library } from '../app';
 import * as core from '../core';
+import { forgetCredits } from './credits.svelte';
 
 const whole = new Intl.NumberFormat();
 export const many = (n: number, one: string, more: string) => `${whole.format(n)} ${n === 1 ? one : more}`;
@@ -57,6 +58,8 @@ class Folders {
 		const ended = this.scan;
 		this.scan = null;
 		await library.reload();
+		// Songs read again may name their artists anew, whatever the counts say.
+		forgetCredits();
 		if (ended?.error) {
 			this.notice = { text: `The scan stopped: ${ended.error}.`, trouble: true };
 		} else if (ended?.report) {

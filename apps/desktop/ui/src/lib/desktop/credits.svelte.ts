@@ -63,18 +63,28 @@ async function ask(): Promise<void> {
 		// The library changed while it was asked (what was said may be out of date), or the ask failed: asked again.
 		for (const credit of batch) wanted.add(credit);
 	}
-	if (wanted.size) timer ??= setTimeout(ask, said ? 30 : AGAIN_MS);
+	if (wanted.size) {
+		// After a failure, whatever was wanted meanwhile waits too: the core just failed.
+		if (!said && timer) {
+			clearTimeout(timer);
+			timer = null;
+		}
+		timer ??= setTimeout(ask, said ? 30 : AGAIN_MS);
+	}
 }
 
-// Who the library knows by themselves changes with its songs, albums and artists: what was said is let go, and asked
-// again when shown.
+/** Lets go of what was said, so it is asked again when shown: who the library knows by themselves may have changed (its
+ * songs were read again, which can rename artists however many songs there are). */
+export function forgetCredits(): void {
+	generation += 1;
+	known.clear();
+}
+
+// Who the library knows by themselves changes with its songs, albums and artists.
 let seen: string | null = null;
 library.counts.subscribe((c) => {
 	if (!c) return;
 	const now = `${c.tracks}/${c.albums}/${c.artists}`;
-	if (seen !== null && now !== seen) {
-		generation += 1;
-		known.clear();
-	}
+	if (seen !== null && now !== seen) forgetCredits();
 	seen = now;
 });

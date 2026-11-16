@@ -305,8 +305,8 @@ const V18: &str = "
 ";
 
 /// Version 19: what a song on the downloads has had of trouble that may be its own (`stashd`'s saving), kept across
-/// starts: its tries that asked something (`asks`), those that count against it (`strikes`: another song was saved
-/// since its try before), since when (`unsure_since`), and when it was last asked (`tried_at`). A song saved, or asked
+/// starts: its tries that asked something (`asks`), those that count against it (`strikes`: an add-on gave another song
+/// since its try before; a copy kept from playing one does not count), since when (`unsure_since`), and when it was last asked (`tried_at`). A song saved, or asked
 /// for again, starts over; for a song saved, `tried_at` says when an add-on gave it (none when it was a copy kept from
 /// playing it: no add-on was asked, so its save says nothing of the add-ons).
 const V19: &str = "

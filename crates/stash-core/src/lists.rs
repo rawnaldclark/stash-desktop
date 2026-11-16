@@ -717,9 +717,12 @@ impl Library {
         tx.execute("DELETE FROM unfound WHERE track_id = ?1", [id])?;
         let saving = save
             && tx.execute(
-            "UPDATE downloads SET state = 'queued', error = NULL, asked_at = ?2 WHERE track_id = ?1 AND state = 'failed'",
-            params![id, now_ms],
-        )? > 0;
+                // Asked for again: its trouble starts over, as any song asked for again (`ask_downloads`).
+                "UPDATE downloads SET state = 'queued', error = NULL, asked_at = ?2,
+                                  strikes = 0, asks = 0, unsure_since = NULL, tried_at = NULL
+             WHERE track_id = ?1 AND state = 'failed'",
+                params![id, now_ms],
+            )? > 0;
         tx.commit()?;
         Ok(Some(saving))
     }
@@ -1327,7 +1330,7 @@ mod tests {
 /// What a song on the downloads has had of trouble that may be its own (see [`Library::download_unsure`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UnsureTries {
-    /// Its tries after another song was saved since its try before.
+    /// Its tries after an add-on gave another song since its try before (a copy kept from playing one does not count).
     pub strikes: u32,
     /// Its tries that asked something.
     pub asks: u32,

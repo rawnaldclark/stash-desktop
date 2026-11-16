@@ -4581,7 +4581,7 @@ fn an_add_on_whose_allowance_is_spent_holds_saving_and_fails_nothing() {
     // connection, its server down): everyone's trouble again, and nothing was spent, so saving waits, a minute at
     // first, and still marks nothing as not saved.
     spent.store(false, std::sync::atomic::Ordering::Relaxed);
-    gone.set(true);
+    gone.set(true).unwrap();
     client.post("/api/downloads/retry", json!({}));
     // (Not trouble that may be the song's own: nothing was asked, and the window says so.)
     let away = held_for("no add-on can be reached");
@@ -4602,10 +4602,18 @@ fn an_add_on_whose_allowance_is_spent_holds_saving_and_fails_nothing() {
         .as_millis() as i64;
     let left = away["held"]["until_ms"].as_i64().unwrap() - now_ms;
     assert!((0..=61_000).contains(&left), "{away}");
+    // Saying "online" while Stash already was (as a window that starts does) ends no wait.
+    client.post("/api/offline", json!({ "offline": false }));
+    let (_, now) = client.get("/api/downloads");
+    assert_eq!(
+        (&now["held"]["why"], &now["held"]["until_ms"]),
+        (&away["held"]["why"], &away["held"]["until_ms"]),
+        "{now}"
+    );
 
     // It can be reached again, and the connection comes back (Stash was offline): saving goes on at once, without
     // waiting out its minute, and every song is saved.
-    gone.set(false);
+    gone.set(false).unwrap();
     client.post("/api/offline", json!({ "offline": true }));
     client.post("/api/offline", json!({ "offline": false }));
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -5292,7 +5300,7 @@ fn an_add_on_out_of_reach_while_another_says_no_is_not_the_connection_down() {
     // Its add-on is out of reach, and the other answers that it does not have the song: the connection is up, so this
     // is not the wait for add-ons out of reach (which never gives a song up), but trouble that may be the song's own:
     // asked again after a wait, and not given up on yet.
-    reach.set(true);
+    reach.set(true).unwrap();
     client.post("/api/downloads", json!({ "ids": [id] }));
     let deadline = Instant::now() + Duration::from_secs(10);
     let held = loop {
@@ -5303,11 +5311,10 @@ fn an_add_on_out_of_reach_while_another_says_no_is_not_the_connection_down() {
         assert!(Instant::now() < deadline, "saving did not wait: {now}");
         std::thread::sleep(Duration::from_millis(50));
     };
+    // In the words of the add-on out of reach (so it was asked), not the words for no add-on reached at all.
+    let why = held["held"]["why"].as_str().unwrap();
     assert!(
-        !held["held"]["why"]
-            .as_str()
-            .unwrap()
-            .contains("no add-on can be reached"),
+        why.contains("could not be reached") && !why.contains("no add-on can be reached"),
         "{held}"
     );
     assert_eq!(

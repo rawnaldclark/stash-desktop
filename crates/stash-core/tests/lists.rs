@@ -478,9 +478,12 @@ fn a_song_no_add_on_finds_waits_to_be_fixed_and_leaves_when_it_is() {
     library.set_unfound_aside(&[india], false, 5_000).unwrap();
     assert_eq!(library.unfound_counts().unwrap().open, 2);
 
-    // Fixed: the add-on's name for it is kept, it leaves the list, and a save that failed is asked again.
+    // Fixed: the add-on's name for it is kept, it leaves the list, and a save that failed is asked again, its
+    // trouble starting over (as any song asked for again).
     library.ask_downloads(&[hotel], 6_000).unwrap();
     assert_eq!(library.next_download().unwrap(), Some(hotel));
+    library.download_unsure(hotel, true, 6_100).unwrap();
+    library.download_unsure(hotel, true, 6_200).unwrap();
     library
         .download_failed(hotel, "none of your add-ons has it")
         .unwrap();
@@ -499,6 +502,8 @@ fn a_song_no_add_on_finds_waits_to_be_fixed_and_leaves_when_it_is() {
             .contains(&("demo.folder".to_string(), "41".to_string()))
     );
     assert_eq!(library.download_counts().unwrap().queued, 1);
+    let tries = library.download_unsure(hotel, true, 8_000).unwrap();
+    assert_eq!((tries.strikes, tries.asks, tries.since_ms), (0, 1, 8_000));
     assert_eq!(library.unfound_counts().unwrap().marked, [india]);
     assert_eq!(
         library

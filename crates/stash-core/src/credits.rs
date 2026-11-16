@@ -41,7 +41,8 @@ static MAYBE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\s*,\s*|\s+(?:&|and|x|with|vs\.?)\s+").expect("a valid pattern")
 });
 
-/// The most places a credit may be cut; a longer list of names is left whole.
+/// A credit with this many places it may be cut, or more, is left whole (a long list of names, or text that only
+/// looks like one).
 const MOST_PIECES: usize = 12;
 
 /// A place the credit may be cut: the separator's bytes, and whether it surely parts two artists.
@@ -54,7 +55,8 @@ struct Cut {
 
 /// Every place the credit may be cut, in order. Places that may be cut can overlap: the spaces after one word may be
 /// the spaces before the next ("Lil Nas X & Jack Harlow" has " X " and " & "), so each search for one goes on from the
-/// spaces that end the one before. A sure separator wins where the two overlap.
+/// spaces that end the one before. Two marks that share their spaces and part the same two names (", and", ", &", a
+/// doubled ", ,") may also be cut as one. A sure separator wins where the two overlap.
 fn cuts(credit: &str) -> Vec<Cut> {
     let mut cuts: Vec<Cut> = SURE
         .find_iter(credit)
@@ -65,7 +67,9 @@ fn cuts(credit: &str) -> Vec<Cut> {
         })
         .collect();
     let mut at = 0;
+    let mut before: Option<(usize, usize, String)> = None;
     while let Some(m) = MAYBE.find_at(credit, at) {
+        let mark = m.as_str().trim().to_lowercase();
         if !cuts
             .iter()
             .any(|c| c.sure && m.start() < c.end && c.start < m.end())
@@ -75,7 +79,19 @@ fn cuts(credit: &str) -> Vec<Cut> {
                 end: m.end(),
                 sure: false,
             });
+            // ", and" (and ", &", ", ,"): the two marks together part the names on either side.
+            if let Some((start, end, first)) = &before
+                && m.start() < *end
+                && (*first == mark || (first == "," && (mark == "&" || mark == "and")))
+            {
+                cuts.push(Cut {
+                    start: *start,
+                    end: m.end(),
+                    sure: false,
+                });
+            }
         }
+        before = Some((m.start(), m.end(), mark));
         at = m.start() + m.as_str().trim_end().len();
     }
     cuts.sort_by_key(|c| (c.start, c.end));
@@ -94,14 +110,21 @@ struct Run {
 
 /// The credit as its runs, each with the places inside it that may be cut.
 fn runs(credit: &str, cuts: &[Cut]) -> Vec<(Run, Vec<Cut>)> {
-    // The sure separators that part names: not one at the very start, nor one right after another (nothing to name
-    // between), nor one that ends the credit ("A; B;": it stays with the last name).
+    // The sure separators that part names: not one at the very start, nor one that ends the credit ("A; B;": it stays
+    // with the last name). One right after another (nothing to name between: "A; ; B") is one with it.
     let mut bounds: Vec<Cut> = Vec::new();
     let mut at = 0;
     for cut in cuts.iter().filter(|c| c.sure) {
-        if cut.start > at {
-            bounds.push(*cut);
-            at = cut.end;
+        match bounds.last_mut() {
+            Some(last) if cut.start <= at || credit[at..cut.start].trim().is_empty() => {
+                last.end = last.end.max(cut.end);
+                at = last.end;
+            }
+            _ if cut.start > at => {
+                bounds.push(*cut);
+                at = cut.end;
+            }
+            _ => {}
         }
     }
     if bounds
@@ -125,13 +148,16 @@ fn runs(credit: &str, cuts: &[Cut]) -> Vec<(Run, Vec<Cut>)> {
             start = c.end;
         }
     }
-    // "A (feat. B)": the ")" closes the run, wherever it falls. What comes after it ("A (feat. B) & C") is a name of its
-    // own, when a separator comes first.
+    // "A (feat. B)": the ")" closes the group the "(" opened, in whichever run it falls ("A (feat. B; C)"). What comes
+    // after it ("A (feat. B) & C") is a name of its own, when a separator comes first.
+    let mut open = false;
     let mut i = 0;
     while i < runs.len() {
-        if runs[i].before.contains('(')
+        open |= runs[i].before.contains('(');
+        if open
             && let Some(q) = closer(&credit[runs[i].start..runs[i].end]).map(|q| runs[i].start + q)
         {
+            open = false;
             let end = runs[i].end;
             let r = q + credit[q..end].bytes().take_while(|&b| b == b')').count();
             if credit[r..end].trim().is_empty() {
@@ -203,7 +229,10 @@ impl Library {
             if key.is_empty() || key == whole {
                 return Ok(None);
             }
-            if let Some(id) = known.get(&key) {
+            // What the lookup answers depends on the name as written too (the one written the same way comes first,
+            // as SQLite folds case).
+            let asked = format!("{key}|{}", name.trim().to_ascii_lowercase());
+            if let Some(id) = known.get(&asked) {
                 return Ok(*id);
             }
             let id = self
@@ -216,7 +245,7 @@ impl Library {
                 )?
                 .query_row(rusqlite::params![key, name.trim()], |r| r.get(0))
                 .optional()?;
-            known.insert(key, id);
+            known.insert(asked, id);
             Ok(id)
         };
         // Each run is split only as far as it names known artists.
@@ -261,7 +290,8 @@ fn segment(
     };
     let mut best: Vec<Option<Best>> = vec![None; n + 2];
     best[0] = Some((0, 0, 0, None));
-    // Each cut starts after the one before, so a part only ever leads to a later place.
+    // A part leads only to a cut that starts where it ends or later, which comes later in the cuts' order (by start,
+    // then end): each place is settled before any part leads on from it.
     for place in 0..=n {
         let Some((known, count, _, _)) = best[place] else {
             continue;
@@ -392,6 +422,10 @@ mod tests {
             ["Lil Nas X", "Jack Harlow"]
         );
         assert_eq!(
+            parts(&lib, "Lil Nas X and Jack Harlow"),
+            ["Lil Nas X", "Jack Harlow"]
+        );
+        assert_eq!(
             parts(&lib, "Jack Harlow and Lil Nas X"),
             ["Jack Harlow", "Lil Nas X"]
         );
@@ -412,6 +446,76 @@ mod tests {
                 (" (feat. ", "Future", ")"),
                 (", ", "Newcomer", "")
             ]
+        );
+        // The ")" closes the group in whichever part it falls ("A (feat. B; C)").
+        for credit in [
+            "Drake (feat. Future; Newcomer)",
+            "Drake (feat. Future / Newcomer)",
+        ] {
+            let parts = lib.credit_parts(credit).unwrap();
+            assert_eq!(
+                parts
+                    .iter()
+                    .map(|p| (p.name.as_str(), p.after.as_str()))
+                    .collect::<Vec<_>>(),
+                [("Drake", ""), ("Future", ""), ("Newcomer", ")")],
+                "{credit}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_marks_between_the_same_names_part_them_as_one() {
+        let lib = library(&[
+            "Ada Vale",
+            "Ben Okoro",
+            "Cy Marsh",
+            "Drake",
+            "Future",
+            "Ben And",
+            "Ben Vs",
+        ]);
+        // The Oxford comma: ", and", ", &".
+        assert_eq!(
+            parts(&lib, "Ada Vale, Ben Okoro, and Cy Marsh"),
+            ["Ada Vale", "Ben Okoro", "Cy Marsh"]
+        );
+        assert_eq!(
+            parts(&lib, "Ada Vale, Ben Okoro, & Cy Marsh"),
+            ["Ada Vale", "Ben Okoro", "Cy Marsh"]
+        );
+        // A mark written twice (a list with an empty entry).
+        assert_eq!(parts(&lib, "Drake, , Future"), ["Drake", "Future"]);
+        assert_eq!(parts(&lib, "Drake & & Future"), ["Drake", "Future"]);
+        assert_eq!(parts(&lib, "Drake; ; Future"), ["Drake", "Future"]);
+        // Names that end in "and" or "vs".
+        assert_eq!(parts(&lib, "Ben And & Drake"), ["Ben And", "Drake"]);
+        assert_eq!(parts(&lib, "Ben Vs & Drake"), ["Ben Vs", "Drake"]);
+    }
+
+    #[test]
+    fn a_name_is_looked_up_as_written_whatever_was_looked_up_before() {
+        // "Weeknd" and "The Weeknd" sort alike; each credit's link is its own artist, in whichever order they are read.
+        let lib = library(&["Drake", "Weeknd", "The Weeknd"]);
+        let id = |name: &str| -> i64 {
+            lib.conn
+                .query_row("SELECT id FROM artists WHERE name = ?1", [name], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+        let mut known = HashMap::new();
+        let second = |parts: Vec<CreditPart>| parts[1].id;
+        assert_eq!(
+            second(lib.credit_parts_with("Drake, Weeknd", &mut known).unwrap()),
+            Some(id("Weeknd"))
+        );
+        assert_eq!(
+            second(
+                lib.credit_parts_with("Drake, The Weeknd", &mut known)
+                    .unwrap()
+            ),
+            Some(id("The Weeknd"))
         );
     }
 
@@ -456,6 +560,35 @@ mod tests {
         assert_eq!(artists("Future"), ["Drake & Future"]);
         assert_eq!(artists("The Weeknd"), ["Drake, The Weeknd"]);
         assert!(artists("Simon & Garfunkel").is_empty());
+    }
+
+    #[test]
+    fn an_artists_songs_with_others_are_found_past_many_names_that_only_hold_theirs() {
+        // More credits hold "drake" inside a longer name than are read, and come first: the one that names Drake is
+        // still found.
+        let mut credits: Vec<String> = (0..crate::library::CREDITS_READ + 10)
+            .map(|n| format!("Drakeo & Guest {n}"))
+            .collect();
+        credits.extend([
+            "Drake".to_string(),
+            "Future".to_string(),
+            "Drake & Future".to_string(),
+        ]);
+        let names: Vec<&str> = credits.iter().map(String::as_str).collect();
+        let lib = library(&names);
+        let drake: i64 = lib
+            .conn
+            .query_row("SELECT id FROM artists WHERE name = 'Drake'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let found: Vec<String> = lib
+            .artist_with_others(drake, 50)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.artist)
+            .collect();
+        assert_eq!(found, ["Drake & Future"]);
     }
 
     #[test]

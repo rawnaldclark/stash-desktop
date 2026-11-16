@@ -95,8 +95,9 @@ pub struct Failure {
     pub nothing_to_ask: bool,
     /// An add-on was asked for the song this time (not only "no"s remembered from before).
     pub asked: bool,
-    /// An add-on answered that it does not have the song (now, or a little while ago), or cannot give it: when another
-    /// could not be reached, the line was not down, so that was the other add-on's trouble.
+    /// An add-on answered this time, whatever it said (or one that said a little while ago it does not have the song
+    /// has answered in the last few minutes, and was not just found out of reach): when another could not be reached,
+    /// the line was not down, so that was the other add-on's trouble.
     pub answered: bool,
 }
 

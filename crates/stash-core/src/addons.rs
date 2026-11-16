@@ -571,6 +571,14 @@ impl Addon {
             .map_err(|e| AddonError::invalid(format!("the answer is not JSON: {e}")))
     }
 
+    /// Whether asking the add-on for `wanted` ([`Addon::resolve`]) sends it anything: one that finds songs only by
+    /// their ISRC is not asked for a song without one (it answers "no" without being asked).
+    pub fn asks_for(&self, wanted: &Wanted) -> bool {
+        !(self.manifest.dialect == Dialect::Eclipse
+            && self.manifest.resolve_by_isrc
+            && wanted.isrc.is_none())
+    }
+
     /// Asks an Eclipse add-on for a song: by its ISRC when that is the only way the add-on has (and the song has
     /// one), else by its words.
     fn eclipse_resolve(&self, wanted: &Wanted) -> Result<Option<Track>> {
@@ -711,7 +719,7 @@ fn base_of(link: &str) -> Result<(Url, String)> {
 }
 
 fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
+    let config = ureq::Agent::config_builder()
         .timeout_global(Some(TIMEOUT))
         // Within the whole wait, so a name that is not found or a connection that is not made in time is told apart
         // from an add-on that is slow to answer (see `unanswered`).
@@ -720,8 +728,12 @@ fn agent() -> ureq::Agent {
         .max_redirects(0)
         .http_status_as_error(false)
         .user_agent(concat!("Stash-desktop/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .into()
+        .build();
+    ureq::Agent::with_parts(
+        config,
+        ureq::unversioned::transport::DefaultConnector::default(),
+        Lookup::default(),
+    )
 }
 
 /// A URL an add-on (or the listener's link) names: https, or http on this computer only; no credentials in it.
@@ -844,8 +856,10 @@ struct ErrorDetail {
 
 /// A request that got no answer. [`Code::Network`] only when nothing reached the add-on: its server's name was not
 /// found, nothing listens there, there is no way to it, or connecting took too long (no connection, or its server is
-/// down: the same for every request, and nothing was asked of it). A line that broke once the request was on its way,
-/// or an answer that is not HTTP, is the add-on not working: it may have been asked, and have spent something on it.
+/// down: the same for every request, and nothing was asked of it). Anything else is the add-on not working: a line
+/// that broke once the request was on its way (it may have been asked, and have spent something on it), an answer
+/// that is not HTTP, or a secure connection its server could not make (a certificate that does not hold: the server
+/// answered).
 fn unanswered(e: ureq::Error) -> AddonError {
     use std::io::ErrorKind;
     match e {
@@ -855,16 +869,17 @@ fn unanswered(e: ureq::Error) -> AddonError {
         | ureq::Error::Timeout(ureq::Timeout::Resolve | ureq::Timeout::Connect) => {
             AddonError::host(Code::Network, e.to_string())
         }
-        // A name that could not be looked up comes as one of these too, with no kind of its own.
+        // Connecting failed: nothing listens there, or there is no way to it. (A name that could not be looked up
+        // comes as `HostNotFound`: see [`Lookup`].)
         ureq::Error::Io(ref io)
-            if !matches!(
+            if matches!(
                 io.kind(),
-                ErrorKind::ConnectionReset
-                    | ErrorKind::ConnectionAborted
-                    | ErrorKind::BrokenPipe
-                    | ErrorKind::UnexpectedEof
-                    | ErrorKind::WriteZero
-                    | ErrorKind::TimedOut
+                ErrorKind::ConnectionRefused
+                    | ErrorKind::HostUnreachable
+                    | ErrorKind::NetworkUnreachable
+                    | ErrorKind::NetworkDown
+                    | ErrorKind::AddrNotAvailable
+                    | ErrorKind::PermissionDenied
             ) =>
         {
             AddonError::host(Code::Network, e.to_string())
@@ -873,6 +888,45 @@ fn unanswered(e: ureq::Error) -> AddonError {
             AddonError::host(Code::Timeout, "the add-on did not answer in time")
         }
         other => AddonError::host(Code::Unavailable, other.to_string()),
+    }
+}
+
+/// An answer that began and could not be read to its end. Too long, or not text, is not what the contract allows; a
+/// line that broke or stalled on the way is the add-on not working, as [`unanswered`] says of one that broke before.
+fn unread(e: ureq::Error) -> AddonError {
+    match e {
+        ureq::Error::BodyExceedsLimit(_) => {
+            AddonError::invalid(format!("the answer could not be read: {e}"))
+        }
+        ureq::Error::Io(ref io) if io.kind() == std::io::ErrorKind::InvalidData => {
+            AddonError::invalid(format!("the answer could not be read: {e}"))
+        }
+        ureq::Error::Timeout(_) => {
+            AddonError::host(Code::Timeout, "the add-on did not answer in time")
+        }
+        other => AddonError::host(
+            Code::Unavailable,
+            format!("the answer stopped coming in: {other}"),
+        ),
+    }
+}
+
+/// Looks names up as ureq does, and says so when a name could not be looked up: the system says that with an error of
+/// no kind of its own, which would read as any other trouble.
+#[derive(Debug, Default)]
+struct Lookup(ureq::unversioned::resolver::DefaultResolver);
+
+impl ureq::unversioned::resolver::Resolver for Lookup {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> std::result::Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+        self.0.resolve(uri, config, timeout).map_err(|e| match e {
+            ureq::Error::Io(_) => ureq::Error::HostNotFound,
+            other => other,
+        })
     }
 }
 
@@ -896,12 +950,17 @@ fn fetch(agent: &ureq::Agent, url: &str) -> Result<Fetched> {
     let retry_after = header("retry-after").and_then(|v| v.trim().parse::<u64>().ok());
     let www_authenticate = header("www-authenticate");
     let status = response.status().as_u16();
-    let body = response
+    let body = match response
         .body_mut()
         .with_config()
         .limit(BODY_CAP)
         .read_to_string()
-        .map_err(|e| AddonError::invalid(format!("the answer could not be read: {e}")))?;
+    {
+        Ok(body) => body,
+        // An error's own words could not be read: its status still says what it is.
+        Err(_) if status >= 400 => String::new(),
+        Err(e) => return Err(unread(e)),
+    };
     Ok(Fetched {
         status,
         retry_after,
@@ -976,6 +1035,102 @@ mod tests {
 
     fn manifest(json: &str) -> Result<()> {
         check_manifest(&serde_json::from_str::<Manifest>(json).unwrap())
+    }
+
+    #[test]
+    fn out_of_reach_is_only_a_request_that_never_reached_the_add_on() {
+        use std::io::{Error, ErrorKind};
+        let io = |kind: ErrorKind| ureq::Error::Io(Error::new(kind, "x"));
+        let code = |e: ureq::Error| unanswered(e).code;
+        // Nothing reached it: no name, nothing listening, no way there, connecting took too long.
+        for e in [
+            ureq::Error::HostNotFound,
+            ureq::Error::ConnectionFailed,
+            ureq::Error::Timeout(ureq::Timeout::Resolve),
+            ureq::Error::Timeout(ureq::Timeout::Connect),
+            io(ErrorKind::ConnectionRefused),
+            io(ErrorKind::HostUnreachable),
+            io(ErrorKind::NetworkUnreachable),
+            io(ErrorKind::NetworkDown),
+        ] {
+            assert_eq!(code(e), Code::Network);
+        }
+        // It was reached: a line that broke on the way, a certificate that does not hold, an answer that is not
+        // HTTP, an answer too slow.
+        for e in [
+            io(ErrorKind::ConnectionReset),
+            io(ErrorKind::ConnectionAborted),
+            io(ErrorKind::UnexpectedEof),
+            io(ErrorKind::InvalidData),
+            io(ErrorKind::Other),
+        ] {
+            assert_eq!(code(e), Code::Unavailable);
+        }
+        assert_eq!(
+            code(ureq::Error::Timeout(ureq::Timeout::Global)),
+            Code::Timeout
+        );
+        // A name that is not found, as the system says it (with no kind of its own), is out of reach too.
+        let lookup = agent()
+            .get("http://stash-test.invalid/manifest.json")
+            .call()
+            .map(|_| ())
+            .map_err(unanswered);
+        assert_eq!(lookup.unwrap_err().code, Code::Network);
+    }
+
+    #[test]
+    fn an_answer_that_stops_coming_in_is_the_add_on_not_working() {
+        use std::io::{Error, ErrorKind};
+        let code = |e: ureq::Error| unread(e).code;
+        assert_eq!(
+            code(ureq::Error::Io(Error::new(ErrorKind::UnexpectedEof, "x"))),
+            Code::Unavailable
+        );
+        assert_eq!(
+            code(ureq::Error::Io(Error::new(ErrorKind::ConnectionReset, "x"))),
+            Code::Unavailable
+        );
+        assert_eq!(
+            code(ureq::Error::Timeout(ureq::Timeout::Global)),
+            Code::Timeout
+        );
+        // Too long, or not text: not what the contract allows.
+        assert_eq!(
+            code(ureq::Error::BodyExceedsLimit(BODY_CAP)),
+            Code::InvalidResponse
+        );
+        assert_eq!(
+            code(ureq::Error::Io(Error::new(ErrorKind::InvalidData, "x"))),
+            Code::InvalidResponse
+        );
+
+        // From a server on this computer that sends its answer's head and then hangs up partway through.
+        let cut = |head: &'static str| {
+            let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = server.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                let (mut line, _) = server.accept().unwrap();
+                let mut asked = [0u8; 1024];
+                let _ = line.read(&mut asked);
+                let _ = line.write_all(head.as_bytes());
+                let _ = line.write_all(b"{\"tracks\": [");
+            });
+            get_json::<serde_json::Value>(&agent(), &format!("http://127.0.0.1:{port}/search?q=x"))
+                .unwrap_err()
+        };
+        let broke =
+            cut("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 400\r\n\r\n");
+        assert_eq!(broke.code, Code::Unavailable, "{broke:?}");
+        // An error whose words were cut: its status still says what it is.
+        let busy =
+            cut("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Length: 400\r\n\r\n");
+        assert_eq!(
+            (busy.code, busy.retry_after),
+            (Code::RateLimited, Some(30)),
+            "{busy:?}"
+        );
     }
 
     #[test]

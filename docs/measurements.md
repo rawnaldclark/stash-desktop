@@ -1140,7 +1140,7 @@ A reviewer read sections 31 and 32 (songs by several artists, the fourth review'
 - **No twelve-ask limit; trouble that comes again waits longer each time.**
   - §32 gave a song up at its twelfth ask. A lone song reached that about five hours into an add-on's outage, although §32 said nothing fails for a day.
   - Now a song with no strikes is given up on only after a day with three asks in it.
-  - Each time such trouble comes again (the song before had it too, or this one is the only one left), saving waits twice as long as the time before. That is at least as long as the add-on asked, and at most an hour, so an add-on that asks to wait five seconds is not asked every five seconds. The first such wait is as long as the add-on asked.
+  - Each time such trouble comes again (the song before had it too, or this one is the only one left), saving waits twice as long as the time before. That is at least as long as the add-on asked, and at most an hour, so an add-on that asks to wait five seconds is not asked every five seconds. The first such wait is as long as the add-on asked (true only since §35: before, it was at least a minute, or twice a wait that had ended long before).
 - **Going back online ends only a wait for add-ons out of reach, and only when Stash was offline.** Before, every request saying `offline: false` ended any wait, an allowance spent included, and started its doubling over.
 
 ### Songs by several artists
@@ -1149,15 +1149,15 @@ A reviewer read sections 31 and 32 (songs by several artists, the fourth review'
   - "Lil Nas X & Jack Harlow" was read as "Lil Nas" and "& Jack Harlow", because " X " took the space " & " needed. It was not split.
   - The places a credit may be cut may now share their spaces, and the split chooses among cuts that do not overlap.
   - The same held for names ending in "and", "with" or "vs".
-- **The ")" that closes a "(feat." now closes it wherever it falls.**
-  - In "Drake (feat. Future) & Newcomer", Future's part was "Future)", which never linked.
+- **The ")" that closes a "(feat." now closes it where a name ends: before the end of the credit, or before another place it may be cut.** ("Drake (feat. Future) Remix" keeps "Future) Remix" as one name, with no link.)
+  - In "Drake (feat. Future) & Newcomer", Future's part was "Future) & Newcomer" (Newcomer not being known), which never linked.
   - It now reads as Drake, Future, Newcomer.
 - **An artist page's "With others" reads only credits that hold the artist's name as words of their own** ("yo" is part of many names), up to 500 of them. Before, the first 500 credits holding those letters were read, so for a short name the real ones could be left out.
 - **The window's cache of credits no longer empties itself past 4,000 credits.**
   - With more than that on screen (a long Liked list), it asked again for ever.
-  - It is let go when the library's songs, albums or artists change. Before, only a change in its artists did.
+  - It is let go when the number of the library's songs, albums or artists changes (and, since §35, when a scan ends). Before, only a change in the number of its artists did.
   - An answer asked for before such a change is thrown away, and the credits are asked again.
-  - An ask that failed is asked again 5 s later. Before, those credits stayed unsplit until the library changed.
+  - An ask that failed is asked again 5 s later (since §35 also when a credit was wanted while it was out; before, that ask went again after 30 ms). Before, those credits stayed unsplit until the library changed.
 
 ### The window
 
@@ -1176,7 +1176,7 @@ A reviewer read sections 31 and 32 (songs by several artists, the fourth review'
 
 - **Core tests:**
   - Credits, newly split:
-    - "Lil Nas X & Jack Harlow", "Jack Harlow and Lil Nas X" and "Ben With x Drake" split.
+    - "Lil Nas X & Jack Harlow" and "Ben With x Drake" split. ("Jack Harlow and Lil Nas X", listed here before, split already; §35 adds "Lil Nas X and Jack Harlow", which did not.)
     - "Lil Nas X" alone did not.
     - "Drake (feat. Future) & Newcomer" read as Drake, Future, Newcomer (not known).
     - In "Drake (feat. Future), Newcomer", Future's part closed with ")".
@@ -1198,3 +1198,90 @@ A reviewer read sections 31 and 32 (songs by several artists, the fourth review'
   - Credits: one ask for 4 credits; links and "With others" as before.
   - Folders: a rename kept "Summer 20" while a folder made elsewhere appeared, and opening another folder still dropped the form.
 - **All core and stashd tests, clippy, and the window's check, unit tests (53) and build** passed.
+
+## 35. Sixth review: an answer cut off is the add-on not working; old "no"s and old waits say nothing now
+
+A review read §34's commit. It confirmed 28 findings: 6 medium and 22 minor. A further 2 were contested, and those are fixed too. Several findings were the same defect seen from two sides, so they are listed together below. All of them are fixed.
+
+### Saving
+
+- **An answer that stops coming in is the add-on not working, not a broken answer.**
+  - A line that broke, or went quiet, after the answer's first lines counted as an answer that breaks the contract. A song was then given up on at once, or counted as a "no" and put on Not found.
+  - Now it is trouble that may be the song's own: tried again, with strikes and a day.
+  - An answer that went on too long, or was not text, still breaks the contract. A busy or failing answer whose words were cut off still counts as what its status says (a 429 is still busy, with its wait).
+- **Out of reach is now a short list, not "anything else".**
+  - The list: the name was not found, nothing listened, there was no way there, or connecting took too long.
+  - Before, everything but six kinds of trouble counted, among them a certificate that does not hold. An add-on whose certificate ran out was "no add-on can be reached (is this computer online?)" for ever.
+  - A name the system could not find (on Windows this comes with no kind of its own) now counts as not found.
+- **An add-on that answered counts only when it answered now, or a little while ago and is still answering.**
+  - A "no" remembered from hours before counted as an answer. So did one from the very add-on now out of reach. Then a real outage was taken for busy, songs were given up after a day, and the wait outlived going back online.
+  - Now an add-on counts as having answered when it answered this time, whatever it said. A "no" remembered from before counts only when its add-on answered in the last five minutes and was not out of reach this time.
+  - An add-on that is never asked for a song (an Eclipse add-on that finds songs only by ISRC, for a song with none) no longer counts as asked.
+- **A wait doubles only from a wait just before it, of the same kind.**
+  - The doubling counted from the last wait ever, however long ago. So one 503 after an idle spell could hold saving for an hour, even when the add-on asked for 5 s. A wait out of reach right after a short wait the add-on asked for was 10 s, not a minute.
+  - Now it doubles only from a wait that ended no longer ago than it lasted, and only from one of the same kind (out of reach, or not).
+  - A run of trouble ends once saving has been quiet for two minutes past any wait.
+  - The first such wait is now as long as the add-on asked, or a minute when it asked nothing, as §34 said.
+- **Which trouble is kept when several add-ons fail, by what it says about the song.**
+  - Busy, slow, out of its allowance or not working says most. Out of reach comes next. A refusal says least, since the add-on out of reach may have the song once it is back.
+  - Before, an answering add-on's refusal outranked one out of reach. The song was given up on at once, although the add-on that had it was only briefly down.
+- **A restart no longer fails the first song refused.**
+  - A refusal is the song's own only on the song's first ask. A song asked before, and kept in line because the songs around it were refused the same way, is not given up on at once after Stash starts again.
+- **A song fixed in Not found starts its trouble over**, as any song asked for again. Before, it kept its old strikes, so its first trouble gave it up.
+- **Adding an add-on, or switching one on, wakes saving after the list of add-ons is read again.** Before, the try it woke could use the old list and start a new wait.
+
+### Songs by several artists
+
+- **A "(feat." group with ";" or " / " inside it now closes on its ")".** In "Drake (feat. Future; Newcomer)", Newcomer's part was "Newcomer)", which never linked.
+- **Two marks between the same two names part them as one.** That covers the Oxford comma (", and", ", &") and a mark written twice (", ,", "& &", "; ;"). Before, the second mark stayed at the start of the next name, so it never linked.
+- **Each name is looked up as written.** One shared lookup was kept by sort key, so whether "The Weeknd" linked to "Weeknd" or "The Weeknd" depended on which was read first.
+- **The window lets go of what it was told when a scan ends.** A scan can rename artists without changing any count.
+
+### The demo add-on
+
+- **The door waits for connections instead of checking every 2 ms.**
+- **Switching it out of reach and back says when it could not.** It gives the reason when the port could not be listened on again, or did not open or shut in time. Before, it gave up silently after 5 s.
+
+### Docs and tests
+
+- **§34 corrected:**
+  - the first wait;
+  - where a ")" closes;
+  - Future's old part;
+  - when the window's cache is let go;
+  - the example that was said to split newly but split before.
+- **Doc comments corrected:**
+  - a strike, which is no longer "another song was saved";
+  - the limit on a credit's pieces;
+  - `sort_key`'s doc, back on `sort_key`.
+- **New tests:**
+  - What counts as out of reach, and what an answer cut off is. That includes a real server on this computer that hangs up partway through an answer, with a 200 and with a 429.
+  - Which trouble is kept when two add-ons fail.
+  - Saving's waits:
+    - a wait does not double from one that ended long ago, or from one of the other kind;
+    - a run ends after a quiet spell;
+    - a song refused before is not failed at once after a restart;
+    - trouble that comes again with a 5 s ask waits 5, 10 and 20 s through the real path;
+    - a song saved from a copy leaves the wait and the run as they were.
+  - The lower bound of "at least a few seconds".
+  - Credits:
+    - "Drake (feat. Future; Newcomer)" and "Drake (feat. Future / Newcomer)";
+    - "Ada Vale, Ben Okoro, and Cy Marsh";
+    - doubled marks;
+    - names ending in "and" or "vs";
+    - "Lil Nas X and Jack Harlow";
+    - the lookup by exact name;
+    - "With others" past 510 longer names that only hold the artist's.
+  - A song fixed in Not found starts with no strikes.
+  - In the API, the out-of-reach test now proves the add-on out of reach was asked: the wait is in its words. Saying "online" while Stash already was leaves a wait out of reach in place.
+  - In the window, the credits cache:
+    - one ask for the credits shown together;
+    - asked again 5 s after a failure, with what was wanted meanwhile;
+    - an answer from before a library change let go;
+    - 4,500 credits all kept.
+
+### Checked
+
+- **All core tests passed (73 unit tests, plus every integration test). All stashd tests passed (18 unit tests, 32 API tests).**
+- **Clippy passed.**
+- **The window passed its check, its 57 unit tests and its build.**
