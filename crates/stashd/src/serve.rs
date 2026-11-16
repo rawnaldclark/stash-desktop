@@ -1663,12 +1663,29 @@ fn lists_route(state: &State, request: &mut Request, path: &str) -> Result<Optio
         .and_then(|(id, verb)| Some((id.parse::<i64>().ok()?, verb)));
     if !matches!(
         path,
-        "/api/tracks/like" | "/api/tracks/keep" | "/api/playlists"
+        "/api/tracks/like" | "/api/tracks/keep" | "/api/playlists" | "/api/playlists/preview"
     ) && playlist_verb.is_none()
     {
         return Ok(None);
     }
     let body = body_json(request)?;
+    let rules_in =
+        |body: &Value| stash_core::smart::Rules::read(body.get("rules").unwrap_or(&Value::Null));
+    // What rules would pick, for the editor: how many, and the first few. Nothing changes.
+    if path == "/api/playlists/preview" {
+        let rules = match rules_in(&body) {
+            Ok(rules) => rules,
+            Err(why) => return Ok(Some(refuse(400, &why))),
+        };
+        let library = state.library.lock().unwrap();
+        let now = now_ms();
+        let count = library.smart_count(&rules, now)?;
+        let rows = library.smart_tracks_at(&rules, 0, 5, now)?;
+        return Ok(Some(reply_json(
+            200,
+            json!({ "count": count, "rows": rows }),
+        )));
+    }
     let number = |name: &str| body.get(name).and_then(Value::as_u64).map(|n| n as usize);
     let mut library = state.library.lock().unwrap();
     let now = now_ms();
@@ -1710,12 +1727,30 @@ fn lists_route(state: &State, request: &mut Request, path: &str) -> Result<Optio
             })?;
             answer = json!({ "id": id });
         }
+        // A playlist; with rules, a smart one, which fills itself.
         ("/api/playlists", _) => {
             let name = body.get("name").and_then(Value::as_str).unwrap_or_default();
-            answer = json!({ "id": library.create_playlist(name, now)? });
+            let id = match body.get("rules").filter(|r| !r.is_null()) {
+                Some(_) => match rules_in(&body) {
+                    Ok(rules) => library.create_smart_playlist(name, &rules, now)?,
+                    Err(why) => return Ok(Some(refuse(400, &why))),
+                },
+                None => library.create_playlist(name, now)?,
+            };
+            answer = json!({ "id": id });
         }
         (_, Some((id, verb))) => {
+            if matches!(verb, "add" | "remove" | "move") && library.smart_rules(id)?.is_some() {
+                return Ok(Some(refuse(
+                    409,
+                    "a smart playlist fills itself: its songs are its rules'",
+                )));
+            }
             let done = match verb {
+                "rules" => match rules_in(&body) {
+                    Ok(rules) => library.set_smart_rules(id, &rules, now)?,
+                    Err(why) => return Ok(Some(refuse(400, &why))),
+                },
                 "rename" => library.rename_playlist(
                     id,
                     body.get("name").and_then(Value::as_str).unwrap_or_default(),

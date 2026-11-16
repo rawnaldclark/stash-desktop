@@ -2744,3 +2744,112 @@ fn a_song_played_from_an_add_on_is_kept_and_plays_again_without_it() {
     assert!(!copy.exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn smart_playlists_fill_themselves_and_are_not_edited_by_hand() {
+    let dir = std::env::temp_dir().join(format!("stash-api-smart-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let core = Core::bind(Options {
+        db: dir.join("library.db"),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: None,
+        mpv: None,
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    let song = |title: &str, artist: &str| json!({ "title": title, "artist": artist, "durationMs": 200_000 });
+    let file = json!({
+        "kind": "stash-web-library", "v": 1, "generator": "a test",
+        "likes": [
+            { "item": song("Quiet Rooms", "The Lanterns"), "likedAt": 1_759_838_400_300i64 },
+            { "item": song("Afterglow", "Beyoncé"), "likedAt": 1_759_838_400_200i64 },
+            { "item": song("Paper Boats", "The Lanterns"), "likedAt": 1_759_838_400_100i64 }
+        ]
+    })
+    .to_string();
+    assert_eq!(client.upload("/api/import", file.as_bytes()).0, 200);
+    let titles = |answer: &Value| -> Vec<String> {
+        answer["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["title"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // Made with rules: listed with them, and as many songs as they pick.
+    let made = client.post(
+        "/api/playlists",
+        json!({ "name": "Lanterns", "rules": { "rules": [{ "field": "artist", "op": "contains", "value": "lanterns" }], "order": "title" } }),
+    );
+    let smart = made["id"].as_i64().unwrap();
+    let listed = made["playlists"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == smart)
+        .unwrap()
+        .clone();
+    assert_eq!(listed["tracks"], 2, "{listed}");
+    assert_eq!(listed["rules"]["order"], "title", "{listed}");
+    assert_eq!(
+        titles(&client.get(&format!("/api/playlists/{smart}/tracks")).1),
+        ["Paper Boats", "Quiet Rooms"]
+    );
+
+    // Its songs are its rules': none are added, removed or moved by hand.
+    let afterglow = client.get("/api/search?q=afterglow&limit=1").1["rows"][0]["id"].clone();
+    for (verb, body) in [
+        ("add", json!({ "ids": [afterglow] })),
+        ("remove", json!({ "index": 0 })),
+        ("move", json!({ "from": 0, "to": 1 })),
+    ] {
+        let (status, said) = client.send(&format!("/api/playlists/{smart}/{verb}"), body);
+        assert_eq!(status, 409, "{verb}: {said}");
+    }
+
+    // The editor's preview: how many, and the first few; rules that make no sense are refused in words.
+    let preview = client.post(
+        "/api/playlists/preview",
+        json!({ "rules": { "rules": [{ "field": "artist", "op": "contains", "value": "beyonce" }] } }),
+    );
+    assert_eq!(
+        (preview["count"].as_u64(), titles(&preview)),
+        (Some(1), vec!["Afterglow".to_string()])
+    );
+    let (status, said) = client.send(
+        "/api/playlists/preview",
+        json!({ "rules": { "rules": [{ "field": "artist", "op": "at_least", "value": 3 }] } }),
+    );
+    assert_eq!(status, 400, "{said}");
+    assert!(said.to_string().contains("cannot be compared"), "{said}");
+
+    // New rules; a playlist made by hand takes none.
+    let changed = client.post(
+        &format!("/api/playlists/{smart}/rules"),
+        json!({ "rules": { "rules": [{ "field": "liked", "op": "is" }], "order": "title" } }),
+    );
+    assert_eq!(changed["done"], true, "{changed}");
+    assert_eq!(
+        titles(&client.get(&format!("/api/playlists/{smart}/tracks")).1),
+        ["Afterglow", "Paper Boats", "Quiet Rooms"]
+    );
+    let plain = client.post("/api/playlists", json!({ "name": "By hand" }))["id"].clone();
+    let refused = client.post(
+        &format!("/api/playlists/{plain}/rules"),
+        json!({ "rules": { "rules": [] } }),
+    );
+    assert_eq!(refused["done"], false, "{refused}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
