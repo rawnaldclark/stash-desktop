@@ -268,6 +268,22 @@ impl Library {
         Ok(queued)
     }
 
+    /// Takes songs off the list that are still waiting to be saved (the one coming in is let finish: what it cost is
+    /// spent). Answers how many were taken off.
+    pub fn unask_downloads(&mut self, ids: &[i64]) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let mut dropped = 0;
+        {
+            let mut drop =
+                tx.prepare("DELETE FROM downloads WHERE track_id = ?1 AND state = 'queued'")?;
+            for id in ids {
+                dropped += drop.execute([id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(dropped)
+    }
+
     /// Keeps playlist `id` on this computer, or stops. False when there is no such playlist.
     pub fn set_playlist_download(&mut self, id: i64, on: bool) -> Result<bool> {
         Ok(self.conn.execute(

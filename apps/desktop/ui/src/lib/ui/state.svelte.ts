@@ -3,7 +3,7 @@
  * Components read `S.v` (PlayerState), `L.likes` etc.; they never touch audio or storage.
  */
 import { fromStore, get } from 'svelte/store';
-import { library, offline as offlineStore, player, sources as sourcesApi } from '../app';
+import { library, likedKept as likedKeptStore, offline as offlineStore, player, sources as sourcesApi } from '../app';
 import { LIB_REF, songIndex } from '../identity';
 import type { Counts, Descriptor, HistoryEntry, LibraryItem, Playlist, SourceStatus } from '../api';
 import type { PlayerState } from '../api';
@@ -43,6 +43,7 @@ const loaded = fromStore<boolean>(library.loaded);
 const changed = fromStore<number>(library.changed);
 const sources = fromStore<SourceStatus[]>(sourcesApi.status);
 const offlineNow = fromStore<boolean>(offlineStore);
+const likedKeptNow = fromStore<boolean>(likedKeptStore);
 
 class Lib {
 	get likes() {
@@ -50,6 +51,10 @@ class Lib {
 	}
 	get playlists() {
 		return playlists.current;
+	}
+	/** The liked songs are kept on this computer. */
+	get likedKept() {
+		return likedKeptNow.current;
 	}
 	get history() {
 		return history.current;

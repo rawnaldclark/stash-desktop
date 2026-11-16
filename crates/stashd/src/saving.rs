@@ -306,7 +306,8 @@ fn remove_saved(file: &Path, root: &Path) {
 /// A list kept on this computer (`/api/liked/download`, `/api/playlists/{id}/download`). GET: whether it is, and how
 /// far (its songs, how many play with no connection, how many wait to be saved, how many could not be). POST `{on}`:
 /// keeps it or stops; kept, its songs are put on the list at once, and songs that come onto it later are saved too.
-/// Stopping saves no more of it: songs saved stay on this computer (Library › Downloads takes them off).
+/// Stopping saves no more of it: its songs still waiting are taken off the list (unless another list kept on this
+/// computer holds them), and songs saved stay on this computer (Library › Downloads takes them off).
 pub(crate) fn kept_route(
     state: &State,
     request: &mut Request,
@@ -367,9 +368,15 @@ pub(crate) fn kept_route(
                     library.set_playlist_download(id, on)?;
                 }
             }
+            let songs = ids(&library)?;
             if on {
-                let songs = ids(&library)?;
                 library.ask_new_downloads(&songs, now_ms())?;
+            } else {
+                let still: std::collections::HashSet<i64> =
+                    library.kept_downloaded_ids()?.into_iter().collect();
+                let waiting: Vec<i64> =
+                    songs.into_iter().filter(|id| !still.contains(id)).collect();
+                library.unask_downloads(&waiting)?;
             }
             on
         }

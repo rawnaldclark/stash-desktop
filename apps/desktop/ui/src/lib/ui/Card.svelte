@@ -19,7 +19,8 @@
 		label,
 		song,
 		menu,
-		ini
+		ini,
+		kept = false
 	}: {
 		title: string;
 		sub?: string;
@@ -35,6 +36,8 @@
 		menu?: SongMenuArgs;
 		/** initials for the placeholder when there is no picture */
 		ini?: string;
+		/** a list kept on this computer: a mark before the line under the title */
+		kept?: boolean;
 	} = $props();
 
 	const args = $derived<SongMenuArgs>(menu ?? (song ? { item: song } : null));
@@ -47,7 +50,7 @@
 		<Cover {artwork} seed={title} min={240} class="cv" {ini} />
 	{/if}
 	<b>{title}</b>
-	{#if sub}<i>{sub}</i>{/if}
+	{#if sub || kept}<i>{#if kept}<Icon name="download" class="kept-mk" label="On this computer" />{/if}{sub ?? ''}</i>{/if}
 {/snippet}
 
 {#if href && args}

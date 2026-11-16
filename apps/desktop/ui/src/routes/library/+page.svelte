@@ -158,7 +158,7 @@
 				<button type="button" class="card card-new" onclick={() => (ui.smart = { id: null })} aria-label="New smart playlist"><span class="tile new-tile"><Icon name="queue_music" /></span><b>New smart playlist</b></button>
 			{/if}
 			{#each playlists as p (p.id)}
-				<Card title={p.name} sub={p.rules ? `Smart · ${songs(p.items.length)}` : p.followed ? `Mix · ${songs(p.items.length)}` : songs(p.items.length)} items={p.items} href="/playlist/{p.id}" />
+				<Card title={p.name} sub={p.rules ? `Smart · ${songs(p.items.length)}` : p.followed ? `Mix · ${songs(p.items.length)}` : songs(p.items.length)} items={p.items} href="/playlist/{p.id}" kept={p.download} />
 			{/each}
 		</div>
 		{#if needle && !playlists.length}<p class="s-hint">No playlist matches “{q.trim()}”.</p>{/if}

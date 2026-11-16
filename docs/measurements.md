@@ -601,7 +601,9 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 
   The kept lists are looked at whenever the likes or the playlists change, and every 30 seconds while nothing is being saved. Next to the switch, the list says how far it is: "Saving: 3 of 40 on this computer", "On this computer", and how many could not be saved.
 - **A song that could not be saved is not tried again on its own.** Each try may spend an add-on's allowance. The listener can ask for it again in Library › Downloads.
-- **Turning the switch off saves no more of the list.** Songs already saved stay; Library › Downloads takes them off. Offline, nothing is fetched and the list waits.
+- **Turning the switch off saves no more of the list.** Its songs still waiting are taken off the list, unless another kept list holds them; the one coming in finishes, since what it cost is spent. Songs already saved stay; Library › Downloads takes them off. Offline, nothing is fetched and the list waits.
+- **A kept list is marked** with a small arrow in the sidebar and on its card (Library and Home).
+- **A song that already plays from a copy kept from playing it** is saved from that copy, and no add-on is asked (as before for any save).
 - **Schema 15** adds `playlists.download`. The liked songs' choice is the setting `download.liked`.
 
 ### Checked
@@ -613,14 +615,15 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
   - A song the add-on had lost could not be saved. It was said so, and was not put back on the list when the playlist was kept again.
   - Turned off, a song added later was not saved, and the songs saved stayed.
   - A switch with no true or false, and a playlist that does not exist, were refused.
+- **By the tests:** `letting_a_list_go_takes_its_waiting_songs_off_the_list`, with every add-on answer held back 0.7 s. A playlist of four songs was kept, and its last song was liked with the liked songs kept too. Turned off while the first song came in, the answer showed two waiting (the one coming in and the liked one). The first and the liked song were saved; the other two were taken off the list and did not come back when the kept lists were looked at again.
 - **On the built page served by the core, light and dark.** This used a new scratch library and an add-on on this computer serving four made-up songs, with each answer held back 0.7 s.
   - The playlist's switch said "Saving: 0 of 3 on this computer", then "On this computer".
   - A song added to the playlist showed "Saving: 3 of 4 on this computer", then "On this computer".
   - Liked songs, kept, showed "On this computer".
-  - Turned off, the playlist said "Trip is no longer kept on this computer. Songs saved stay (Library › Downloads)", and the four files saved were still there.
+  - The sidebar showed the mark on Liked songs and Trip, and the Library's cards on Trip.
+  - Turned off, the playlist said "Trip is no longer kept on this computer. Songs saved stay (Library › Downloads)", its mark left the sidebar, and the four files saved were still there.
   - No errors in the page.
 
 ### Not covered yet
 
-- The library's cards and the sidebar do not mark which lists are kept.
-- Turning the switch off does not take back songs still waiting to be saved: they still come.
+- A song kept for one list and also saved by hand is taken off the list with that list if it is still waiting.

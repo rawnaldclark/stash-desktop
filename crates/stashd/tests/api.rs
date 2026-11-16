@@ -4143,3 +4143,110 @@ fn a_list_kept_on_this_computer_saves_its_songs_and_those_that_come_later() {
     assert_eq!(client.get("/api/playlists/999999/download").0, 404);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn letting_a_list_go_takes_its_waiting_songs_off_the_list() {
+    let dir = std::env::temp_dir().join(format!("stash-api-let-go-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (served, saved) = (dir.join("Served"), dir.join("Saved"));
+    std::fs::create_dir_all(&served).unwrap();
+    for name in ["alpha", "bravo", "charlie", "delta"] {
+        silence(&served.join(format!("{name}.wav")));
+    }
+    // Every answer held back, so songs wait their turn while one comes in.
+    let addon = DemoAddon::bind(&served, 0, Duration::from_millis(700)).unwrap();
+    let link = addon.link();
+    std::thread::spawn(move || addon.run());
+    let core = Core::bind(Options {
+        db: dir.join("library.db"),
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: None,
+        mpv: None,
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    client.post(
+        "/api/downloads/folder",
+        json!({ "folder": saved.to_string_lossy() }),
+    );
+    client.post("/api/addons", json!({ "link": link }));
+    let keep = |title: &str| -> i64 {
+        let (_, found) = client.get(&format!(
+            "/api/addons/search?q={title}&addon=demo.folder&limit=1"
+        ));
+        let track = found["groups"][0]["tracks"][0].clone();
+        client.post(
+            "/api/tracks/keep",
+            json!({ "addon": "demo.folder", "track": track }),
+        )["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let [alpha, bravo, charlie, delta] = ["alpha", "bravo", "charlie", "delta"].map(keep);
+    let slow = client.post("/api/playlists", json!({ "name": "Slow" }))["id"]
+        .as_i64()
+        .unwrap();
+    client.post(
+        &format!("/api/playlists/{slow}/add"),
+        json!({ "ids": [alpha, bravo, charlie, delta] }),
+    );
+    let slow_kept = format!("/api/playlists/{slow}/download");
+
+    // Kept: the first song comes in, the rest wait. The last is liked, and the liked songs are kept too.
+    assert_eq!(client.post(&slow_kept, json!({ "on": true }))["waiting"], 4);
+    client.post("/api/tracks/like", json!({ "id": delta, "liked": true }));
+    client.post("/api/liked/download", json!({ "on": true }));
+    // Let go: the one coming in finishes, the liked one still waits its turn, and the other two are taken off.
+    let off = client.post(&slow_kept, json!({ "on": false }));
+    assert_eq!(
+        (&off["on"], &off["waiting"]),
+        (&json!(false), &json!(2)),
+        "{off}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let (_, list) = client.get("/api/downloads");
+        if list["counts"]["queued"] == 0 && list["counts"]["saving"] == 0 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "still saving: {list}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Looked at again (as after any change), the kept lists do not put them back.
+    client.post("/api/tracks/like", json!({ "id": alpha, "liked": true }));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        client.get(&slow_kept).1,
+        json!({ "on": false, "songs": 4, "here": 2, "waiting": 0, "failed": 0 })
+    );
+    let (_, list) = client.get("/api/downloads");
+    let mut states: Vec<(i64, String)> = list["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["id"].as_i64().unwrap(),
+                r["state"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    states.sort();
+    assert_eq!(
+        states,
+        vec![(alpha, "saved".to_string()), (delta, "saved".to_string())],
+        "{list}"
+    );
+    let _ = (bravo, charlie);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -58,7 +58,7 @@
 			<div class="shelf-w" use:shelf>
 				<div class="shelf">
 					{#each L.playlists.slice(0, 8) as p (p.id)}
-						<Card title={p.name} sub={songs(p.items.length)} items={p.items} href="/playlist/{p.id}" />
+						<Card title={p.name} sub={songs(p.items.length)} items={p.items} href="/playlist/{p.id}" kept={p.download} />
 					{/each}
 				</div>
 			</div>

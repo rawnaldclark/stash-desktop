@@ -26,11 +26,11 @@
 	<div class="sb-sec"><span class="caps">Your library</span></div>
 	<nav class="sb-list" aria-label="Playlists">
 		<a class="sb-rec" class:on={page.url.pathname === '/library' && page.url.searchParams.get('tab') === 'likes'} href="/library?tab=likes" title="Liked songs">
-			<Tile liked /><span class="sb-t"><b>Liked songs</b><i>{songs(L.likes.length)}</i></span>
+			<Tile liked /><span class="sb-t"><b>Liked songs</b><i>{#if L.likedKept}<Icon name="download" class="kept-mk" label="On this computer" />{/if}{songs(L.likes.length)}</i></span>
 		</a>
 		{#each L.playlists as p (p.id)}
 			<a class="sb-rec" class:on={page.url.pathname === `/playlist/${p.id}`} href="/playlist/{p.id}" title={p.name}>
-				<Tile items={p.items} seed={p.name} /><span class="sb-t"><b>{p.name}</b><i>{p.rules ? 'Smart playlist' : p.followed ? 'Mix' : 'Playlist'} · {songs(p.items.length)}</i></span>
+				<Tile items={p.items} seed={p.name} /><span class="sb-t"><b>{p.name}</b><i>{#if p.download}<Icon name="download" class="kept-mk" label="On this computer" />{/if}{p.rules ? 'Smart playlist' : p.followed ? 'Mix' : 'Playlist'} · {songs(p.items.length)}</i></span>
 			</a>
 		{/each}
 	</nav>

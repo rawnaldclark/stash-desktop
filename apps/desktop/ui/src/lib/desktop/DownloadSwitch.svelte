@@ -3,6 +3,7 @@
      songs saved stay (Library › Downloads takes them off). -->
 <script lang="ts">
 	import { onDestroy } from 'svelte';
+	import { likedKept } from '../app';
 	import * as core from '../core';
 	import Icon from '../ui/Icon.svelte';
 	import { ui } from '../ui/state.svelte';
@@ -12,30 +13,46 @@
 	let kept = $state<core.ListDownload | null>(null);
 	let busy = $state(false);
 	let timer: ReturnType<typeof setTimeout> | undefined;
+	let gone = false;
+	/** Which read is the latest: an answer to an older one (another list's, if the page moved on) is let go. */
+	let asked = 0;
 
 	async function read() {
 		clearTimeout(timer);
+		const mine = ++asked;
+		const of = list;
+		let now: core.ListDownload;
 		try {
-			kept = await core.listDownload(list);
+			now = await core.listDownload(of);
 		} catch {
 			return;
 		}
+		if (gone || mine !== asked) return;
+		kept = now;
+		if (of === 'liked') likedKept.set(now.on);
 		// While songs are coming in, how far is read again now and then.
-		if (kept.on && kept.waiting > 0) timer = setTimeout(() => void read(), 2000);
+		if (now.on && now.waiting > 0) timer = setTimeout(() => void read(), 2000);
 	}
 	$effect(() => {
 		void list;
 		void count;
 		void read();
 	});
-	onDestroy(() => clearTimeout(timer));
+	onDestroy(() => {
+		gone = true;
+		clearTimeout(timer);
+	});
 
 	async function flip() {
 		if (!kept || busy) return;
 		busy = true;
 		try {
 			const on = !kept.on;
-			kept = await core.setListDownload(list, on);
+			const of = list;
+			const now = await core.setListDownload(of, on);
+			if (of === 'liked') likedKept.set(now.on);
+			if (gone || of !== list) return;
+			kept = now;
 			ui.toast(on ? `${name} is kept on this computer: its songs are being saved, and songs added later will be too` : `${name} is no longer kept on this computer. Songs saved stay (Library › Downloads)`);
 			void read();
 		} catch (e) {

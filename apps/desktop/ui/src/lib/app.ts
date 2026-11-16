@@ -109,6 +109,17 @@ export async function goOffline(on: boolean): Promise<void> {
 	offline.set(await core.setOffline(on));
 }
 
+/** The liked songs are kept on this computer (a playlist says so itself, as `download`). */
+export const likedKept = writable(false);
+/** Reads whether the liked songs are kept on this computer. */
+export async function readLikedKept(): Promise<void> {
+	try {
+		likedKept.set((await core.listDownload('liked')).on);
+	} catch {
+		/* the core is not answering: as it was */
+	}
+}
+
 type Queued = Pick<core.QueueRow, 'id' | 'title' | 'artist' | 'album' | 'art' | 'duration_ms' | 'addon' | 'qid' | 'here'>;
 
 /** A song as the player or the queue names it. */
@@ -466,7 +477,7 @@ function caughtUp(now: number | undefined): void {
 	if (now === edits || rereading) return;
 	edits = now;
 	rereading = true;
-	void Promise.all([core.counts().then((c) => counts.set(c)), loadLikes(), core.playlists().then((rows) => syncPlaylists(rows))])
+	void Promise.all([core.counts().then((c) => counts.set(c)), loadLikes(), core.playlists().then((rows) => syncPlaylists(rows)), readLikedKept()])
 		.catch(() => {})
 		.finally(() => (rereading = false));
 }
