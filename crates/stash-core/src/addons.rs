@@ -9,6 +9,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use crate::reach::{self, Reach};
+
 /// The longest URL an add-on may name.
 const URL_CAP: usize = 16_384;
 /// The largest answer read from an add-on's API (not its media).
@@ -96,6 +98,10 @@ pub struct Manifest {
     /// An Eclipse add-on that says its songs are not to be saved (`allowDownloads` set to nothing).
     #[serde(default)]
     pub no_downloads: bool,
+    /// Where the add-on's link is, noted by the host when it was added: as near as the add-on may send Stash (see
+    /// [`crate::reach`]). None for one added before this was noted.
+    #[serde(default)]
+    pub reach: Option<Reach>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -285,7 +291,7 @@ impl AddonError {
         }
     }
 
-    pub(crate) fn host(code: Code, message: impl Into<String>) -> Self {
+    pub fn host(code: Code, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -313,6 +319,8 @@ pub struct Addon {
     pub manifest: Manifest,
     link: String,
     base: String,
+    /// As near as it may send Stash: every connection made for it, and every address it names, is held to this.
+    reach: Reach,
     agent: ureq::Agent,
 }
 
@@ -321,11 +329,13 @@ impl Addon {
     ///
     /// The link must be https (plain http only on this computer, for development), and the manifest must be a v1
     /// server add-on with a well-formed id. Redirects are not followed: an add-on is the origin its link names.
+    /// Where the link is (the internet, the listener's network, this computer) is noted now, and holds from then
+    /// on: the add-on may send Stash no nearer.
     pub fn from_link(link: &str) -> Result<Self> {
         let (url, base) = base_of(link)?;
-        let agent = agent();
-        let given: serde_json::Value = get_json(&agent, url.as_str())?;
-        let manifest = match given.get("stash").map(|v| v.as_u64()) {
+        let (fetcher, seen) = reach::Guarded::noting(config());
+        let given: serde_json::Value = get_json(&fetcher, url.as_str())?;
+        let mut manifest = match given.get("stash").map(|v| v.as_u64()) {
             Some(Some(1)) => {
                 let mut manifest: Manifest = serde_json::from_value(given).map_err(|e| {
                     AddonError::invalid(format!("the manifest is not what the contract says: {e}"))
@@ -357,11 +367,15 @@ impl Addon {
             }
         };
         check_manifest(&manifest)?;
+        // Where its manifest came from (the farthest of the addresses its name gave).
+        let reach = seen.farthest().unwrap_or(Reach::Internet);
+        manifest.reach = Some(reach);
         Ok(Self {
             manifest,
             link: url.into(),
             base,
-            agent,
+            reach,
+            agent: agent(reach),
         })
     }
 
@@ -373,12 +387,37 @@ impl Addon {
             AddonError::invalid(format!("the manifest that was kept cannot be read: {e}"))
         })?;
         check_manifest(&manifest)?;
+        // One added before where it is was noted: by its address, or its name's form, alone.
+        let reach = manifest
+            .reach
+            .unwrap_or_else(|| Reach::of_link_as_written(&url));
         Ok(Self {
             manifest,
             link: url.into(),
             base,
-            agent: agent(),
+            reach,
+            agent: agent(reach),
         })
+    }
+
+    /// Where its link is: as near as it may send Stash.
+    pub fn reach(&self) -> Reach {
+        self.reach
+    }
+
+    /// `url`, an address the add-on named, if the add-on may send Stash there by what is written in it.
+    fn within_reach(&self, url: &str) -> Result<()> {
+        let url = Url::parse(url).map_err(|e| AddonError::invalid(e.to_string()))?;
+        reach::as_written(&url, self.reach)
+            .map_err(|refused| AddonError::host(Code::Refused, refused.to_string()))
+    }
+
+    /// `track` without the covers whose address names a place the add-on may not send Stash.
+    fn screened(&self, mut track: Track) -> Track {
+        track.artwork.retain(|a| {
+            Url::parse(&a.url).is_ok_and(|u| reach::as_written(&u, self.reach).is_ok())
+        });
+        track
     }
 
     /// The address of the manifest. It can carry the listener's own key: keep it, do not show it.
@@ -415,6 +454,12 @@ impl Addon {
     /// A file to keep of one of its tracks (contract section 4.5): one progressive file, the best it has within
     /// `want`'s tiers. An Eclipse add-on is asked for its stream, which is the whole file.
     pub fn download(&self, id: &str, want: &StreamRequest) -> Result<StreamInfo> {
+        let info = self.download_as_given(id, want)?;
+        self.within_reach(&info.url)?;
+        Ok(info)
+    }
+
+    fn download_as_given(&self, id: &str, want: &StreamRequest) -> Result<StreamInfo> {
         let want = StreamRequest {
             deliveries: vec![Delivery::None],
             ..want.clone()
@@ -457,6 +502,11 @@ impl Addon {
 
     /// Tracks matching `query`, at most `limit` (1 to 200).
     pub fn search(&self, query: &str, limit: u32) -> Result<Vec<Track>> {
+        let found = self.search_as_given(query, limit)?;
+        Ok(found.into_iter().map(|t| self.screened(t)).collect())
+    }
+
+    fn search_as_given(&self, query: &str, limit: u32) -> Result<Vec<Track>> {
         self.offers("search")?;
         let mut url = Url::parse(&format!("{}/search", self.base))
             .map_err(|e| AddonError::invalid(e.to_string()))?;
@@ -522,6 +572,11 @@ impl Addon {
     /// can: a track whose length is off by more than 8 s or 3 % is refused, and so is one the add-on says it cannot
     /// give at `min_tier`.
     pub fn resolve(&self, wanted: &Wanted, min_tier: Option<Tier>) -> Result<Option<Track>> {
+        let found = self.resolve_as_given(wanted, min_tier)?;
+        Ok(found.map(|t| self.screened(t)))
+    }
+
+    fn resolve_as_given(&self, wanted: &Wanted, min_tier: Option<Tier>) -> Result<Option<Track>> {
         self.offers("resolve")?;
         if self.manifest.dialect == Dialect::Eclipse {
             return self.eclipse_resolve(wanted);
@@ -622,6 +677,12 @@ impl Addon {
     /// the asked range, a delivery that was not asked for, an encrypted stream, a URL that is not https, or a tier
     /// its own codec contradicts are all refused as [`Code::InvalidResponse`].
     pub fn stream(&self, id: &str, want: &StreamRequest) -> Result<StreamInfo> {
+        let info = self.stream_as_given(id, want)?;
+        self.within_reach(&info.url)?;
+        Ok(info)
+    }
+
+    fn stream_as_given(&self, id: &str, want: &StreamRequest) -> Result<StreamInfo> {
         self.offers("stream")?;
         let mut url = Url::parse(&format!("{}/stream/", self.base))
             .map_err(|e| AddonError::invalid(e.to_string()))?;
@@ -718,8 +779,13 @@ fn base_of(link: &str) -> Result<(Url, String)> {
     }
 }
 
-fn agent() -> ureq::Agent {
-    let config = ureq::Agent::config_builder()
+/// The agent for an add-on of `reach`: every connection it makes is held to that (see [`crate::reach::Guarded`]).
+fn agent(reach: Reach) -> ureq::Agent {
+    reach::Guarded::agent(reach, config())
+}
+
+fn config() -> ureq::config::Config {
+    ureq::Agent::config_builder()
         .timeout_global(Some(TIMEOUT))
         // Within the whole wait, so a name that is not found or a connection that is not made in time is told apart
         // from an add-on that is slow to answer (see `unanswered`).
@@ -728,12 +794,7 @@ fn agent() -> ureq::Agent {
         .max_redirects(0)
         .http_status_as_error(false)
         .user_agent(concat!("Stash-desktop/", env!("CARGO_PKG_VERSION")))
-        .build();
-    ureq::Agent::with_parts(
-        config,
-        ureq::unversioned::transport::DefaultConnector::default(),
-        Lookup::default(),
-    )
+        .build()
 }
 
 /// A URL an add-on (or the listener's link) names: https, or http on this computer only; no credentials in it.
@@ -862,6 +923,10 @@ struct ErrorDetail {
 /// answered).
 fn unanswered(e: ureq::Error) -> AddonError {
     use std::io::ErrorKind;
+    // An address nearer than the add-on may send Stash: refused before anything was sent.
+    if let Some(words) = reach::refusal(&e) {
+        return AddonError::host(Code::Refused, words);
+    }
     match e {
         ureq::Error::HostNotFound
         | ureq::Error::ConnectionFailed
@@ -870,7 +935,7 @@ fn unanswered(e: ureq::Error) -> AddonError {
             AddonError::host(Code::Network, e.to_string())
         }
         // Connecting failed: nothing listens there, or there is no way to it. (A name that could not be looked up
-        // comes as `HostNotFound`: see [`Lookup`].)
+        // comes as `HostNotFound`: see [`crate::reach::Guarded`].)
         ureq::Error::Io(ref io)
             if matches!(
                 io.kind(),
@@ -908,25 +973,6 @@ fn unread(e: ureq::Error) -> AddonError {
             Code::Unavailable,
             format!("the answer stopped coming in: {other}"),
         ),
-    }
-}
-
-/// Looks names up as ureq does, and says so when a name could not be looked up: the system says that with an error of
-/// no kind of its own, which would read as any other trouble.
-#[derive(Debug, Default)]
-struct Lookup(ureq::unversioned::resolver::DefaultResolver);
-
-impl ureq::unversioned::resolver::Resolver for Lookup {
-    fn resolve(
-        &self,
-        uri: &ureq::http::Uri,
-        config: &ureq::config::Config,
-        timeout: ureq::unversioned::transport::NextTimeout,
-    ) -> std::result::Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
-        self.0.resolve(uri, config, timeout).map_err(|e| match e {
-            ureq::Error::Io(_) => ureq::Error::HostNotFound,
-            other => other,
-        })
     }
 }
 
@@ -1071,7 +1117,7 @@ mod tests {
             Code::Timeout
         );
         // A name that is not found, as the system says it (with no kind of its own), is out of reach too.
-        let lookup = agent()
+        let lookup = agent(Reach::Internet)
             .get("http://stash-test.invalid/manifest.json")
             .call()
             .map(|_| ())
@@ -1117,8 +1163,11 @@ mod tests {
                 let _ = line.write_all(head.as_bytes());
                 let _ = line.write_all(b"{\"tracks\": [");
             });
-            get_json::<serde_json::Value>(&agent(), &format!("http://127.0.0.1:{port}/search?q=x"))
-                .unwrap_err()
+            get_json::<serde_json::Value>(
+                &agent(Reach::Here),
+                &format!("http://127.0.0.1:{port}/search?q=x"),
+            )
+            .unwrap_err()
         };
         let broke =
             cut("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 400\r\n\r\n");
@@ -1209,5 +1258,61 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn an_add_on_names_nothing_nearer_than_where_it_is() {
+        let kept = |reach: Option<&str>| {
+            let note = reach
+                .map(|r| format!(r#","reach":"{r}""#))
+                .unwrap_or_default();
+            format!(
+                r#"{{"stash":1,"id":"example-lossless","name":"Example","version":"1.0.0","kind":"server","resources":["search","stream"]{note}}}"#
+            )
+        };
+        // Noted on the internet when it was added; its address now leads to this computer: nothing is sent there.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let link = format!("http://127.0.0.1:{port}/manifest.json");
+        let rebound = Addon::from_stored(&link, &kept(Some("internet"))).unwrap();
+        assert_eq!(rebound.reach(), Reach::Internet);
+        let refused = rebound.search("anything", 5).unwrap_err();
+        assert_eq!(refused.code, Code::Refused);
+        assert_eq!(
+            refused.in_words(),
+            "127.0.0.1 is on this computer, and an add-on on the internet may not send Stash there"
+        );
+        listener.set_nonblocking(true).unwrap();
+        assert!(listener.accept().is_err(), "nothing connected");
+
+        // What it names is held to that too: a stream on the listener's network is refused, and covers that are not on
+        // the internet are dropped.
+        assert_eq!(
+            rebound
+                .within_reach("https://192.168.0.1/a.flac")
+                .unwrap_err()
+                .in_words(),
+            "192.168.0.1 is on your network, and an add-on on the internet may not send Stash there"
+        );
+        assert!(
+            rebound
+                .within_reach("https://cdn.example.org/a.flac")
+                .is_ok()
+        );
+        let track: Track = serde_json::from_str(
+            r#"{"id":"1","title":"T","artist":"A","artwork":[{"url":"http://127.0.0.1:1/x.jpg"},{"url":"https://10.0.0.1/x.jpg"},{"url":"https://img.example.org/x.jpg"}]}"#,
+        )
+        .unwrap();
+        let screened = rebound.screened(track);
+        assert_eq!(screened.art(), Some("https://img.example.org/x.jpg"));
+        assert_eq!(screened.artwork.len(), 1);
+
+        // One kept from before where it is was noted: by its link as written.
+        let here = Addon::from_stored(&link, &kept(None)).unwrap();
+        assert_eq!(here.reach(), Reach::Here);
+        assert!(here.within_reach("https://192.168.0.1/a.flac").is_ok());
+        let named =
+            Addon::from_stored("https://addon.example.org/manifest.json", &kept(None)).unwrap();
+        assert_eq!(named.reach(), Reach::Internet);
     }
 }

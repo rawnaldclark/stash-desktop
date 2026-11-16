@@ -336,6 +336,8 @@ export type AddonInfo = {
 	description: string | null;
 	/** The server it is on. */
 	host: string | null;
+	/** Where it is, noted when it was added: it may send Stash no nearer. Null when it cannot be used. */
+	reach: 'internet' | 'home' | 'here' | null;
 	resources: string[];
 	enabled: boolean;
 	/** Why it cannot be used, when it cannot. */

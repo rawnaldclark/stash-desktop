@@ -27,6 +27,7 @@ use stash_core::Library;
 use stash_core::downloads;
 use stash_core::played::{self, PlayedCopy};
 use stash_core::player::Located;
+use stash_core::reach::{self, Reach};
 use tiny_http::{Header, Method, Request, Response, StatusCode};
 
 use crate::serve::{Reply, State, body_json, now_ms, reply_json};
@@ -64,6 +65,11 @@ pub(crate) struct Relays {
 struct Link {
     url: String,
     id: i64,
+    /// A song of the library, of which a copy may be kept (one an add-on found that is not in the library is relayed
+    /// and never kept).
+    keep: bool,
+    /// As near as the add-on that named it may send Stash: every connection for it is held to this, redirects too.
+    reach: Reach,
     tier: Option<String>,
     addon: Option<String>,
     at: Instant,
@@ -162,8 +168,16 @@ impl Relays {
         Ok(())
     }
 
-    /// The address the engine is given for `located`, the stream of the song `id`: the relay's, on this computer.
-    pub(crate) fn link(&self, port: u16, id: i64, located: Located) -> Located {
+    /// The address the engine is given for `located`, the stream of the library's song `song` (none for a song an
+    /// add-on found that is not in the library), named by an add-on of `reach`: the relay's, on this computer.
+    pub(crate) fn link(
+        &self,
+        port: u16,
+        song: Option<i64>,
+        located: Located,
+        reach: Reach,
+    ) -> Located {
+        let id = song.unwrap_or(0);
         // Hard to guess (the hasher's keys are random for each run), and never the same twice.
         let token = {
             let mut hasher = self.keys.build_hasher();
@@ -190,6 +204,8 @@ impl Relays {
             Arc::new(Link {
                 url: located.locator,
                 id,
+                keep: song.is_some(),
+                reach,
                 tier: located.tier.clone(),
                 addon: located.addon.clone(),
                 at: Instant::now(),
@@ -244,7 +260,7 @@ impl Relays {
             .iter()
             .find(|h| h.field.equiv("Range"))
             .map(|h| h.value.as_str().to_string());
-        let upstream = match downloads::open_stream(&link.url, range.as_deref()) {
+        let upstream = match downloads::open_stream(&link.url, link.reach, range.as_deref()) {
             Ok(upstream) => upstream,
             Err(trouble) => {
                 let why = match trouble {
@@ -269,6 +285,14 @@ impl Relays {
             .trim()
             .to_ascii_lowercase();
         if PLAYLISTS.contains(&kind.as_str()) {
+            // The engine fetches it and its pieces by itself: its address is looked up first.
+            let near = url::Url::parse(&link.url)
+                .map_err(|e| e.to_string())
+                .and_then(|url| reach::looked_up(&url, link.reach).map_err(|r| r.to_string()));
+            if let Err(why) = near {
+                let _ = request.respond(plain(502, &why));
+                return;
+            }
             if let Ok(to) = Header::from_bytes(&b"Location"[..], link.url.as_bytes()) {
                 let _ = request.respond(Response::empty(StatusCode(302)).with_header(to));
             } else {
@@ -312,7 +336,8 @@ impl Relays {
                     start == 0 && total == Some(end) && upstream.length.is_none_or(|n| n == end)
                 }));
         let cap = library.lock().unwrap().played_cap_bytes().unwrap_or(0);
-        let copying = from_start
+        let copying = link.keep
+            && from_start
             && whole
             && !upstream.encoded
             && cap > 0
@@ -322,6 +347,7 @@ impl Relays {
         let status = StatusCode(upstream.status);
         let body = Resume {
             url: link.url.clone(),
+            reach: link.reach,
             body: upstream.body,
             at,
             end,
@@ -383,6 +409,7 @@ fn span(range: &str) -> Option<(u64, u64, Option<u64>)> {
 /// times, so the engine reading through the relay is not told of it. Only a stream whose end is known can be.
 struct Resume {
     url: String,
+    reach: Reach,
     body: Box<dyn Read + Send>,
     /// Where the stream is in the whole of it.
     at: u64,
@@ -402,7 +429,7 @@ impl Resume {
         self.tries += 1;
         std::thread::sleep(Duration::from_millis(400 * u64::from(self.tries)));
         let asked = format!("bytes={}-{}", self.at, end - 1);
-        match downloads::open_stream(&self.url, Some(&asked)) {
+        match downloads::open_stream(&self.url, self.reach, Some(&asked)) {
             Ok(upstream)
                 if upstream.status == 206
                     && !upstream.encoded
@@ -675,6 +702,7 @@ mod tests {
             }
         });
         let mut stream = Resume {
+            reach: Reach::Here,
             url: format!("http://127.0.0.1:{port}/song"),
             body: Box::new(Breaks(data[..40_000].to_vec())),
             at: 0,
@@ -697,6 +725,7 @@ mod tests {
         // Its end is known and it stops short: an error, never an end. (The address cannot be reached, so it is not
         // picked up.)
         let mut stream = Resume {
+            reach: Reach::Here,
             url: "https://127.0.0.1:9/never".into(),
             body: Box::new(Breaks(vec![1, 2, 3])),
             at: 0,
@@ -710,6 +739,7 @@ mod tests {
 
         // A body that ends quietly before its known end is an error too.
         let mut short = Resume {
+            reach: Reach::Here,
             url: "https://127.0.0.1:9/never".into(),
             body: Box::new(&[1u8, 2][..]),
             at: 0,

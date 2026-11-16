@@ -195,12 +195,15 @@ impl Loaded {
         let host = Url::parse(&self.stored.link)
             .ok()
             .and_then(|u| u.host_str().map(str::to_string));
+        // Where it is: as near as it may send Stash.
+        let reach = self.addon.as_ref().ok().map(|a| a.reach());
         json!({
             "id": self.stored.id,
             "name": text("name").unwrap_or_else(|| self.stored.id.clone()),
             "version": text("version"),
             "description": text("description"),
             "host": host,
+            "reach": reach,
             "resources": kept.get("resources").cloned().unwrap_or_else(|| json!([])),
             "enabled": self.stored.enabled,
             "problem": self.addon.as_ref().err(),
@@ -223,15 +226,39 @@ fn load_addons(library: &Library) -> Result<Vec<Arc<Loaded>>> {
         .collect())
 }
 
-/// Where one add-on's track plays from.
-fn stream_from(addon: &Addon, id: &str, track: &str) -> std::result::Result<Located, AddonError> {
-    addon
-        .stream(track, &StreamRequest::default())
-        .map(|info| Located {
+/// Where one add-on's track plays from, and whether it is a plain stream (one file, not a playlist of pieces).
+fn stream_from(
+    addon: &Addon,
+    id: &str,
+    track: &str,
+) -> std::result::Result<(bool, Located), AddonError> {
+    addon.stream(track, &StreamRequest::default()).map(|info| {
+        let plain = matches!(info.manifest, Delivery::None) && info.encrypted != Some(true);
+        let located = Located {
             locator: info.url,
             tier: Some(info.tier.as_str().to_string()),
             addon: Some(id.to_string()),
-        })
+        };
+        (plain, located)
+    })
+}
+
+/// What the engine is given for a stream an add-on of `reach` named: a plain one goes through the relay, where every
+/// connection, redirects too, is held to the add-on's reach (and a copy may be kept of a library song's); a
+/// playlist of pieces, which the engine fetches by itself, only once its address is looked up and found in reach.
+fn hand_over(
+    relays: &crate::relay::Relays,
+    port: u16,
+    song: Option<i64>,
+    (plain, located): (bool, Located),
+    reach: stash_core::reach::Reach,
+) -> std::result::Result<Located, String> {
+    if plain {
+        return Ok(relays.link(port, song, located, reach));
+    }
+    let url = Url::parse(&located.locator).map_err(|e| e.to_string())?;
+    stash_core::reach::looked_up(&url, reach).map_err(|refused| refused.to_string())?;
+    Ok(located)
 }
 
 /// What each add-on was found not to have, and when: (the song, the add-on). It is not asked again for a while, so a
@@ -640,8 +667,9 @@ fn note_answer<'a>(
 /// asked whether it has the song (the contract's `resolve`: which of its tracks is the same song is the add-on's to
 /// say), and an add-on that can only search is searched for it ([`matching`]). The first add-on that gives a stream
 /// wins, and the name it gave is kept for next time. A song played before may have a copy kept from then: it plays
-/// from that, and no add-on is asked. A plain stream (not DASH or HLS, not encrypted) is relayed by the core, which
-/// keeps a copy of it as it plays ([`crate::relay`]).
+/// from that, and no add-on is asked. A plain stream (not DASH or HLS, not encrypted) is relayed by the core, held to
+/// the add-on's reach, which keeps a copy of a library song's as it plays when copies are kept ([`crate::relay`]).
+/// A song an add-on found that is not in the library is relayed too, and never kept.
 fn resolver(
     registry: Registry,
     library: Arc<Mutex<Library>>,
@@ -674,7 +702,11 @@ fn resolver(
             }
             let addon = loaded.addon.as_ref().map_err(|why| gone(why))?;
             let addon_id = &loaded.stored.id;
-            return match stream_from(addon, addon_id, &wanted.track) {
+            let handed = stream_from(addon, addon_id, &wanted.track).and_then(|stream| {
+                hand_over(&relays, port, None, stream, addon.reach())
+                    .map_err(|why| AddonError::host(stash_core::addons::Code::Refused, why))
+            });
+            return match handed {
                 Ok(located) => {
                     lacks.gave(addon_id);
                     let _ = library.lock().unwrap().note_addon_use(
@@ -708,7 +740,6 @@ fn resolver(
             return Err(gone("it is not on this computer, and Stash is offline"));
         }
         relays.not_handed(id);
-        let keeping = library.lock().unwrap().played_cap_bytes().unwrap_or(0) > 0;
         through_addons(
             &registry,
             &library,
@@ -717,29 +748,18 @@ fn resolver(
             "it is not a file here, and there is no add-on to play it from",
             |addon| addon.offers_resource("stream"),
             |addon, addon_id, track| {
-                addon.stream(track, &StreamRequest::default()).map(|info| {
-                    let plain =
-                        matches!(info.manifest, Delivery::None) && info.encrypted != Some(true);
-                    let located = Located {
-                        locator: info.url,
-                        tier: Some(info.tier.as_str().to_string()),
-                        addon: Some(addon_id.to_string()),
-                    };
-                    (plain, located)
-                })
+                let stream = stream_from(addon, addon_id, track)?;
+                hand_over(&relays, port, Some(id), stream, addon.reach())
+                    .map_err(|why| AddonError::host(stash_core::addons::Code::Refused, why))
             },
         )
-        .map(|((plain, located), addon_id)| {
+        .map(|(located, addon_id)| {
             let _ = library.lock().unwrap().note_addon_use(
                 &addon_id,
                 stash_core::usage::Given::Stream,
                 now_ms(),
             );
-            if plain && keeping {
-                relays.link(port, id, located)
-            } else {
-                located
-            }
+            located
         })
     })
 }

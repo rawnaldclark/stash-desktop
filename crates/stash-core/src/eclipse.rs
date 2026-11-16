@@ -142,6 +142,7 @@ pub fn manifest(value: &Value) -> Result<Manifest, AddonError> {
         resolve_by_isrc,
         quality,
         id,
+        reach: None,
     })
 }
 

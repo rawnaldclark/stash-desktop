@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use crate::addons::{AddonError, Code};
 use crate::library::NewTrack;
+use crate::reach::{Guarded, Reach};
 
 /// The largest song file taken (a 24-bit/192 kHz album side is well under it).
 pub const MAX_FILE: u64 = 2 << 30;
@@ -192,16 +193,18 @@ fn retry_after(answer: &ureq::http::Response<ureq::Body>) -> Option<u32> {
 }
 
 /// Fetches `url` into `part`, saying how far it got (`progress(bytes, of)`) and stopping when `cancelled` says so.
-/// Answers the first bytes (to tell what kind of file it is) and the size. Redirects are followed, to https only.
+/// Answers the first bytes (to tell what kind of file it is) and the size. Redirects are followed, to https only, and
+/// only as near as `reach` (the add-on's that named it: see [`crate::reach`]).
 pub fn fetch(
     url: &str,
+    reach: Reach,
     part: &Path,
     cancelled: &dyn Fn() -> bool,
     progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<(Vec<u8>, u64), Trouble> {
     crate::addons::checked_url(url, "the download link")
         .map_err(|e| Trouble::Failed(e.in_words()))?;
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+    let config = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_connect(Some(Duration::from_secs(15)))
         .timeout_recv_response(Some(Duration::from_secs(30)))
@@ -209,9 +212,12 @@ pub fn fetch(
         .timeout_recv_body(Some(Duration::from_secs(30 * 60)))
         .max_redirects(5)
         .https_only(!is_loopback(url))
-        .build()
-        .into();
+        .build();
+    let agent = Guarded::agent(reach, config);
     let mut answer = agent.get(url).call().map_err(|e| {
+        if let Some(words) = crate::reach::refusal(&e) {
+            return Trouble::Failed(format!("the file could not be fetched: {words}"));
+        }
         let why = format!("the file could not be fetched: {e}");
         if passing(&e) {
             Trouble::Busy(why, None)
@@ -319,11 +325,12 @@ pub struct Upstream {
 }
 
 /// Opens `url` to relay it, from `range` on ("bytes=N-") when one is asked for. The same rules as [`fetch`]: https
-/// only (http on this computer), redirects followed to https only, no file larger than a song can be.
-pub fn open_stream(url: &str, range: Option<&str>) -> Result<Upstream, Trouble> {
+/// only (http on this computer), redirects followed to https only and only as near as `reach`, no file larger than a
+/// song can be.
+pub fn open_stream(url: &str, reach: Reach, range: Option<&str>) -> Result<Upstream, Trouble> {
     crate::addons::checked_url(url, "the stream's link")
         .map_err(|e| Trouble::Failed(e.in_words()))?;
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+    let config = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_connect(Some(Duration::from_secs(15)))
         .timeout_recv_response(Some(Duration::from_secs(30)))
@@ -331,16 +338,17 @@ pub fn open_stream(url: &str, range: Option<&str>) -> Result<Upstream, Trouble> 
         .timeout_recv_body(Some(Duration::from_secs(4 * 3600)))
         .max_redirects(5)
         .https_only(!is_loopback(url))
-        .build()
-        .into();
+        .build();
+    let agent = Guarded::agent(reach, config);
     // As it is: a compressed answer's length and ranges are not those of the bytes read from it.
     let mut asked = agent.get(url).header("Accept-Encoding", "identity");
     if let Some(range) = range {
         asked = asked.header("Range", range);
     }
-    let answer = asked
-        .call()
-        .map_err(|e| Trouble::Failed(format!("the stream could not be opened: {e}")))?;
+    let answer = asked.call().map_err(|e| {
+        let why = crate::reach::refusal(&e).unwrap_or_else(|| e.to_string());
+        Trouble::Failed(format!("the stream could not be opened: {why}"))
+    })?;
     let text = |name: &str| {
         answer
             .headers()
@@ -382,16 +390,17 @@ fn is_loopback(url: &str) -> bool {
     })
 }
 
-/// A cover from `url` (https, or this computer), as long as it is a JPEG or PNG and not huge.
-pub fn fetch_cover(url: &str) -> Option<Vec<u8>> {
+/// A cover from `url` (https, or this computer), as long as it is a JPEG or PNG and not huge, fetched no nearer than
+/// `reach`.
+pub fn fetch_cover(url: &str, reach: Reach) -> Option<Vec<u8>> {
     crate::addons::checked_url(url, "the cover").ok()?;
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+    let config = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(20)))
         .max_redirects(5)
         .https_only(!is_loopback(url))
-        .build()
-        .into();
+        .build();
+    let agent = Guarded::agent(reach, config);
     let mut answer = agent.get(url).call().ok()?;
     if !(200..300).contains(&answer.status().as_u16()) {
         return None;

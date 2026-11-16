@@ -497,14 +497,18 @@ fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<bool, Tro
             }
         }
     } else {
-        let (info, addon) = through_addons(
+        let ((info, reach), addon) = through_addons(
             &state.addons,
             &state.library,
             &state.lacks,
             id,
             "there is no add-on to save it from",
             |addon| addon.offers_download(),
-            |addon, _, track| addon.download(track, &StreamRequest::default()),
+            |addon, _, track| {
+                addon
+                    .download(track, &StreamRequest::default())
+                    .map(|info| (info, addon.reach()))
+            },
         )
         .map_err(trouble_of)?;
         let _ = state.library.lock().unwrap().note_addon_use(
@@ -515,6 +519,7 @@ fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<bool, Tro
         let (looked, wanted) = (Cell::new(Instant::now()), Cell::new(true));
         let fetched = downloads::fetch(
             &info.url,
+            reach,
             &part,
             &|| !wanted.get() || stop.load(Ordering::Relaxed) || crate::serve::offline(state),
             &mut |bytes, of| {
@@ -551,8 +556,19 @@ fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<bool, Tro
         let _ = std::fs::remove_file(&part);
         return Err(e.into());
     }
+    // The cover is fetched no nearer than the add-on the song came from may send Stash.
+    let cover_reach = state
+        .addons
+        .read()
+        .unwrap()
+        .iter()
+        .find(|loaded| loaded.stored.id == addon)
+        .and_then(|loaded| loaded.usable().map(|a| a.reach()))
+        .unwrap_or(stash_core::reach::Reach::Internet);
     let kept = (|| {
-        let cover = art.as_deref().and_then(downloads::fetch_cover);
+        let cover = art
+            .as_deref()
+            .and_then(|url| downloads::fetch_cover(url, cover_reach));
         let cover_inside = downloads::tag(&file, &song, cover.as_deref())?;
         let read = downloads::read(&file)?;
         let saved = SavedDownload {

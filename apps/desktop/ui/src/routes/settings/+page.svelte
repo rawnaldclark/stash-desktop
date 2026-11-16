@@ -156,7 +156,9 @@
 		const u = used[id];
 		return u?.trouble && u.trouble.at_ms > (u.found_at_ms ?? 0) ? u.trouble : null;
 	};
-	const detail = (a: SourceStatus) => [a.version ? `version ${a.version}` : '', a.host ?? '', does(a)].filter((p) => p !== '').join(' · ');
+	/** Where it is, when that is nearer than the internet: it may send Stash only as near as that. */
+	const where = (a: SourceStatus) => (a.reach === 'home' ? 'on your network' : a.reach === 'here' ? 'on this computer' : '');
+	const detail = (a: SourceStatus) => [a.version ? `version ${a.version}` : '', a.host ?? '', where(a), does(a)].filter((p) => p !== '').join(' · ');
 
 	// ---- Your library: music folders, and one file that carries a library between this computer, the phone and the web player
 

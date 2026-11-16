@@ -302,6 +302,7 @@ fn a_client_reads_the_library_and_drives_the_player_over_http() {
             listed["id"].as_str(),
             listed["name"].as_str(),
             listed["host"].as_str(),
+            listed["reach"].as_str(),
             listed["enabled"].as_bool(),
             listed["problem"].is_null()
         ),
@@ -309,6 +310,7 @@ fn a_client_reads_the_library_and_drives_the_player_over_http() {
             Some("demo.folder"),
             Some("Demo folder"),
             Some("127.0.0.1"),
+            Some("here"),
             Some(true),
             true
         )
@@ -2872,6 +2874,34 @@ fn a_song_played_from_an_add_on_is_kept_and_plays_again_without_it() {
         Some(1),
         "{used}"
     );
+
+    // A track played from the add-on's own search, not in the library, goes through the core as well (held to the
+    // add-on's reach), and no copy is kept of it.
+    let found = client.get("/api/addons/search?q=kilo").1;
+    let track = found["groups"][0]["tracks"][0].clone();
+    assert!(track["id"].is_string(), "{found}");
+    client.post("/api/player/stop", json!({}));
+    client.post(
+        "/api/player/play",
+        json!({ "addon": "demo.folder", "tracks": [track] }),
+    );
+    until("the add-on's track to play", &|| {
+        let (_, s) = client.get("/api/player");
+        (s["status"] == "playing" && s["served_by"] == "demo.folder").then_some(s)
+    });
+    let ended = until("the add-on's track to end", &|| {
+        let (_, s) = client.get("/api/player");
+        (s["resting"] == true).then_some(s)
+    });
+    assert!(ended["error"].is_null(), "{ended}");
+    let (_, used) = client.get("/api/addons/use?since=0");
+    assert_eq!(
+        used["addons"]["demo.folder"]["streams"].as_u64(),
+        Some(2),
+        "{used}"
+    );
+    assert_eq!(client.get("/api/played").1["songs"], 1);
+    assert!(!dir.join("Played").join("0.wav").exists());
 
     // With the add-on gone, it plays from the copy.
     client.post("/api/addons/remove", json!({ "id": "demo.folder" }));
