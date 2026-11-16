@@ -17,6 +17,7 @@
 	import CommandPalette from '../lib/ui/CommandPalette.svelte';
 	import SmartEditor from '../lib/desktop/SmartEditor.svelte';
 	import Toast from '../lib/ui/Toast.svelte';
+	import { R } from '../lib/desktop/radio.svelte';
 	import PickBar from '../lib/ui/PickBar.svelte';
 	import ChoiceMenu from '../lib/ui/ChoiceMenu.svelte';
 	import Wash from '../lib/ui/Wash.svelte';
@@ -118,6 +119,7 @@
 
 	onMount(() => {
 		if (!measuring) void NF.refresh();
+		if (!measuring) void R.refresh();
 		void readOffline();
 		// Measuring: the whole library's list is what is measured.
 		if (measuring && !(page.url.pathname === '/library' && page.url.searchParams.get('tab') === 'songs')) void goto('/library?tab=songs', { replaceState: true });

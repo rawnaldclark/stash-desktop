@@ -6,6 +6,7 @@
 	import { goto } from '$app/navigation';
 	import { library, notPlayed, notPlayedSongs, player, saveSongs, unsaveSongs } from '../app';
 	import { NF } from '../desktop/unfound.svelte';
+	import { R } from '../desktop/radio.svelte';
 	import { knownParts } from '../desktop/credits.svelte';
 	import { LIB_REF, LIBRARY_SOURCE } from '../identity';
 	import { P } from './pick.svelte';
@@ -205,6 +206,10 @@
 				view = 'playlists';
 				tick().then(() => el?.querySelector<HTMLElement>('[role="menuitem"]')?.focus());
 			})}
+			{#if R.ready && !isGroup && player.canRadio(m.item)}
+				{@const item = m.item}
+				{@render entry('radio', 'Start radio', () => run(() => player.startRadio(item)))}
+			{/if}
 			{#if picked}
 				<!-- Songs picked in a list: no one artist or album. -->
 			{:else if artists.length}

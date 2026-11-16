@@ -1,6 +1,7 @@
 <!-- Up next: where the queue plays from and how far along it is, the song playing, then what follows. Click a row to jump to it;
      "more", a right-click or a long press for the song menu (the same as every song row); drag the handle to reorder (not while shuffle is on: the order is the shuffle's); on a touch
-     screen, swipe a row past half its width to remove it. "Save as playlist" keeps the whole queue.
+     screen, swipe a row past half its width to remove it. "Save as playlist" keeps the whole queue. A station growing the
+     queue (a radio, or autoplay) has one line above its songs still to come: what it is like, who chose them, and Stop.
      The core's queue can be the whole library, so the window holds the song playing and the next couple of hundred (`S.v.queue`,
      from place `S.v.queueStart`); every place handed to the player is a place in the whole queue. -->
 <script lang="ts">
@@ -9,6 +10,7 @@
 	import Cover from './Cover.svelte';
 	import Icon from './Icon.svelte';
 	import { mmss, songs } from './format';
+	import { findingWords, stationLine } from './radio';
 	import { reorder } from './reorder';
 	import { openSongMenu, songMenu } from './song-menu';
 	import { S, ui } from './state.svelte';
@@ -18,6 +20,13 @@
 	const upcoming = $derived(s.queue.map((q, k) => ({ q, i: s.queueStart + k })).filter((x) => x.i > s.index));
 	/** Songs that follow but are not listed here (the window holds only the next ones). */
 	const beyond = $derived(Math.max(0, s.queueLength - (s.queueStart + s.queue.length)));
+	/** The station's line, and the row it sits above (the first of its songs still to come). */
+	const line = $derived(stationLine(s.station));
+	const lineAt = $derived(s.station?.from_qid != null ? `q${s.station.from_qid}` : null);
+	function stopStation() {
+		const words = line?.stopped ?? 'Stopped';
+		void player.stopRadio().then(() => ui.toast(words));
+	}
 	let saving = $state(false);
 	let busy = $state(false);
 	let name = $state('');
@@ -89,6 +98,9 @@
 		>
 		{#each upcoming as { q, i } (q.qid)}
 			{@const away = ui.offline && q.here === false}
+			{#if line && q.qid === lineAt}
+				<p class="caps q-station" title={line.tip ?? undefined}>{line.lead}{#if line.lastfm}{' '}<button type="button" class="q-lnk" onclick={() => void player.openLastfm()} title="Open on Last.fm">Last.fm</button>{/if}{' · '}<button type="button" class="q-lnk" onclick={stopStation}>Stop</button></p>
+			{/if}
 			<div class="q-row q-next" class:has-rd={!s.shuffle} class:away data-qid={q.qid} use:songMenu={menuOf(q, i)} role="presentation" title={away ? 'Not on this computer: Stash is offline, and passes it over' : undefined}>
 				{#if !s.shuffle}<button type="button" class="rd-h" aria-label="Reorder {q.title}" title="Drag to reorder, or press Arrow Up or Down" aria-keyshortcuts="ArrowUp ArrowDown"><Icon name="drag_indicator" /></button>{/if}
 				<button type="button" class="q-main" onclick={() => (away ? ui.toast('Not on this computer, and Stash is offline') : player.jumpTo(i))} aria-label="Play {q.title} by {q.artist}{away ? ' (not on this computer)' : ''}">
@@ -100,7 +112,11 @@
 				<button type="button" class="q-x" aria-label="Remove {q.title} from Up next" title="Remove" onclick={() => player.removeAt(i)}><Icon name="close" /></button>
 			</div>
 		{:else}
-			<p class="q-empty">Nothing after this one. Add songs from any list with the “more” menu.</p>
+			{#if s.station?.finding}
+				<p class="q-empty" role="status">{findingWords(s.station)}</p>
+			{:else}
+				<p class="q-empty">Nothing after this one. Add songs from any list with the “more” menu.</p>
+			{/if}
 		{/each}
 		</div>
 		{#if beyond > 0 && upcoming.length}<p class="q-empty">And {songs(beyond)} more after these.</p>{/if}

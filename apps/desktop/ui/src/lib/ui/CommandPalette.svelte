@@ -7,6 +7,7 @@
 	import { goOffline, itemOfRow, player } from '../app';
 	import * as core from '../core';
 	import Icon from './Icon.svelte';
+	import { R } from '../desktop/radio.svelte';
 	import type { IconName } from './icons';
 	import { L, S, ui } from './state.svelte';
 
@@ -37,6 +38,20 @@
 			const liked = L.isLiked(s.current);
 			list.push({ id: 'like', group: 'Commands', icon: liked ? 'favorite' : 'favorite_border', label: liked ? 'Remove the song playing from Likes' : 'Like the song playing', sub: s.current.title, run: () => void L.toggleLike(s.current!) });
 			list.push({ id: 'now', group: 'Commands', icon: 'open_in_full', label: 'Now playing', run: go('/now') });
+			if (R.ready && player.canRadio(s.current)) {
+				const current = s.current;
+				list.push({ id: 'radio', group: 'Commands', icon: 'radio', label: 'Start radio from the song playing', sub: current.title, run: () => void player.startRadio(current) });
+			}
+		}
+		if (s.station) {
+			const autoplay = s.station.kind === 'autoplay';
+			list.push({
+				id: 'radio-stop',
+				group: 'Commands',
+				icon: 'close',
+				label: autoplay ? 'Stop autoplay' : 'Stop radio',
+				run: () => void player.stopRadio().then(() => ui.toast(autoplay ? 'Autoplay stopped' : 'Radio stopped'))
+			});
 		}
 		list.push({ id: 'shuffle', group: 'Commands', icon: 'shuffle', label: s.shuffle ? 'Shuffle off' : 'Shuffle on', run: () => player.setShuffle(!s.shuffle) });
 		const repeat = s.repeat === 'off' ? 'all' : s.repeat === 'all' ? 'one' : 'off';
@@ -58,6 +73,7 @@
 			['Library › Not found', '/library?tab=notfound', 'search'],
 			['Library › History', '/library?tab=history', 'history'],
 			['Settings › Sound', '/settings#sound', 'settings'],
+			...(R.available ? [['Settings › Similar music from Last.fm', '/settings#similar', 'settings'] as [string, string, IconName]] : []),
 			['Settings › Add-ons', '/settings#addons', 'settings'],
 			['Settings › Lyrics', '/settings#lyrics', 'settings'],
 			['Settings › Your library', '/settings#library', 'settings'],

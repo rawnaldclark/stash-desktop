@@ -354,7 +354,7 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 - **The mini player** (the bar's button beside Now playing, or the tray's menu): a small window that stays above the others, with the song, its cover, where it is in it, previous, play or pause, next and like; drawn tall, the cover fills it. It has no frame and is moved by its background; it opens where it was last left. Only one shows at a time: it hides the full window, and its corner button (or Escape, or closing it) brings the full window back. The page asks for it through the core like everything else (`POST /api/window`, which a core without a window refuses), and the mini window alone may ask the shell for one thing, to start moving itself (Tauri capability `capabilities/mini.json`). Checked by an API test and in the real app on a scratch library: Windows reported the full window hidden while the mini player showed and back after; its buttons drove the player; moving was allowed from the mini player and refused from the full window.
 
 - **The command palette** (Ctrl+K, Cmd+K on a Mac): one box that does what the window can (play or pause, skip, like the song playing, shuffle, repeat, the mini player, Up next, lyrics, every Library tab and Settings section) and finds the library's songs, albums, artists and playlists as you type (the library is asked 120 ms after typing stops). Arrow keys move, Enter chooses, Escape closes and gives focus back to where it was. Checked in Edge on the built page served by the core on a scratch library, light and dark: "lib not" found Library › Not found and Enter went there; a song's name listed the songs, ArrowDown moved, a click played it; Escape closed and focus went back. No errors in the page.
-- **Autoplay** (Settings › Sound, on unless switched off, as on the phone): when the last song of the queue starts and nothing repeats (or when the songs after the one playing could not be played and were passed over), ten songs like the last five are added after it, so the music goes on with no gap: about half by the same artists, then liked songs, then the most played, then any; none heard in the last three hours or already queued, only files when no add-on can play; the same artist never twice in a row when another can come between, nor right after the song heard last (the artist with the most songs goes between the others). Checked by `crates/stashd/tests/api.rs` (a one-song queue grows by the other songs of the library; switched off, it ends; a queue whose last song no add-on has goes on) and `crates/stash-core/tests/lists.rs` (five songs by one artist and five by others alternate) and in the real app (one song became a queue of eleven, five by the same artist, interleaved). Up next lists them under the queue's own "Playing from"; they are not marked as autoplay's.
+- **Autoplay** (Settings › Sound, on unless switched off, as on the phone): when the last song of the queue starts and nothing repeats (or when the songs after the one playing could not be played and were passed over), ten songs like the last five are added after it, so the music goes on with no gap: about half by the same artists, then liked songs, then the most played, then any; none heard in the last three hours or already queued, only files when no add-on can play; the same artist never twice in a row when another can come between, nor right after the song heard last (the artist with the most songs goes between the others). Checked by `crates/stashd/tests/api.rs` (a one-song queue grows by the other songs of the library; switched off, it ends; a queue whose last song no add-on has goes on) and `crates/stash-core/tests/lists.rs` (five songs by one artist and five by others alternate) and in the real app (one song became a queue of eleven, five by the same artist, interleaved). Up next lists them under the queue's own "Playing from"; they are not marked as autoplay's. (Since §36: with similar music from Last.fm, autoplay starts a station from the newest of the last songs Last.fm can be asked about, and Up next shows its line.)
 
 ## 14. Songs saved to this computer
 
@@ -502,7 +502,7 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 
 ### Not covered yet
 
-- Last.fm. It needs an application key and secret, and those do not belong in a public repository; a build could carry them from outside the source.
+- Scrobbling to Last.fm. It needs an application key and secret, and those do not belong in a public repository. (Radio and autoplay need no Last.fm key in the program: they ask Stash's proxy; see §36.)
 - The real ListenBrainz: the stand-in follows its documented checks, but no real token was used.
 
 ## 22. Offline
@@ -1285,3 +1285,89 @@ A review read §34's commit. It confirmed 28 findings: 6 medium and 22 minor. A 
 - **All core tests passed (73 unit tests, plus every integration test). All stashd tests passed (18 unit tests, 32 API tests).**
 - **Clippy passed.**
 - **The window passed its check, its 57 unit tests and its build.**
+
+## 36. Similar music: radio, and autoplay that knows what is like what
+
+A radio is a queue that grows by itself with songs like the one it starts from: a song (its menu, or Ctrl+K for the song playing), or an artist (the artist page). Autoplay at the end of a queue is the same engine, started from the last songs. Last.fm says which artists and songs are alike. The songs come from the library first, and an add-on is searched only for artists the library has too few of.
+
+### What is sent, and to whom
+
+- **Questions go to Stash's own Last.fm proxy, which holds the key.** The program has no Last.fm key. A build carries only the proxy's address, given when it is built (`STASH_LASTFM_PROXY`; `stashd serve --lastfm-proxy`). A build without it has no radio, and autoplay picks from the library as before.
+- **Two questions, both GET, as the phones ask them:**
+  - `track.getsimilar` with the song's artist and title, `autocorrect=1`, `limit=30`;
+  - `artist.getsimilar` with the artist's name, `autocorrect=1`, `limit=100`.
+  - Headers: `User-Agent: Stash-desktop/<version>` and `X-Stash-Version: desktop/<version>`. Redirects are not followed, and an answer over 1 MB is not read.
+- **Nothing else.** Nothing about the library, what is played or any account. The proxy sees this computer's internet address, as any server does.
+- **What is asked about is cleaned first:** the first artist a credit names, and the title without the words video sites add ("(Official Audio)", "- Topic"). A song whose words say too little ("Unknown artist", a phone's recording, a file name) is never asked about.
+- **The address never shows.** No answer, message or log line carries it; a test reads every answer the window sees for it, and `crates/stashd/tests/no_private_addresses.rs` fails if an address of that kind or a key is put in the repository.
+
+### How often
+
+- At most 2 questions in a station's life: the song's, then the artist's when the song named fewer than 4 other artists, or when its artists are used up.
+- Each answer is kept in the library (schema 20, `similar_cache`) and is fresh for 14 days, so each question is asked once in that time. Answers older than 60 days, and the oldest past 5,000, go when the core starts. "Not found" is kept too.
+- At most 100 questions a day; past that, stations pick from the library until the next day.
+- After trouble, Last.fm is left alone: as long as a 429 asks (else a minute), or a minute doubling to an hour while it cannot be reached. Meanwhile a kept answer of any age is used. A question that failed twice is not asked again in that run.
+- Never offline. Offline, kept answers are used, and only songs on this computer are picked.
+- Autoplay acts once a song. One thread asks, so no question goes out twice at once, and the library is never held while it waits.
+
+### What a station picks
+
+- **Per batch of 10:** at most 3 by the seed's artist (2 for autoplay, whose artist was just heard), at most 2 by any other. Artists come in Last.fm's order.
+- **Never the same artist twice in a row,** nor right after the song before (`shuffle::apart`, which autoplay's own picks now use too).
+- **Last.fm's titles first** for each artist, then liked songs, then the most played. "Song - 2011 Remaster" is Last.fm's "Song"; "Song (Live)" is not.
+- **Left out:**
+  - the seed itself;
+  - another version Last.fm did not name;
+  - songs and artists chosen not to be played;
+  - songs no add-on finds;
+  - missing files;
+  - songs heard in the last 3 hours;
+  - anything already in the queue or added by a station earlier in the run.
+- **It grows** when 3 or fewer songs are left after the one playing, while repeat is off.
+- **It ends** when another queue starts, when Stop is pressed (its songs still to come are taken out, songs added by hand stay, and autoplay does not act on the song playing), or when it has nothing more. A batch found for a queue that was replaced meanwhile is dropped.
+- **When Last.fm cannot help** with a station's first songs (not reached, busy, offline, nothing like it, or asked enough today), the library picks them as autoplay always did, from the seed and its artist. Up next says so: "Songs like Teardrop from your library", with why on hover.
+
+### The window
+
+- **Start radio in a song's menu**: for the song playing, it plays on and what follows is replaced; any other song plays now. Also **a radio button on the artist page**, and **Ctrl+K** ("Start radio from the song playing", "Stop radio").
+- **Up next keeps "Playing from Teardrop radio"** and draws one line above the station's songs still to come: "Similar to Teardrop · from Last.fm · Stop" (autoplay: "Autoplay · like Teardrop · from Last.fm · Stop"; from the library: "Autoplay · from your library · Stop").
+  - "Last.fm" opens the seed's page on Last.fm. The core builds the link from the seed, never from the request, and the shell opens only `https://www.last.fm/` links. The window is granted nothing of the opener.
+  - While its first songs are found: "Finding songs like Teardrop…".
+- **Settings › Sound › Similar music from Last.fm** (on by default; shown only in a build that has it) says what is sent. Off, nothing is sent, there is no radio, autoplay keeps to the library, and what was kept is deleted. The Autoplay and Offline lines say what changes.
+
+### Checked
+
+- **Core tests:**
+  - `similar` (Last.fm's answer shapes; errors 6 and 7 as not found, 29 and a 429 as busy, the proxy's own errors as unreachable; the questions as the phones send them; the lookup rules of the phones; an address that is not https, or carries a name, query or fragment, refused; one GET with Stash's headers to a stand-in; redirects not followed);
+  - `station` (12 tests: shares and spreading over 5 batches, no song twice by any of its ids, when it asks the second question, blocked artists, spent);
+  - the library's picks by artist and the kept answers ageing out (`tests/lists.rs`);
+  - `apart`;
+  - a radio from the song playing keeps it playing as the first of a new queue, and songs are added only to the queue they were found for (`tests/player.rs`).
+- **API tests** (`crates/stashd/tests/radio.rs`, 10, against a stand-in for the proxy and the demo add-on):
+  - one question for a song radio, as the phones ask it;
+  - library songs as library rows, the add-on's for artists the library lacks, one search per artist;
+  - growing to at most 2 questions;
+  - kept answers asked again by no one, in the same run or the next;
+  - Stop leaves the song added by hand;
+  - blocked songs and artists never come, and are never searched;
+  - offline asks no one;
+  - autoplay from Last.fm, and from the library for an unaskable last song;
+  - busy, unreachable, not found and the day's limit all go on from the library;
+  - a new queue drops a batch that came late;
+  - switched off, the kept answers are deleted;
+  - without the proxy there is no radio;
+  - an artist radio.
+  - Ran 4 times in a row with no failure.
+- **On the built page served by the core** (debug stashd, silent, volume 0), light and dark, against the stand-in:
+  - Start radio on Teardrop played it as "Playing from Teardrop radio" with 10 songs after it: Glory Box first, Massive Attack between the others, Zero 7 and Morcheeba from the add-on.
+  - The line read "Similar to Teardrop · from Last.fm · Stop". Last.fm opened `https://www.last.fm/music/Massive+Attack/_/Teardrop`, refused in the browser for the check. Stop said "Radio stopped" and left nothing after the song.
+  - The artist page's radio started "Massive Attack radio".
+  - Ctrl+K listed both entries.
+  - The Settings row and its switch worked; off, the song menu had no Start radio.
+  - Last.fm was asked twice in all.
+  - No page errors. The 404s were covers of the test files, which have none.
+
+### Not covered yet
+
+- The real proxy: no test or check asked it.
+- How Last.fm's terms fit the way Stash is offered (the owner's call), and the Last.fm credit the terms ask for: the "powered by AudioScrobbler" page they point to is gone, so the window names Last.fm in words, with a link.

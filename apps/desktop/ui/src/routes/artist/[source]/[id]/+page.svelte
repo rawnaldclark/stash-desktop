@@ -9,6 +9,7 @@
 	import Card from '../../../../lib/ui/Card.svelte';
 	import Cover from '../../../../lib/ui/Cover.svelte';
 	import Icon from '../../../../lib/ui/Icon.svelte';
+	import { R } from '../../../../lib/desktop/radio.svelte';
 	import TrackRow from '../../../../lib/ui/TrackRow.svelte';
 	import type { PickList } from '../../../../lib/ui/pick.svelte';
 	import { songs } from '../../../../lib/ui/format';
@@ -86,6 +87,10 @@
 		<div class="alb-act">
 			<button type="button" class="act-play" aria-label="Play {artist.name}" disabled={!items.length} onclick={() => play()}><Icon name="play_arrow" /></button>
 			<button type="button" class="act-ib" aria-label="Shuffle {artist.name}" title="Shuffle" disabled={!items.length} onclick={() => { player.setShuffle(true); play(); }}><Icon name="shuffle" /></button>
+			{#if R.ready}
+				{@const name = artist.name}
+				<button type="button" class="act-ib" aria-label="Start {name} radio" title="Radio" onclick={() => void player.startRadio({ artist: name })}><Icon name="radio" /></button>
+			{/if}
 		</div>
 		{#if items.length}
 			<h2 class="vh2">Songs</h2>

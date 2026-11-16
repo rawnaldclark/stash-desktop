@@ -275,6 +275,10 @@ body.carrying, body.carrying * { cursor: grabbing !important; user-select: none;
 @media (hover: hover) and (pointer: fine) { .q-save:hover { color: var(--wp-text); background: var(--wp-hover); } }
 .q-saveform { padding: 4px 0 8px; }
 .q-hint { text-transform: none; letter-spacing: 0; font-weight: 400; }
+/* A station's line above its songs still to come: what it is like, who chose them (a link to Last.fm), and Stop. */
+.q-station { margin: 12px 0 4px; }
+.q-lnk { font: inherit; letter-spacing: inherit; text-transform: inherit; color: var(--wp-text); text-decoration: underline; text-underline-offset: 2px; text-decoration-color: var(--wp-line-2); }
+@media (hover: hover) and (pointer: fine) { .q-lnk:hover { text-decoration-color: currentColor; } }
 /* swipe to remove (touch): a vertical move stays a scroll */
 .q-next { touch-action: pan-y; }
 /* Offline: a song that is not on this computer is passed over. */

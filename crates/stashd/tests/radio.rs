@@ -107,9 +107,13 @@ const ADDON: &[(&str, &[&str])] = &[
 fn folders() -> &'static (PathBuf, PathBuf) {
     static FOLDERS: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
     FOLDERS.get_or_init(|| {
-        let root = std::env::temp_dir().join(format!("stash-radio-music-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        // One folder for every run, written again only when it is not whole (so runs leave no copies behind).
+        let root = std::env::temp_dir().join("stash-radio-music-1");
         let (music, addon) = (root.join("Music"), root.join("Addon"));
+        if root.join("whole").is_file() {
+            return (music, addon);
+        }
+        let _ = std::fs::remove_dir_all(&root);
         for (folder, songs) in [(&music, LIBRARY), (&addon, ADDON)] {
             std::fs::create_dir_all(folder).unwrap();
             for (artist, titles) in songs {
@@ -118,6 +122,7 @@ fn folders() -> &'static (PathBuf, PathBuf) {
                 }
             }
         }
+        std::fs::write(root.join("whole"), b"").unwrap();
         (music, addon)
     })
 }

@@ -7,9 +7,9 @@ import type { Readable } from 'svelte/store';
 import type { SearchResult } from './sources/search';
 import type { Album, Artist, Artwork, Descriptor, Lyrics, LyricLine, LyricWord, Track } from './sources/contract';
 import type { LibraryItem } from './identity';
-import type { AddonInfo, Counts, Replaygain, Signal, SmartRules, Tier } from './core';
+import type { AddonInfo, Counts, Replaygain, Signal, SmartRules, Station, Tier } from './core';
 
-export type { Readable, SearchResult, Counts, Album, Artist, Artwork, Descriptor, Lyrics, LyricLine, LyricWord, Track, LibraryItem, Signal, Tier };
+export type { Readable, SearchResult, Counts, Album, Artist, Artwork, Descriptor, Lyrics, LyricLine, LyricWord, Track, LibraryItem, Signal, Station, Tier };
 
 /** A queue entry: a library item plus an id for this particular slot (the same song can be queued twice). */
 export type QueueItem = LibraryItem & { qid: string };
@@ -69,6 +69,8 @@ export interface PlayerState {
 	exclusive: boolean;
 	/** How loudness is evened out between songs (Settings › Sound). */
 	replaygain: Replaygain;
+	/** The station growing the queue (a radio, or autoplay), when one is. */
+	station: Station | null;
 }
 
 export interface PlayerAPI {
@@ -100,6 +102,15 @@ export interface PlayerAPI {
 	setReplaygain(mode: Replaygain): void;
 	/** Every song of the queue, in order (read from the core a page at a time): what "Save as playlist" keeps. */
 	wholeQueue(): Promise<LibraryItem[]>;
+	/** Starts a radio: from a song (the song playing plays on, and what follows it is replaced; any other plays now), or
+	 * from an artist. Songs like it follow, as they play. */
+	startRadio(from: LibraryItem | { artist: string }): Promise<void>;
+	/** Whether a radio can start from the song (a library row or an add-on's track). */
+	canRadio(item: LibraryItem): boolean;
+	/** Stops the station growing the queue: its songs still to come are taken out. */
+	stopRadio(): Promise<void>;
+	/** Opens the station's seed on Last.fm. */
+	openLastfm(): Promise<void>;
 }
 
 export interface SearchAPI {
@@ -231,5 +242,6 @@ export const INITIAL_PLAYER_STATE: PlayerState = {
 	tier: null,
 	servedBy: null,
 	exclusive: false,
-	replaygain: 'off'
+	replaygain: 'off',
+	station: null
 };

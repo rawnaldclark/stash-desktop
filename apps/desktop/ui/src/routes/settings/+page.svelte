@@ -9,6 +9,7 @@
 	import Scrobbling from '../../lib/desktop/Scrobbling.svelte';
 	import Shortcuts from '../../lib/desktop/Shortcuts.svelte';
 	import Blocked from '../../lib/desktop/Blocked.svelte';
+	import { R } from '../../lib/desktop/radio.svelte';
 	import Icon from '../../lib/ui/Icon.svelte';
 	import { outputSentence } from '../../lib/ui/signal';
 	import { L, S, ui } from '../../lib/ui/state.svelte';
@@ -171,6 +172,19 @@
 
 	// ---- Lyrics: LRCLIB when no add-on has a song's lyrics (on unless switched off).
 
+	// ---- Similar music from Last.fm (radio, and autoplay that knows what is like what), when this build has it.
+	let similarBusy = $state(false);
+	async function setSimilar(on: boolean) {
+		similarBusy = true;
+		try {
+			await R.set(on);
+		} catch (e) {
+			ui.toast(core.said(e));
+		} finally {
+			similarBusy = false;
+		}
+	}
+
 	let autoplay = $state<boolean | null>(null);
 	async function setAutoplay(on: boolean) {
 		autoplay = on;
@@ -241,6 +255,7 @@
 			(s) => (autoplay = s.on),
 			() => {}
 		);
+		void R.refresh();
 		void readUse();
 		const useTimer = setInterval(() => void readUse(), 15_000);
 		void core.playedRoom().then(
@@ -317,10 +332,23 @@
 				<div class="set-row">
 					<div class="set-lab">
 						<span class="set-name" id="ap-l">Autoplay</span>
-						<span class="set-sub">When the queue ends, the music goes on with songs like the last ones from your library: by the same artists, then your likes and what you play most.</span>
+						{#if R.ready}
+							<span class="set-sub">When the queue ends, the music goes on with songs like the last one: Last.fm suggests similar artists, and their songs come from your library first, then your add-ons. Offline, or when Last.fm has nothing, it picks from your library: the same artists, your likes and what you play most.</span>
+						{:else}
+							<span class="set-sub">When the queue ends, the music goes on with songs like the last ones from your library: by the same artists, then your likes and what you play most.</span>
+						{/if}
 					</div>
 					<button type="button" class="sw" role="switch" aria-checked={autoplay === true} aria-labelledby="ap-l" disabled={autoplay === null} onclick={() => autoplay !== null && setAutoplay(!autoplay)}><i></i></button>
 				</div>
+				{#if R.available}
+					<div class="set-row" id="similar">
+						<div class="set-lab">
+							<span class="set-name" id="lfm-l">Similar music from Last.fm</span>
+							<span class="set-sub">For radio and autoplay, Stash asks Last.fm which artists and songs are like the one you start from. Only that song’s title and artist, or the artist’s name, are sent, through Stash’s own server (which sees this computer’s internet address, as any server does) and on to Last.fm; nothing about your library, what you play or your accounts. Answers are kept on this computer for two weeks, so each is asked once. Off, nothing is sent, there is no radio, autoplay keeps to your library, and what was kept is deleted.</span>
+						</div>
+						<button type="button" class="sw" role="switch" aria-checked={R.on} aria-labelledby="lfm-l" disabled={similarBusy} onclick={() => void setSimilar(!R.on)}><i></i></button>
+					</div>
+				{/if}
 				<div class="set-row set-col">
 					<div class="set-lab">
 						<span class="set-name" id="rg-l">Even out loudness</span>
@@ -432,7 +460,7 @@
 			<div class="set-row">
 				<div class="set-lab">
 					<span class="set-name" id="off-l">Offline</span>
-					<span class="set-sub">Only what is on this computer plays: your files, songs saved, and songs kept as they were played. No add-on is asked and nothing streams; songs that are not here are dimmed, and plays wait to be scrobbled. It stays on until you turn it off.</span>
+					<span class="set-sub">Only what is on this computer plays: your files, songs saved, and songs kept as they were played. {R.available ? 'No add-on or Last.fm is asked' : 'No add-on is asked'} and nothing streams; songs that are not here are dimmed, and plays wait to be scrobbled. It stays on until you turn it off.</span>
 				</div>
 				<button type="button" class="sw" role="switch" aria-checked={ui.offline} aria-labelledby="off-l" onclick={() => void goOffline(!ui.offline)}><i></i></button>
 			</div>

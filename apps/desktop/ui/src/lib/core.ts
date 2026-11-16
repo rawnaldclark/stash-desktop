@@ -450,6 +450,27 @@ export type CorePlayer = {
 	errors: number;
 	/** Nothing plays and the player rests on `track` (status "paused"): the queue ended there, or it was brought back from last time. Play starts it. */
 	resting: boolean;
+	/** Goes up only when the whole queue is replaced (a new queue, a stop). */
+	queue_id?: number;
+	/** The station growing the queue (a radio, or autoplay), when one is. */
+	station?: Station | null;
+};
+
+/** A station growing the queue, as the core says it (`station` in /api/player). */
+export type Station = {
+	kind: 'radio' | 'autoplay';
+	/** "Teardrop radio", "Massive Attack radio". */
+	label: string;
+	/** What it is like: a song, or an artist. */
+	seed: { title?: string; artist: string } | null;
+	/** Who chose its songs: Last.fm, or (when Last.fm could not help) the library. */
+	via: 'lastfm' | 'library';
+	/** Why the library chose them, when it did. */
+	why: string | null;
+	/** Its first songs are still being found. */
+	finding: boolean;
+	/** The core's id of the first of its songs still to come (Up next draws its line there). */
+	from_qid: number | null;
 };
 
 /** Nothing playing. */
@@ -561,6 +582,18 @@ export function lyrics(song: { id: number } | { title: string; artist: string; a
 /** Whether songs like the last ones are added when the queue ends. */
 export const autoplaySettings = () => get<{ on: boolean }>('/api/settings/autoplay');
 export const setAutoplay = (on: boolean) => post<{ on: boolean }>('/api/settings/autoplay', { on });
+/** Whether this build has similar music from Last.fm (radio), and whether it is on. */
+export type SimilarSettings = { available: boolean; on: boolean };
+export const similarSettings = () => get<SimilarSettings>('/api/settings/similar');
+/** Off, what Last.fm said is deleted (`forgot`: how much). */
+export const setSimilar = (on: boolean) => post<SimilarSettings & { forgot?: number }>('/api/settings/similar', { on });
+/** A radio from a song (it plays now), from the song playing (it plays on, and what follows is replaced), or from an artist. */
+export type RadioStart = { song: PlayEntry } | { playing: true } | { artist: string };
+export const startRadio = (body: RadioStart) => post<{ station: Station | null }>('/api/radio/start', body);
+/** Stops the station: its songs still to come are taken out. */
+export const stopRadio = () => post<{ removed: number }>('/api/radio/stop', {});
+/** Opens the station's seed on Last.fm: the window's shell opens it (`opened`), else the page is given the address. */
+export const openLastfm = () => post<{ opened?: boolean; url?: string }>('/api/radio/lastfm', {});
 /** Whether closing the window keeps Stash playing in the tray. */
 export const windowSettings = () => get<{ tray: boolean }>('/api/settings/window');
 /** Whether there is a mini player to switch to (only inside the desktop window), and the switch between it and the full window. */

@@ -316,7 +316,8 @@ function take(a: core.CorePlayer): void {
 		tier: a.tier,
 		servedBy: a.served_by,
 		exclusive: a.exclusive,
-		replaygain: a.replaygain ?? 'off'
+		replaygain: a.replaygain ?? 'off',
+		station: same(state.station, a.station ?? null) ? state.station : (a.station ?? null)
 	});
 	readQueue(a);
 	// A stream from an add-on the window has not heard of (added from somewhere else): the list is read again.
@@ -450,7 +451,40 @@ const player: PlayerAPI = {
 	},
 	setExclusive: (on) => void command(() => core.setExclusive(on)),
 	setReplaygain: (mode) => void command(() => core.setReplaygain(mode)),
-	wholeQueue: async () => (await allPages((o, l) => core.queueAt(o, l))).map(itemOfQueued)
+	wholeQueue: async () => (await allPages((o, l) => core.queueAt(o, l))).map(itemOfQueued),
+	canRadio: (item) => entryOf(item) !== null,
+	startRadio(from) {
+		let body: core.RadioStart;
+		if ('artist' in from && !('title' in from)) body = { artist: from.artist };
+		else {
+			const item = from as LibraryItem & { qid?: string };
+			// The song playing (its place in the queue, as Up next and Now playing hand it): it plays on.
+			if (item.qid !== undefined && item.qid === state.current?.qid) body = { playing: true };
+			else {
+				const song = entryOf(item);
+				if (!song) return Promise.resolve();
+				body = { song };
+			}
+		}
+		return command(async () => {
+			await core.startRadio(body);
+			return core.player();
+		});
+	},
+	stopRadio: () =>
+		command(async () => {
+			await core.stopRadio();
+			return core.player();
+		}),
+	async openLastfm() {
+		try {
+			const said = await core.openLastfm();
+			// In a browser (no shell to open it): the page opens what the core answered, only a Last.fm page.
+			if (said.url?.startsWith('https://www.last.fm/')) window.open(said.url, '_blank', 'noopener');
+		} catch (e) {
+			report(e);
+		}
+	}
 };
 
 // ------------------------------------------------------------------------------------------------ the library
