@@ -1369,5 +1369,5 @@ A radio is a queue that grows by itself with songs like the one it starts from: 
 
 ### Not covered yet
 
-- The real proxy: no test or check asked it.
+- The real proxy beyond one check: a release build given its address played a Teardrop radio from a scratch library of the test songs (silent, volume 0). The station said it came from Last.fm, the queue was Teardrop, Glory Box, Risingson, Overcome, Karmacoma, Roads, Unfinished Sympathy and Aftermath, and the address was in no answer and no line the core wrote. Nothing else was tried against it (busy, the day's limit, slow answers): the stand-in covers those.
 - How Last.fm's terms fit the way Stash is offered (the owner's call), and the Last.fm credit the terms ask for: the "powered by AudioScrobbler" page they point to is gone, so the window names Last.fm in words, with a link.
