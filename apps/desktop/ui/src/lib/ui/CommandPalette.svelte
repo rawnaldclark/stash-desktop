@@ -4,7 +4,7 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { itemOfRow, player } from '../app';
+	import { goOffline, itemOfRow, player } from '../app';
 	import * as core from '../core';
 	import Icon from './Icon.svelte';
 	import type { IconName } from './icons';
@@ -44,6 +44,7 @@
 		if (canMini) list.push({ id: 'mini', group: 'Commands', icon: 'picture_in_picture_alt', label: 'Mini player', run: () => void core.showView('mini').catch(() => {}) });
 		list.push({ id: 'upnext', group: 'Commands', icon: 'queue_music', label: 'Up next', run: () => ui.setTab('next') });
 		list.push({ id: 'smart', group: 'Commands', icon: 'add', label: 'New smart playlist', run: () => (ui.smart = { id: null }) });
+		list.push({ id: 'offline', group: 'Commands', icon: 'download', label: ui.offline ? 'Go back online' : 'Go offline (only what is on this computer)', run: () => void goOffline(!ui.offline) });
 		list.push({ id: 'lyrics', group: 'Commands', icon: 'lyrics', label: 'Lyrics', run: () => ui.setTab('lyrics') });
 		const pages: [string, string, IconName][] = [
 			['Home', '/', 'home'],

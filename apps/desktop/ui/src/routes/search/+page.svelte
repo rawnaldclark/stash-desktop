@@ -115,7 +115,7 @@
 				{/each}
 			</ul>
 		{:else}
-			<p class="s-hint">{withAddons ? 'Songs, albums and artists from your library, and songs from every add-on you have.' : 'Songs, albums and artists from your library.'}</p>
+			<p class="s-hint">{ui.offline ? 'Stash is offline: songs, albums and artists from your library.' : withAddons ? 'Songs, albums and artists from your library, and songs from every add-on you have.' : 'Songs, albums and artists from your library.'}</p>
 		{/if}
 	{:else if loading && !result}
 		<p class="s-hint" role="status">Searching</p>
@@ -125,6 +125,7 @@
 		<p class="s-hint" role="status">Nothing found for “{q}”. Try fewer words or another spelling.</p>
 		{#each failed as f (f.sourceId)}<p class="s-hint">{f.name} gave no results: {sentence(f.message)}</p>{/each}
 	{:else if result}
+		{#if ui.offline && withAddons}<p class="s-hint">Stash is offline: only your library is searched.</p>{/if}
 		<div class="sr">
 			{#if top || pick.kind !== 'track'}
 				<div class="sr-top">

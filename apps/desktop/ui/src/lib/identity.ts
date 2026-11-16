@@ -20,6 +20,8 @@ export type LibraryItem = Descriptor & {
 	albumRefs?: Record<string, string>;
 	/** sourceId -> that source's artist id for this song. */
 	artistRefs?: Record<string, string>;
+	/** False for a song that does not play with no connection (it plays from an add-on): offline, it is drawn dimmed. */
+	here?: boolean;
 };
 
 /**

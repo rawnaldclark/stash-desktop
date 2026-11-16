@@ -2,7 +2,7 @@
      library in and saving one), Appearance, About. -->
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { library, player, sources } from '../../lib/app';
+	import { goOffline, library, player, sources } from '../../lib/app';
 	import * as core from '../../lib/core';
 	import { folders, lastPart, many, trouble, type Notice } from '../../lib/desktop/folders.svelte';
 	import Scrobbling from '../../lib/desktop/Scrobbling.svelte';
@@ -415,6 +415,13 @@
 					<button type="button" class="btn ghost" onclick={saveFile}>Save a library file</button>
 				</div>
 				{#if fileNotice}<p class="set-sub" class:set-trouble={fileNotice.trouble} role="status">{fileNotice.text}</p>{/if}
+			</div>
+			<div class="set-row">
+				<div class="set-lab">
+					<span class="set-name" id="off-l">Offline</span>
+					<span class="set-sub">Only what is on this computer plays: your files, songs saved, and songs kept as they were played. No add-on is asked and nothing streams; songs that are not here are dimmed, and plays wait to be scrobbled. It stays on until you turn it off.</span>
+				</div>
+				<button type="button" class="sw" role="switch" aria-checked={ui.offline} aria-labelledby="off-l" onclick={() => void goOffline(!ui.offline)}><i></i></button>
 			</div>
 			{#if room}
 				<div class="set-row set-col">

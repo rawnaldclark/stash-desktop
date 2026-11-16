@@ -3,7 +3,7 @@
  * Components read `S.v` (PlayerState), `L.likes` etc.; they never touch audio or storage.
  */
 import { fromStore, get } from 'svelte/store';
-import { library, player, sources as sourcesApi } from '../app';
+import { library, offline as offlineStore, player, sources as sourcesApi } from '../app';
 import { LIB_REF, songIndex } from '../identity';
 import type { Counts, Descriptor, HistoryEntry, LibraryItem, Playlist, SourceStatus } from '../api';
 import type { PlayerState } from '../api';
@@ -42,6 +42,7 @@ const counts = fromStore<Counts | null>(library.counts);
 const loaded = fromStore<boolean>(library.loaded);
 const changed = fromStore<number>(library.changed);
 const sources = fromStore<SourceStatus[]>(sourcesApi.status);
+const offlineNow = fromStore<boolean>(offlineStore);
 
 class Lib {
 	get likes() {
@@ -141,6 +142,10 @@ class UIState {
 	menu = $state<MenuState | null>(null);
 	/** The text in the header search box (shared with the Search page). */
 	q = $state('');
+	/** Stash is offline: only what is on this computer plays (Settings › Your library, Ctrl+K, the header's chip). */
+	get offline() {
+		return offlineNow.current;
+	}
 	private toastTimer: ReturnType<typeof setTimeout> | undefined;
 
 	/** The desktop has two sizes: L, and M (the rail) for every window under 1100 px. */

@@ -7,7 +7,7 @@
 	import { onMount, type Component } from 'svelte';
 	import { afterNavigate, goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { player, problems } from '../lib/app';
+	import { player, problems, readOffline } from '../lib/app';
 	import { measuring } from '../lib/core';
 	import Header from '../lib/ui/Header.svelte';
 	import NowPlaying from '../lib/ui/NowPlaying.svelte';
@@ -116,6 +116,7 @@
 
 	onMount(() => {
 		if (!measuring) void NF.refresh();
+		void readOffline();
 		// Measuring: the whole library's list is what is measured.
 		if (measuring && !(page.url.pathname === '/library' && page.url.searchParams.get('tab') === 'songs')) void goto('/library?tab=songs', { replaceState: true });
 		const idle = (window as Window & { requestIdleCallback?: (f: () => void, o?: { timeout: number }) => number }).requestIdleCallback;

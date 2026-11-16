@@ -5,6 +5,7 @@
 	import { measuring } from '../core';
 	import Icon from './Icon.svelte';
 	import { ui } from './state.svelte';
+	import { goOffline } from '../app';
 
 	let input = $state<HTMLInputElement>();
 	let timer: ReturnType<typeof setTimeout> | undefined;
@@ -49,5 +50,6 @@
 			onkeydown={(e) => { if (e.key === 'Escape') { ui.q = ''; go('', true); input?.blur(); } }}
 		/>
 	</form>
+	{#if ui.offline}<button type="button" class="hd-dev hd-off" aria-label="Offline: only what is on this computer plays. Go back online" title="Offline: only what is on this computer plays. Click to go back online" onclick={() => void goOffline(false)}><Icon name="download" /><span class="hd-dt">Offline</span></button>{/if}
 	<a class="hd-dev" href="/settings" aria-label="Settings" title="Settings"><Icon name="settings" /><span class="hd-dt">Settings</span></a>
 </header>

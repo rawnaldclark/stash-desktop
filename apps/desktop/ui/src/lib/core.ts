@@ -69,6 +69,8 @@ export type TrackRow = {
 	artist_id: number;
 	added_at_ms: number;
 	isrc: string | null;
+	/** It plays with no connection: a file that is here (the listener's own, or a song saved), or a song kept as it was played. */
+	here: boolean;
 };
 export type LikedRow = TrackRow & { liked_at_ms: number };
 export type PlayedRow = TrackRow & { played_at_ms: number };
@@ -134,6 +136,11 @@ export const createSmartPlaylist = (name: string, rules: SmartRules) => post<Cha
 export const setPlaylistRules = (id: number, rules: SmartRules) => post<Changed>(`/api/playlists/${id}/rules`, { rules });
 /** How many songs `rules` pick now, and the first few. Rules that make no sense are refused in the core's words. */
 export const previewRules = (rules: SmartRules) => post<{ count: number; rows: TrackRow[] }>('/api/playlists/preview', { rules });
+
+// ---- Offline: Stash plays only what is on this computer, and asks no add-on
+
+export const offline = () => get<{ offline: boolean }>('/api/offline').then((r) => r.offline);
+export const setOffline = (on: boolean) => post<{ offline: boolean }>('/api/offline', { offline: on }).then((r) => r.offline);
 
 // ---- Scrobbling (the core's `scrobble.rs`, `listenbrainz.rs` and `scrobbling.rs`)
 

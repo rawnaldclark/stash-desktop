@@ -3428,18 +3428,18 @@ fn offline_plays_only_what_is_here_and_asks_no_add_on() {
         Some("1")
     );
 
-    // A song that is not here is refused in words.
-    let (status, refused) =
-        client.send("/api/player/play", json!({ "playlist": mix, "offset": 0 }));
+    // Songs none of which is here are refused in words.
+    let (status, refused) = client.send("/api/player/play", json!({ "ids": [bravo] }));
     assert_eq!(
         (status, refused["error"]["message"].as_str()),
         (
             409,
-            Some("Stash is offline, and that song is not on this computer")
+            Some("Stash is offline, and none of that is on this computer")
         )
     );
-    // From the next one on, the queue holds only what is here; the kept copy plays and no add-on is asked.
-    client.post("/api/player/play", json!({ "playlist": mix, "offset": 1 }));
+    // From the top of the list, the song that is not here is passed over and the queue holds only what is: the kept
+    // copy plays, and no add-on is asked.
+    client.post("/api/player/play", json!({ "playlist": mix, "offset": 0 }));
     let (_, queue) = client.get("/api/player/queue");
     let titles: Vec<&str> = queue["rows"]
         .as_array()

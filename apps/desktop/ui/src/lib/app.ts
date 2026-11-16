@@ -79,6 +79,7 @@ export function itemOfRow(r: core.TrackRow): LibraryItem {
 	if (art) item.artwork = [{ url: art }];
 	if (r.album_id !== null && r.album_id !== undefined) item.albumRefs = { [LIBRARY_SOURCE]: String(r.album_id) };
 	if (r.artist_id !== null && r.artist_id !== undefined) item.artistRefs = { [LIBRARY_SOURCE]: String(r.artist_id) };
+	if (r.here === false) item.here = false;
 	fromRow.set(r, item);
 	remember(r.id, item, r.bit_depth ?? null);
 	return item;
@@ -87,10 +88,25 @@ export function itemOfRow(r: core.TrackRow): LibraryItem {
 /** A track an add-on found: `refs[<add-on id>]` is the add-on's id for it. No album or artist page (add-ons have none here). */
 function itemOfFound(addon: string, t: core.FoundTrack): LibraryItem {
 	const d = descriptorOf(t.title, t.artist, t.album, t.duration_ms);
-	const item: LibraryItem = { ...d, key: descriptorKey(d), refs: { [addon]: t.id }, addedAt: 0 };
+	const item: LibraryItem = { ...d, key: descriptorKey(d), refs: { [addon]: t.id }, addedAt: 0, here: false };
 	const art = core.artUrl(t.art);
 	if (art) item.artwork = [{ url: art }];
 	return item;
+}
+
+/** Stash is offline: it plays only what is on this computer, and asks no add-on (the core keeps it from one run to the next). */
+export const offline = writable(false);
+/** Reads whether Stash is offline. */
+export async function readOffline(): Promise<void> {
+	try {
+		offline.set(await core.offline());
+	} catch {
+		/* the core is not answering: as it was */
+	}
+}
+/** Goes offline, or back online. */
+export async function goOffline(on: boolean): Promise<void> {
+	offline.set(await core.setOffline(on));
 }
 
 type Queued = Pick<core.QueueRow, 'id' | 'title' | 'artist' | 'album' | 'art' | 'duration_ms' | 'addon' | 'qid'>;
@@ -628,7 +644,7 @@ const search: SearchAPI = {
 		const topPick: TopPick = named ? { kind: 'artist', artist: named } : titled ? { kind: 'album', album: titled } : { kind: 'track' };
 		const found = { artists, albums, topPick };
 		// The add-ons a search asks: switched on, usable, and offering search. In the listener's order.
-		const asked = get(addonStore).filter((a) => a.enabled && !a.problem && a.resources.includes('search'));
+		const asked = get(offline) ? [] : get(addonStore).filter((a) => a.enabled && !a.problem && a.resources.includes('search'));
 		if (!asked.length) return { top: mergeTop([lib]), ...found, bySource: [lib], failed: [], pending: [] };
 		opts?.onLibrary?.({ top: mergeTop([lib]), ...found, bySource: [lib], failed: [], pending: asked.map((a) => a.name) });
 

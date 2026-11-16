@@ -406,7 +406,7 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 ### Not covered yet
 
 - No real add-on's stream has been relayed: a server that does not answer ranges, or one that sends the file slower than it plays, was not tried; neither was a long hi-res file larger than the engine's own buffer (the stream then stays open as long as the song plays, on a thread of its own).
-- A song kept is not marked in the lists, and the copies are not counted as offline songs anywhere yet.
+- A song kept is not marked in the lists while online (offline, the songs that are not here are dimmed: section 22).
 - A stream whose length is not told cannot be picked up again, and its early end looks like the song's end to the engine. A stream that stops sending without closing keeps its thread until the server gives up.
 - Songs the engine has to seek in before it plays them (an MP4 with its index at the end) are never kept, and are fetched again each time.
 
@@ -483,3 +483,19 @@ In the app (1400 × 900, three launches): first rows painted 870 to 1,270 ms aft
 
 - Last.fm. It needs an application key and secret, and those do not belong in a public repository; a build could carry them from outside the source.
 - The real ListenBrainz: the stand-in follows its documented checks, but no real token was used.
+
+## 22. Offline
+
+- **Offline, Stash plays only what is on this computer.** It is turned on in Settings › Your library › Offline or with Ctrl+K, and turned off there or with the header's Offline chip; the core keeps it from one run to the next. "On this computer" means a file that is here (one of the listener's own, or a song saved), or a song kept as it was played (section 16). Each song row says which it is.
+- **Nothing streams and no add-on is asked.** A queue holds only songs that are here: playing a list from a song that is not here starts at the next one that is, and a list with none is refused in words. A queue made online and played offline passes over what is not here. In the window, songs that are not here are dimmed; clicking one says why and plays nothing, while liking it or adding it to a playlist still works. Search looks in the library only. Lyrics show what was found before, however old, and nothing new is looked up. Saving songs waits, autoplay does not ask, and scrobbles wait; all of it goes on once Stash is back online.
+- **Dimmed, not hidden.** The phone's Download mode hides what is not downloaded. Here the lists keep every song, so a playlist reads the same online and off, and the songs that will play are the bright ones.
+
+### Checked
+
+- **By the tests:** `crates/stashd/tests/api.rs` (`offline_plays_only_what_is_here_and_asks_no_add_on`), on a playlist of an add-on's song, a file, an add-on's song with a copy kept, and another file. Its rows said here: no, yes, yes, yes. Offline (and kept in the library), songs none of which is here were refused in words. Played from the top, the queue held the file, the kept song and the other file, and the kept song played from its copy (lossless, no add-on named, and nothing asked of the add-on that day). An add-on search, adding an add-on and a song's candidates were refused. A song that is not here was not added to the queue; one that is, was. Back online, the add-on's song played from the add-on.
+- **On the built page served by the core**, on a scratch library of 600 files and 53 songs known only by their description: Settings › Your library › Offline turned it on, and the header showed "Offline". Library › Songs dimmed 5 of the first 28 rows. Clicking one said "Not on this computer, and Stash is offline" and nothing played; a row that is here played. Ctrl+K offered "Go back online"; Search said "Stash is offline: songs, albums and artists from your library."; the header's chip went back online. No errors in the page.
+
+### Not covered yet
+
+- Up next and the mini player do not dim what will be passed over.
+- Covers from the web are still asked for (with no connection they just do not load).

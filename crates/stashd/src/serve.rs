@@ -1097,8 +1097,8 @@ fn listed_items(
     Ok((items, begins))
 }
 
-/// Offline, a queue keeps only the songs that play with no connection, the song at `start` in its place. `None`: the
-/// song at `start` is not one of them.
+/// Offline, a queue keeps only the songs that play with no connection, and begins at the song at `start` or, when that
+/// one does not play here, the next that does. `None`: none from `start` on does.
 fn offline_queue(
     state: &State,
     items: Vec<QueueItem>,
@@ -1111,13 +1111,19 @@ fn offline_queue(
     let here = state.library.lock().unwrap().here_of(&ids)?;
     let plays =
         |item: &QueueItem| item.addon.is_none() && item.id.is_some_and(|id| here.contains(&id));
-    if items.get(start).is_some_and(|item| !plays(item)) {
+    let Some(first) = items
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find(|(_, item)| plays(item))
+        .map(|(place, _)| place)
+    else {
         return Ok(None);
-    }
+    };
     let mut kept = Vec::with_capacity(items.len());
     let mut begins = 0;
     for (place, item) in items.into_iter().enumerate() {
-        if place == start {
+        if place == first {
             begins = kept.len();
         }
         if plays(&item) {
@@ -1259,9 +1265,8 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
                 .cloned()
                 .unwrap_or_default();
             let (items, _) = listed_items(&state.library.lock().unwrap(), &list, 0)?;
-            let items = match offline_queue(state, items, usize::MAX)? {
-                Some((items, _)) if !items.is_empty() => items,
-                _ => return Ok(Some(refuse(409, NOT_HERE_OFFLINE))),
+            let Some((items, _)) = offline_queue(state, items, 0)? else {
+                return Ok(Some(refuse(409, NOT_HERE_OFFLINE)));
             };
             playing.enqueue(
                 items,
@@ -1370,8 +1375,8 @@ const LRCLIB: &str = "https://lrclib.net";
 const LRCLIB_SETTING: &str = "lyrics.lrclib";
 /// The setting that keeps Stash offline ("1").
 const OFFLINE_SETTING: &str = "offline";
-/// A song asked for while offline that does not play with no connection.
-const NOT_HERE_OFFLINE: &str = "Stash is offline, and that song is not on this computer";
+/// Songs asked for while offline, none of which plays with no connection.
+const NOT_HERE_OFFLINE: &str = "Stash is offline, and none of that is on this computer";
 
 /// Stash is offline: nothing is asked of the network for music (no add-on, no LRCLIB, no scrobbling service).
 pub(crate) fn offline(state: &State) -> bool {
