@@ -495,5 +495,24 @@ fn read_copy(
             }
         }
     }
+    // Songs the listener chose not to play on the phone.
+    if shape.has_all("track_blocklist", &["artist", "title"]) {
+        let at = shape.column("track_blocklist", "bl", "blocked_at");
+        let sql = format!("SELECT bl.title, bl.artist, {at} FROM track_blocklist bl ORDER BY {at}");
+        let mut stmt = conn.prepare(&sql).map_err(read)?;
+        let mut rows = stmt.query([]).map_err(read)?;
+        while let Some(row) = rows.next().map_err(read)? {
+            let title: Option<String> = row.get(0).map_err(read)?;
+            let artist: Option<String> = row.get(1).map_err(read)?;
+            let at: Option<i64> = row.get(2).map_err(read)?;
+            let (title, artist) = (
+                clean_text(title.as_deref().unwrap_or(""), 300),
+                clean_text(artist.as_deref().unwrap_or(""), 300),
+            );
+            if !title.is_empty() && !artist.is_empty() {
+                incoming.blocked.push((title, artist, at.unwrap_or(now_ms)));
+            }
+        }
+    }
     Ok(incoming)
 }

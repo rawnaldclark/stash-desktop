@@ -187,5 +187,6 @@ pub fn read(bytes: &[u8], now_ms: i64) -> Result<Incoming, ImportError> {
         playlists,
         plays,
         songs: Vec::new(),
+        blocked: Vec::new(),
     })
 }

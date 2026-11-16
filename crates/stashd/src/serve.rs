@@ -1347,6 +1347,12 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
                 };
                 (library.queue_items(&ids)?, 0)
             };
+            // Songs the listener chose not to play are left out (one song asked for by itself still plays).
+            let Some((items, start)) =
+                crate::blocking::leave_out(&state.library.lock().unwrap(), items, start)?
+            else {
+                return Ok(Some(refuse(409, crate::blocking::ALL_BLOCKED)));
+            };
             let Some((items, start)) = offline_queue(state, items, start)? else {
                 return Ok(Some(refuse(409, NOT_HERE_OFFLINE)));
             };
@@ -1360,6 +1366,11 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
                 .cloned()
                 .unwrap_or_default();
             let (items, _) = listed_items(&state.library.lock().unwrap(), &list, 0)?;
+            let Some((items, _)) =
+                crate::blocking::leave_out(&state.library.lock().unwrap(), items, 0)?
+            else {
+                return Ok(Some(refuse(409, crate::blocking::ALL_BLOCKED)));
+            };
             let Some((items, _)) = offline_queue(state, items, 0)? else {
                 return Ok(Some(refuse(409, NOT_HERE_OFFLINE)));
             };
@@ -2129,6 +2140,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::shortcuts::route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::blocking::route(state, request, &path)? {
         return Ok((response, false));
     }
     if let Some(response) = offline_route(state, request, &path)? {

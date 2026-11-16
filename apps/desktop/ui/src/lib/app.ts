@@ -80,6 +80,7 @@ export function itemOfRow(r: core.TrackRow): LibraryItem {
 	if (r.album_id !== null && r.album_id !== undefined) item.albumRefs = { [LIBRARY_SOURCE]: String(r.album_id) };
 	if (r.artist_id !== null && r.artist_id !== undefined) item.artistRefs = { [LIBRARY_SOURCE]: String(r.artist_id) };
 	if (r.here === false) item.here = false;
+	if (r.blocked) item.blocked = r.blocked;
 	fromRow.set(r, item);
 	remember(r.id, item, r.bit_depth ?? null);
 	return item;
@@ -107,6 +108,30 @@ export async function readOffline(): Promise<void> {
 /** Goes offline, or back online. */
 export async function goOffline(on: boolean): Promise<void> {
 	offline.set(await core.setOffline(on));
+}
+
+/** What the listener chose not to play since the lists were read, by the library's row: the rows' own word is older. */
+export const blockedNow = writable(new Map<number, 'song' | 'artist' | null>());
+/** Chooses not to play a song (`kind` "song": every copy of its words) or every song of its artist, or (`on` false) to
+ * play it again. The rows it covers are marked at once; answers every song and artist chosen not to be played. */
+export async function notPlayed(kind: 'song' | 'artist', item: { title: string; artist: string }, on: boolean): Promise<core.Blocked[]> {
+	const said = await core.setBlocked({ kind, title: kind === 'song' ? item.title : undefined, artist: item.artist, blocked: on });
+	if (said.songs?.length) {
+		blockedNow.update((now) => {
+			const next = new Map(now);
+			for (const s of said.songs!) next.set(s.id, s.blocked);
+			return next;
+		});
+	}
+	// The change the core counted is this window's own: its rows are marked already.
+	if (said.edits !== undefined && edits !== null && said.edits === edits + 1) edits = said.edits;
+	return said.rows;
+}
+/** Whether, and how, the listener chose not to play a song: its row's word, or a choice made since. */
+export function blockedOf(item: Pick<LibraryItem, 'refs' | 'blocked'>, now: Map<number, 'song' | 'artist' | null>): 'song' | 'artist' | undefined {
+	const id = libIdOf(item);
+	if (id !== null && now.has(id)) return now.get(id) ?? undefined;
+	return item.blocked;
 }
 
 /** The liked songs are kept on this computer (a playlist says so itself, as `download`). Read with the counts. */

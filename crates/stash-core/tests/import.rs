@@ -133,7 +133,8 @@ fn an_import_adds_and_importing_again_adds_nothing() {
             playlists_merged: 0,
             playlist_songs_added: 0,
             plays_added: 3,
-            plays_already: 0
+            plays_already: 0,
+            blocks_added: 0
         }
     );
     assert_eq!(library.counts().unwrap().tracks, 5);
@@ -164,7 +165,8 @@ fn an_import_adds_and_importing_again_adds_nothing() {
             playlists_merged: 1,
             playlist_songs_added: 0,
             plays_added: 0,
-            plays_already: 3
+            plays_already: 3,
+            blocks_added: 0
         }
     );
     assert_eq!(library.counts().unwrap().tracks, 5);

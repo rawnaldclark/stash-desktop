@@ -89,6 +89,9 @@ pub struct TrackRow {
     /// It plays with no connection: a file that is here (the listener's own, or a song saved), or a song kept as it
     /// was played.
     pub here: bool,
+    /// The listener chose not to play it (`blocks.rs`), as "song" (this song) or "artist" (its artist's songs): Stash
+    /// does not play it on its own.
+    pub blocked: Option<String>,
     /// When this play started: set in the history.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub played_at_ms: Option<i64>,
@@ -220,10 +223,12 @@ const TRACK_COLUMNS: &str = concat!(
     "t.id, t.title, a.name, al.title, t.duration_ms, t.codec, t.sample_rate, t.bit_depth, t.origin, t.sort_key, t.liked_at_ms IS NOT NULL, ",
     art!(),
     ", t.album_id, t.artist_id, t.added_at * 1000, t.isrc, t.liked_at_ms, ",
-    here!()
+    here!(),
+    ", ",
+    crate::blocks::blocked_kind!()
 );
 /// How many columns [`TRACK_COLUMNS`] has: a column a query adds after them is read from this place on.
-pub(crate) const TRACK_COLUMN_COUNT: usize = 18;
+pub(crate) const TRACK_COLUMN_COUNT: usize = 19;
 const ALBUM_COLUMNS: &str = concat!(
     "al.id, al.title, a.name, al.artist_id, al.year,
     (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id),
@@ -295,6 +300,7 @@ fn track_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackRow> {
         isrc: r.get(15)?,
         liked_at_ms: r.get(16)?,
         here: r.get(17)?,
+        blocked: r.get(18)?,
         played_at_ms: None,
     })
 }

@@ -668,3 +668,50 @@ Checked:
 ### Not covered yet
 
 - Albums, Artists and the playlists' pages have no such filter: offline, they dim what is not here.
+
+## 26. Songs and artists not played
+
+- **"Don't play this song" and "Don't play {artist}"** are in every song's menu. Stash then never plays them on its own:
+  - autoplay never picks them;
+  - a list played through leaves them out, and so does a group of songs added to Up next.
+- **A song chosen by itself still plays.** That covers one song played or added to Up next. A click on a dimmed row says "You chose not to play …" and offers "Play it", which plays that one song.
+- **Choosing takes effect at once.**
+  - The song or the artist's songs leave Up next, and the song playing is skipped if it is one of them.
+  - Their rows dim everywhere.
+  - The toast offers Undo, and the menu then offers "Play this song again" or "Play {artist} again".
+- **A song is known by its words**, so every copy of it counts: a file, a saved song, an add-on's track. An artist is known by its name, whatever case or accents. A name with no letters or digits, like "!!!", is refused, since it would stand for every such name.
+- **Settings › Not played** lists them, the latest first, each with "Play again". The command palette goes there.
+- **The phone's blocklist comes over on import.** Songs the listener chose not to play on the phone are not played here either, and the import says how many came over.
+- **Schema 17** adds `blocked(kind, key, title, artist, at_ms)`. A track row says `blocked: "song" | "artist" | null`. `GET /api/blocks` lists the blocks. `POST /api/blocks {kind, title, artist, blocked}` chooses or plays again; it answers with the library's rows it covers, so the window marks them at once.
+
+### Checked
+
+- **By the tests:**
+  - `a_song_is_known_by_its_words_and_an_artist_by_its_name` (core):
+    - A song block covered the same words with a "feat." credit and in other case, but not another artist's song of that name.
+    - An artist block covered every song by that name, accents or not.
+    - Autoplay picked none of them.
+    - Playing the artist again left the song's own block in place.
+    - "!!!" was refused.
+  - The Android import test: the phone's blocked song came over as one block, and importing again added none.
+  - `songs_and_artists_chosen_not_to_be_played_are_left_out`, with the real engine on the silent output and two made-up artists of three songs each:
+    - A song block put one row's `blocked` to "song". The library played through queued the other five.
+    - That song played when asked for by itself. Added to Up next with two others it was left out; added by itself it was queued.
+    - An artist was blocked while its first song played. The song was skipped to the next by someone else, the artist's other songs left Up next, and their rows said "artist".
+    - A list of only that artist's songs was refused with 409.
+    - Playing the artist again left one block.
+    - A wrong kind, a missing artist and "!!!" were refused.
+- **On the built page served by the core:** a new scratch library of the same made-up files, scanned.
+  - The menu showed both entries. "Don't play this song" said "Stash won't play “…” on its own" with Undo, and one row dimmed.
+  - A click on that row said "You chose not to play “…”" with Play it, and nothing played.
+  - "Don't play Shadow 1" dimmed four rows.
+  - Playing from a free song of the other artist queued it and the next free one, leaving out the two dimmed songs between.
+  - The menu of a Shadow 1 song then offered "Play Shadow 1 again".
+  - Settings › Not played listed Shadow 1 ("Every song by this artist") and the song. Play again on the artist left one entry, and Songs then dimmed one row.
+  - No errors in the page.
+
+### Not covered yet
+
+- An add-on's track found in a search is not marked until it is played or kept (its words are checked when it would be queued).
+- Smart playlists still list blocked songs (dimmed); playing them leaves those out.
+- The way back out (the library file the phone and web player read) does not carry the blocks yet.

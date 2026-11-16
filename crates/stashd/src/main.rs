@@ -156,7 +156,7 @@ fn import(db: &Path, file: &Path) -> Result<()> {
             .unwrap_or_default()
     );
     println!(
-        "new songs {}, here already {}; likes {} (+{} here); playlists {} new, {} merged (+{} songs); plays {} (+{} here)",
+        "new songs {}, here already {}; likes {} (+{} here); playlists {} new, {} merged (+{} songs); plays {} (+{} here); songs not played {}",
         summary.songs_added,
         summary.songs_already,
         summary.likes_added,
@@ -165,7 +165,8 @@ fn import(db: &Path, file: &Path) -> Result<()> {
         summary.playlists_merged,
         summary.playlist_songs_added,
         summary.plays_added,
-        summary.plays_already
+        summary.plays_already,
+        summary.blocks_added
     );
     let counts = library.counts()?;
     println!(

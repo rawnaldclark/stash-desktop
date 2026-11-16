@@ -158,7 +158,9 @@ impl Library {
             "NOT EXISTS (SELECT 1 FROM plays p WHERE p.track_id = t.id AND p.played_at_ms >= ?1)";
         let candidates = |filter: &str, order: &str| -> Result<Vec<(i64, i64)>> {
             let sql = format!(
-                "SELECT t.id, t.artist_id FROM tracks t WHERE {filter} AND {playable} AND {rested} ORDER BY {order} LIMIT 60"
+                "SELECT t.id, t.artist_id FROM tracks t WHERE {filter} AND {playable} AND {rested} AND NOT {blocked}
+                 ORDER BY {order} LIMIT 60",
+                blocked = crate::blocks::blocked!()
             );
             let mut stmt = self.conn.prepare(&sql)?;
             let rows = stmt

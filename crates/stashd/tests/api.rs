@@ -552,7 +552,7 @@ fn a_library_file_is_imported_and_its_songs_play_through_an_add_on() {
     );
     assert_eq!(
         imported["summary"],
-        json!({ "songs_added": 6, "songs_already": 0, "likes_added": 3, "likes_already": 0, "playlists_added": 1, "playlists_merged": 0, "playlist_songs_added": 0, "plays_added": 1, "plays_already": 0 })
+        json!({ "songs_added": 6, "songs_already": 0, "likes_added": 3, "likes_already": 0, "playlists_added": 1, "playlists_merged": 0, "playlist_songs_added": 0, "plays_added": 1, "plays_already": 0, "blocks_added": 0 })
     );
     assert_eq!(
         imported["counts"],
@@ -4411,5 +4411,203 @@ fn an_add_on_whose_allowance_is_spent_holds_saving_and_fails_nothing() {
         assert!(Instant::now() < deadline, "still waiting: {now}");
         std::thread::sleep(Duration::from_millis(50));
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn songs_and_artists_chosen_not_to_be_played_are_left_out() {
+    let Some(engine) = engine() else {
+        eprintln!("SKIPPED blocks: no libmpv found");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("stash-api-blocks-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let music = dir.join("Music");
+    // Two made-up artists, three songs each.
+    stash_core::synth::write_files(&music.join("A"), 3, 7, 20.0, false).unwrap();
+    stash_core::synth::write_files(&music.join("B"), 3, 11, 20.0, false).unwrap();
+    let db = dir.join("library.db");
+    {
+        let mut library = Library::open(&db).unwrap();
+        assert_eq!(scan_folder(&mut library, &music, |_| {}).unwrap().added, 6);
+    }
+    let core = Core::bind(Options {
+        db,
+        ui: None,
+        port: 0,
+        bench_out: None,
+        audio: Some(Output::Silent),
+        mpv: Some(engine),
+        play_counts_between_seconds: None,
+    })
+    .unwrap();
+    let base = format!("http://127.0.0.1:{}", core.port());
+    std::thread::spawn(move || core.run());
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+    let client = Client { agent, base };
+    client.post("/api/player/volume", json!({ "percent": 0 }));
+    let rows = || {
+        client.get("/api/tracks?offset=0&limit=20").1["rows"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    let all = rows();
+    let artist_of = |row: &Value| row["artist"].as_str().unwrap().to_string();
+    // An artist with two songs or more, and a song by another.
+    let artist = all
+        .iter()
+        .map(artist_of)
+        .find(|a| all.iter().filter(|r| artist_of(r) == *a).count() >= 2)
+        .expect("an artist with two songs");
+    let other = all
+        .iter()
+        .find(|r| artist_of(r) != artist)
+        .expect("another artist's song")
+        .clone();
+    let queued = || -> Vec<String> {
+        client.get("/api/player/queue?offset=0&limit=50").1["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["title"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // A song chosen not to be played: its row says so, and the library played through leaves it out.
+    let said = client.post(
+        "/api/blocks",
+        json!({ "kind": "song", "title": other["title"], "artist": other["artist"], "blocked": true }),
+    );
+    assert_eq!(said["rows"].as_array().unwrap().len(), 1, "{said}");
+    assert_eq!(
+        said["songs"],
+        json!([{ "id": other["id"], "blocked": "song" }]),
+        "{said}"
+    );
+    let flagged: Vec<Value> = rows().iter().map(|r| r["blocked"].clone()).collect();
+    assert_eq!(
+        flagged.iter().filter(|b| **b == "song").count(),
+        1,
+        "{flagged:?}"
+    );
+    assert_eq!(
+        flagged.iter().filter(|b| b.is_null()).count(),
+        5,
+        "{flagged:?}"
+    );
+    client.post("/api/player/play", json!({ "offset": 0 }));
+    let titles = queued();
+    assert_eq!(titles.len(), all.len() - 1, "{titles:?}");
+    assert!(!titles.contains(&other["title"].as_str().unwrap().to_string()));
+    // Asked for by itself, it plays.
+    client.post("/api/player/play", json!({ "ids": [other["id"]] }));
+    client.player_until("the song asked for to play", |s| {
+        s["track"]["title"] == other["title"] && s["status"] == "playing"
+    });
+    // Added to Up next with others, it is left out; by itself, it is added.
+    let others: Vec<Value> = all
+        .iter()
+        .filter(|r| r["id"] != other["id"])
+        .take(2)
+        .map(|r| json!({ "id": r["id"] }))
+        .collect();
+    let mut group = others.clone();
+    group.push(json!({ "id": other["id"] }));
+    client.post("/api/player/enqueue", json!({ "items": group }));
+    assert_eq!(queued().len(), 3, "{:?}", queued());
+    client.post(
+        "/api/player/enqueue",
+        json!({ "items": [{ "id": other["id"] }] }),
+    );
+    assert_eq!(queued().len(), 4, "{:?}", queued());
+
+    // An artist chosen not to be played while one of its songs plays: that song is skipped, and its other songs leave
+    // Up next.
+    let theirs: Vec<Value> = all
+        .iter()
+        .filter(|r| artist_of(r) == artist)
+        .cloned()
+        .collect();
+    let mut list: Vec<Value> = theirs.iter().map(|r| json!({ "id": r["id"] })).collect();
+    let keeper = all
+        .iter()
+        .find(|r| artist_of(r) != artist && r["id"] != other["id"])
+        .expect("a third song by someone else")
+        .clone();
+    list.push(json!({ "id": keeper["id"] }));
+    client.post("/api/player/play", json!({ "items": list }));
+    client.player_until("the artist's first song to play", |s| {
+        s["track"]["title"] == theirs[0]["title"] && s["status"] == "playing"
+    });
+    client.post(
+        "/api/blocks",
+        json!({ "kind": "artist", "artist": artist, "blocked": true }),
+    );
+    // The artist's songs say how they are kept out; the song chosen by itself still says it is the song.
+    let kinds: Vec<Value> = rows().iter().map(|r| r["blocked"].clone()).collect();
+    assert_eq!(
+        kinds.iter().filter(|b| **b == "artist").count(),
+        3,
+        "{kinds:?}"
+    );
+    client.player_until("the next song by someone else", |s| {
+        s["track"]["title"] == keeper["title"]
+    });
+    let left = queued();
+    assert!(
+        theirs
+            .iter()
+            .skip(1)
+            .all(|r| !left.contains(&r["title"].as_str().unwrap().to_string())),
+        "{left:?}"
+    );
+    // Every song from the one asked for on is the artist's: nothing plays, and it is said why.
+    let ids: Vec<Value> = theirs.iter().map(|r| json!({ "id": r["id"] })).collect();
+    let (status, refused) = client.send("/api/player/play", json!({ "items": ids }));
+    assert_eq!(status, 409, "{refused}");
+
+    // Played again: the artist's songs come back; the song chosen before stays out.
+    client.post(
+        "/api/blocks",
+        json!({ "kind": "artist", "artist": artist, "blocked": false }),
+    );
+    let (_, listed) = client.get("/api/blocks");
+    assert_eq!(listed["rows"].as_array().unwrap().len(), 1, "{listed}");
+    assert_eq!(rows().iter().filter(|r| !r["blocked"].is_null()).count(), 1);
+
+    // Refused: no kind, no artist, a name with nothing to know it by.
+    assert_eq!(
+        client
+            .send(
+                "/api/blocks",
+                json!({ "kind": "album", "artist": "x", "blocked": true })
+            )
+            .0,
+        400
+    );
+    assert_eq!(
+        client
+            .send(
+                "/api/blocks",
+                json!({ "kind": "song", "title": "x", "blocked": true })
+            )
+            .0,
+        400
+    );
+    assert_eq!(
+        client
+            .send(
+                "/api/blocks",
+                json!({ "kind": "artist", "artist": "!!!", "blocked": true })
+            )
+            .0,
+        400
+    );
+    client.post("/api/player/stop", json!({}));
     let _ = std::fs::remove_dir_all(&dir);
 }

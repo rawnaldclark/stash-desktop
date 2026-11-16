@@ -78,6 +78,8 @@ export type TrackRow = {
 	isrc: string | null;
 	/** It plays with no connection: a file that is here (the listener's own, or a song saved), or a song kept as it was played. */
 	here: boolean;
+	/** The listener chose not to play it: this song, or its artist's songs. */
+	blocked?: 'song' | 'artist' | null;
 };
 export type LikedRow = TrackRow & { liked_at_ms: number };
 export type PlayedRow = TrackRow & { played_at_ms: number };
@@ -158,6 +160,14 @@ export const createSmartPlaylist = (name: string, rules: SmartRules) => post<Cha
 export const setPlaylistRules = (id: number, rules: SmartRules) => post<Changed>(`/api/playlists/${id}/rules`, { rules });
 /** How many songs `rules` pick now, and the first few. Rules that make no sense are refused in the core's words. */
 export const previewRules = (rules: SmartRules) => post<{ count: number; rows: TrackRow[] }>('/api/playlists/preview', { rules });
+
+// ---- Songs and artists the listener chose not to play
+
+/** A song (every copy of its words) or an artist the listener chose not to play. */
+export type Blocked = { kind: 'song' | 'artist'; key: string; title: string; artist: string; at_ms: number };
+export type BlockedAnswer = { rows: Blocked[]; songs?: { id: number; blocked: 'song' | 'artist' | null }[]; edits?: number };
+export const blocks = () => get<BlockedAnswer>('/api/blocks').then((a) => a.rows);
+export const setBlocked = (b: { kind: 'song' | 'artist'; title?: string; artist: string; blocked: boolean }) => post<BlockedAnswer>('/api/blocks', b);
 
 // ---- Lists kept on this computer (a playlist, or the liked songs)
 
@@ -242,6 +252,8 @@ export type Imported = {
 		playlist_songs_added: number;
 		plays_added: number;
 		plays_already: number;
+		/** Songs chosen not to be played there that were not here yet. */
+		blocks_added?: number;
 	};
 	counts: Counts;
 };

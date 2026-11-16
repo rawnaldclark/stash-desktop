@@ -62,6 +62,7 @@
 			['Settings › Lyrics', '/settings#lyrics', 'settings'],
 			['Settings › Your library', '/settings#library', 'settings'],
 			['Settings › Scrobbling', '/settings#scrobbling', 'settings'],
+			['Settings › Not played', '/settings#not-played', 'settings'],
 			['Settings › Shortcuts', '/settings#shortcuts', 'settings'],
 			['Settings › Appearance', '/settings#appearance', 'settings']
 		];

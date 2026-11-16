@@ -7,8 +7,9 @@
 	import LikeButton from './LikeButton.svelte';
 	import { mmss } from './format';
 	import { openSongMenu, songMenu } from './song-menu';
-	import { S, ui, type MenuState } from './state.svelte';
+	import { L, S, ui, type MenuState } from './state.svelte';
 	import { NF } from '../desktop/unfound.svelte';
+	import { player } from '../app';
 
 	let {
 		item,
@@ -25,6 +26,8 @@
 	const off = $derived(NF.has(item));
 	/** Offline, a song that is not on this computer is drawn dimmed, and is not played. */
 	const away = $derived(ui.offline && item.here === false && !hit);
+	/** The listener chose not to play it: drawn dimmed; a click asks before it plays this one song by itself. */
+	const blocked = $derived(hit ? undefined : L.blockedOf(item));
 
 	// The same row of the library, not only the same song: the one song kept as two files is two rows, and only the copy playing lights up.
 	const current = $derived(!!S.v.current && sameCopy(item, S.v.current));
@@ -40,16 +43,21 @@
 			ui.toast('Not on this computer, and Stash is offline');
 			return;
 		}
+		if (blocked) {
+			const why = blocked === 'artist' ? `${item.artist}’s songs` : `“${item.title}”`;
+			ui.toast(`You chose not to play ${why}`, { label: 'Play it', run: () => void player.playItems([item], 0) });
+			return;
+		}
 		onplay();
 	}
 </script>
 
-<div class="trk-row" class:cur={current} class:off class:away class:has-num={num !== undefined} class:has-cv={cover} class:has-al={album} class:has-rd={handle} use:songMenu={{ item, extra }} role="presentation" title={off ? 'Not found on your add-ons' : away ? 'Not on this computer: Stash is offline' : undefined}>
+<div class="trk-row" class:cur={current} class:off class:away class:blk={!!blocked} class:has-num={num !== undefined} class:has-cv={cover} class:has-al={album} class:has-rd={handle} use:songMenu={{ item, extra }} role="presentation" title={off ? 'Not found on your add-ons' : away ? 'Not on this computer: Stash is offline' : blocked ? 'You chose not to play this' : undefined}>
 	{#if handle}<button type="button" class="rd-h" aria-label="Reorder {item.title}" title="Drag to reorder, or press Arrow Up or Down" aria-keyshortcuts="ArrowUp ArrowDown"><Icon name="drag_indicator" /></button>{/if}
 	<!-- A click anywhere on the row plays it (except on the names that link away); the button inside is the keyboard and screen-reader way in: its Enter or Space click bubbles to the row. -->
 	<!-- svelte-ignore a11y_click_events_have_key_events -->
 	<div class="trk-main" role="presentation" onclick={rowClick}>
-		<button type="button" class="trk-hit" aria-label={hit ?? `Play ${item.title} by ${item.artist}${off ? ' (not found on your add-ons)' : away ? ' (not on this computer)' : ''}`}></button>
+		<button type="button" class="trk-hit" aria-label={hit ?? `Play ${item.title} by ${item.artist}${off ? ' (not found on your add-ons)' : away ? ' (not on this computer)' : blocked ? ' (you chose not to play it)' : ''}`}></button>
 		{#if num !== undefined}
 			<span class="tr-n">{#if current}<i class="eq" class:still={!playing} aria-hidden="true"><b></b><b></b><b></b></i>{:else}{num}{/if}</span>
 		{/if}

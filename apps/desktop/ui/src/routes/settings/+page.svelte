@@ -7,6 +7,7 @@
 	import { folders, lastPart, many, trouble, type Notice } from '../../lib/desktop/folders.svelte';
 	import Scrobbling from '../../lib/desktop/Scrobbling.svelte';
 	import Shortcuts from '../../lib/desktop/Shortcuts.svelte';
+	import Blocked from '../../lib/desktop/Blocked.svelte';
 	import Icon from '../../lib/ui/Icon.svelte';
 	import { outputSentence } from '../../lib/ui/signal';
 	import { L, S, ui } from '../../lib/ui/state.svelte';
@@ -123,7 +124,8 @@
 			s.likes_added ? many(s.likes_added, 'like', 'likes') : '',
 			s.playlists_added ? many(s.playlists_added, 'playlist', 'playlists') : '',
 			s.playlist_songs_added ? `${many(s.playlist_songs_added, 'song', 'songs')} added to playlists that were here` : '',
-			s.plays_added ? many(s.plays_added, 'play', 'plays') : ''
+			s.plays_added ? many(s.plays_added, 'play', 'plays') : '',
+			s.blocks_added ? `${many(s.blocks_added, 'song', 'songs')} you chose not to play` : ''
 		].filter((p) => p !== '');
 		const from = result.generator ? ` from ${result.generator}` : '';
 		if (parts.length === 0) return `Nothing new${from}: everything in that file was here already.`;
@@ -475,6 +477,7 @@
 		</div>
 	</section>
 
+	<Blocked />
 	<Shortcuts />
 
 	<section class="set-sec" id="about" aria-labelledby="h-about">

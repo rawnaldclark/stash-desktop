@@ -3,7 +3,7 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { library, player, saveSongs, unsaveSongs } from '../app';
+	import { library, notPlayed, player, saveSongs, unsaveSongs } from '../app';
 	import { NF } from '../desktop/unfound.svelte';
 	import { LIB_REF } from '../identity';
 	import { albumHref, albumLink, artistHref, artistLink } from '../identity';
@@ -102,6 +102,21 @@
 		} else if (e.key === 'Tab') close(false);
 	}
 
+	/** Chooses not to play the song, or its artist's songs; or to play them again. Said with a way back. */
+	function dontPlay(kind: 'song' | 'artist', on: boolean) {
+		if (!m) return;
+		const item = m.item;
+		const what = kind === 'artist' ? item.artist : `“${item.title}”`;
+		void notPlayed(kind, item, on).then(
+			() =>
+				on
+					? ui.toast(`Stash won’t play ${what} on its own`, { label: 'Undo', run: () => void notPlayed(kind, item, false) })
+					: ui.toast(`${what} plays again`),
+			() => {}
+		);
+		close();
+	}
+
 	function createAndAdd() {
 		if (!m) return;
 		const songs = targets;
@@ -151,6 +166,17 @@
 					void saveSongs(targets).then((said) => ui.toast(said), () => {});
 					close();
 				})}
+			{/if}
+			{#if !isGroup}
+				{@const how = L.blockedOf(m.item)}
+				{#if how === 'song'}
+					{@render entry('block', 'Play this song again', () => dontPlay('song', false))}
+				{:else if how === 'artist'}
+					{@render entry('block', `Play ${m.item.artist} again`, () => dontPlay('artist', false))}
+				{:else}
+					{@render entry('block', 'Don’t play this song', () => dontPlay('song', true))}
+					{@render entry('block', `Don’t play ${m.item.artist}`, () => dontPlay('artist', true))}
+				{/if}
 			{/if}
 			{#if !isGroup && NF.has(m.item)}
 				{@render entry('search', 'Find on your add-ons…', () => run(() => void findIt(m.item.refs[LIB_REF])))}

@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 16;
+pub const SCHEMA_VERSION: i64 = 17;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
@@ -279,6 +279,19 @@ const V13: &str = "
     ALTER TABLE playlists ADD COLUMN rules TEXT;
 ";
 
+/// Version 17: songs and artists the listener chose not to play (`blocks.rs`), each by its words: a song by its
+/// `words_key`, an artist by its folded name.
+const V17: &str = "
+    CREATE TABLE blocked(
+        kind   TEXT NOT NULL CHECK (kind IN ('song', 'artist')),
+        key    TEXT NOT NULL,
+        title  TEXT NOT NULL DEFAULT '',
+        artist TEXT NOT NULL DEFAULT '',
+        at_ms  INTEGER NOT NULL,
+        PRIMARY KEY (kind, key)
+    ) WITHOUT ROWID;
+";
+
 /// Version 16: what a list kept on this computer leaves alone. A song the listener took off the downloads is
 /// remembered (`download_declined`), so a kept list does not put it back; and a song a list put on the downloads says
 /// so (`by_list`), so it is taken off again when no kept list holds it, while one asked for by hand stays.
@@ -467,6 +480,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V16)?;
         tx.pragma_update(None, "user_version", 16)?;
+        tx.commit()?;
+    }
+    if found < 17 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V17)?;
+        tx.pragma_update(None, "user_version", 17)?;
         tx.commit()?;
     }
     Ok(())

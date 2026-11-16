@@ -66,6 +66,8 @@ pub struct Incoming {
     pub plays: Vec<(Song, i64)>,
     /// Songs of the library that are in none of the above.
     pub songs: Vec<Song>,
+    /// Songs the listener chose not to play there (the app's blocklist): title, artist, and when.
+    pub blocked: Vec<(String, String, i64)>,
 }
 
 /// What an import changed.
@@ -83,6 +85,8 @@ pub struct Summary {
     pub playlist_songs_added: usize,
     pub plays_added: usize,
     pub plays_already: usize,
+    /// Songs chosen not to be played there that were not here yet.
+    pub blocks_added: usize,
 }
 
 /// Why a file was not imported, in words for the listener.
@@ -436,6 +440,17 @@ impl Library {
             }
             for song in &incoming.songs {
                 merger.track(song)?;
+            }
+            // Songs the listener chose not to play there are not played here either.
+            let mut block = tx.prepare(
+                "INSERT INTO blocked(kind, key, title, artist, at_ms) VALUES ('song', ?1, ?2, ?3, ?4)
+                 ON CONFLICT(kind, key) DO NOTHING",
+            )?;
+            for (title, artist, at_ms) in &incoming.blocked {
+                if let Some(key) = crate::blocks::BlockKind::Song.key(title, artist) {
+                    merger.summary.blocks_added +=
+                        block.execute(rusqlite::params![key, title, artist, at_ms])?;
+                }
             }
             // A song's count of plays is the plays the library holds for it.
             let mut recount = tx.prepare(

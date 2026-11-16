@@ -172,6 +172,11 @@ fn check(file: &Incoming) {
             .collect::<Vec<_>>(),
         ["Pink + White", "Only Downloaded", "Album Track"]
     );
+    // The song the listener chose not to play on the phone is not played here either.
+    assert_eq!(
+        file.blocked,
+        [("Blocked Song".to_string(), "Nobody".to_string(), 1)]
+    );
 }
 
 #[test]
@@ -204,6 +209,15 @@ fn the_phones_database_is_read_by_the_apps_own_rules() {
         ),
         (6, 2, 3, 2)
     );
+    assert_eq!(summary.blocks_added, 1);
+    let blocks = library.blocks().unwrap();
+    assert_eq!(
+        blocks
+            .iter()
+            .map(|b| (b.kind, b.key.as_str(), b.title.as_str()))
+            .collect::<Vec<_>>(),
+        [("song", "blocked song|nobody", "Blocked Song")]
+    );
     let out = library.export(1, "test").unwrap().to_string();
     assert!(
         !out.contains("/storage/") && !out.contains("Blocked Song") && !out.contains("Mix Filler")
@@ -218,6 +232,7 @@ fn the_phones_database_is_read_by_the_apps_own_rules() {
         ),
         (0, 0, 0, 0)
     );
+    assert_eq!(again.blocks_added, 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
