@@ -158,7 +158,8 @@
 		}
 	}
 	function move(index: number, by: number) {
-		const ids = L.sources.map((a) => a.id);
+		// The listener's own add-ons: what is built in is asked after them, whatever their order.
+		const ids = L.sources.filter((a) => !a.builtIn).map((a) => a.id);
 		const [id] = ids.splice(index, 1);
 		ids.splice(index + by, 0, id);
 		void addonChange(() => sources.order(ids));
@@ -195,7 +196,9 @@
 	};
 	/** Where it is, when that is nearer than the internet: it may send Stash only as near as that. */
 	const where = (a: SourceStatus) => (a.reach === 'home' ? 'on your network' : a.reach === 'here' ? 'on this computer' : '');
-	const detail = (a: SourceStatus) => [a.version ? `version ${a.version}` : '', a.host ?? '', where(a), does(a)].filter((p) => p !== '').join(' · ');
+	const detail = (a: SourceStatus) => (a.builtIn ? ['built in', does(a)] : [a.version ? `version ${a.version}` : '', a.host ?? '', where(a), does(a)]).filter((p) => p !== '').join(' · ');
+	/** How many of the sources are the listener's own add-ons (they come first in the list). */
+	const own = $derived(L.sources.filter((a) => !a.builtIn).length);
 
 	// ---- Your library: music folders, and one file that carries a library between this computer, the phone and the web player
 
@@ -498,7 +501,7 @@
 		<div class="set-card">
 			<div class="set-row set-col">
 				{#if L.sources.length}
-					{#if L.sources.length > 1}<div class="set-lab"><span class="set-sub">The first add-on is asked first.</span></div>{/if}
+					{#if L.sources.length > 1}<div class="set-lab"><span class="set-sub">{own > 1 ? 'The first add-on is asked first.' : 'Your add-on is asked first.'}{own < L.sources.length ? ' What your add-ons don’t have is found on YouTube Music.' : ''}</span></div>{/if}
 					<ol class="src-list">
 						{#each L.sources as a, i (a.id)}
 							<li class="src" class:off={!a.enabled}>
@@ -512,10 +515,12 @@
 								</span>
 								<span class="src-acts">
 									<button type="button" class="sw" role="switch" aria-checked={a.enabled} aria-label="{a.name}: on" title={a.enabled ? 'On' : 'Off'} onclick={() => addonChange(() => sources.setEnabled(a.id, !a.enabled))}><i></i></button>
-									<button type="button" class="act-ib" disabled={i === 0} aria-label="Ask {a.name} earlier" title="Ask earlier" onclick={() => move(i, -1)}><Icon name="arrow_upward" /></button>
-									<button type="button" class="act-ib" disabled={i === L.sources.length - 1} aria-label="Ask {a.name} later" title="Ask later" onclick={() => move(i, 1)}><Icon name="arrow_downward" /></button>
-									<button type="button" class="btn ghost" aria-label="Check {a.name} for a new version" title="Check for a new version" disabled={checking !== null || ui.offline} onclick={() => check(a)}>{checking === a.id && offer?.id !== a.id ? 'Checking…' : 'Check'}</button>
-									<button type="button" class="btn ghost" aria-label="Remove {a.name}" onclick={() => { if (offer?.id === a.id) offer = null; void addonChange(() => sources.remove(a.id)); }}>Remove</button>
+									{#if !a.builtIn}
+										<button type="button" class="act-ib" disabled={i === 0} aria-label="Ask {a.name} earlier" title="Ask earlier" onclick={() => move(i, -1)}><Icon name="arrow_upward" /></button>
+										<button type="button" class="act-ib" disabled={i >= own - 1} aria-label="Ask {a.name} later" title="Ask later" onclick={() => move(i, 1)}><Icon name="arrow_downward" /></button>
+										<button type="button" class="btn ghost" aria-label="Check {a.name} for a new version" title="Check for a new version" disabled={checking !== null || ui.offline} onclick={() => check(a)}>{checking === a.id && offer?.id !== a.id ? 'Checking…' : 'Check'}</button>
+										<button type="button" class="btn ghost" aria-label="Remove {a.name}" onclick={() => { if (offer?.id === a.id) offer = null; void addonChange(() => sources.remove(a.id)); }}>Remove</button>
+									{/if}
 								</span>
 								{#if offer?.id === a.id}
 									<div class="src-offer" role="group" aria-labelledby="offer-h">
@@ -535,6 +540,9 @@
 					</ol>
 				{:else}
 					<p class="set-p">Stash plays your own files and comes with no add-ons. An add-on is a server that finds music and plays it; you add one by the link its maker gives you.</p>
+				{/if}
+				{#if L.sources.length && own === 0}
+					<p class="set-p">An add-on is a server that finds music and plays it, in lossless when it has it; you add one by the link its maker gives you. Your add-ons are asked before YouTube Music.</p>
 				{/if}
 				<form class="dev-rename" onsubmit={add}>
 					<input class="dev-input" type="url" placeholder="https://…/manifest.json" bind:value={link} aria-label="An add-on’s link" autocomplete="off" spellcheck="false" />

@@ -30,6 +30,7 @@ use stash_core::player::{
     AddonTrack, Failure, Located, OnPlay, Player, QueueItem, Repeat, Resolver, Settings,
 };
 use stash_core::scan::{ScanReport, scan_folder};
+use stash_core::youtube::{self, YouTube};
 use stash_core::{Library, StoredAddon, matching};
 use tiny_http::{Header, Method, Request, Response, Server};
 use url::Url;
@@ -207,6 +208,8 @@ impl Loaded {
             "resources": kept.get("resources").cloned().unwrap_or_else(|| json!([])),
             "enabled": self.stored.enabled,
             "problem": self.addon.as_ref().err(),
+            // Part of Stash itself (YouTube Music): it can be switched off, not removed or checked.
+            "builtIn": self.addon.as_ref().is_ok_and(Addon::is_built_in),
         })
     }
 }
@@ -227,16 +230,43 @@ fn unread(e: &AddonError) -> Reply {
 /// The listener's add-ons, in the listener's order.
 pub(crate) type Registry = Arc<RwLock<Vec<Arc<Loaded>>>>;
 
-fn load_addons(library: &Library) -> Result<Vec<Arc<Loaded>>> {
-    Ok(library
+/// YouTube Music as the core holds it: the source, and where it is (the internet, but for a test's server).
+pub(crate) type BuiltInYouTube = (Arc<YouTube>, stash_core::reach::Reach);
+
+/// The setting that holds "1" while the listener has YouTube Music switched off.
+const YOUTUBE_OFF: &str = "youtube.off";
+/// The setting that holds the visitor id YouTube gave, so that the next start is the same visitor.
+const YOUTUBE_VISITOR: &str = "youtube.visitor";
+const BUILT_IN_STAYS: &str =
+    "YouTube Music is part of Stash: it can be switched off, not removed or changed";
+
+/// The listener's add-ons in their order, then YouTube Music (when this core has it): what the add-ons have comes
+/// first, and what they lack is found on YouTube.
+fn load_addons(library: &Library, youtube: Option<&BuiltInYouTube>) -> Result<Vec<Arc<Loaded>>> {
+    let mut loaded: Vec<Arc<Loaded>> = library
         .addons()?
         .into_iter()
+        // An add-on kept under YouTube's own id (from before it was built in) gives way to it.
+        .filter(|stored| youtube.is_none() || stored.id != youtube::ID)
         .map(|stored| {
             let addon =
                 Addon::from_stored(&stored.link, &stored.manifest).map_err(|e| e.in_words());
             Arc::new(Loaded { stored, addon })
         })
-        .collect())
+        .collect();
+    if let Some((source, reach)) = youtube {
+        let addon = source.source(*reach);
+        loaded.push(Arc::new(Loaded {
+            stored: StoredAddon {
+                id: youtube::ID.to_string(),
+                link: String::new(),
+                manifest: addon.manifest_json(),
+                enabled: library.setting(YOUTUBE_OFF)?.as_deref() != Some("1"),
+            },
+            addon: Ok(addon),
+        }));
+    }
+    Ok(loaded)
 }
 
 /// Where one add-on's track plays from, and whether it is a plain stream (one file, not a playlist of pieces).
@@ -887,6 +917,8 @@ pub(crate) struct State {
     pub(crate) opener: Option<OpenShell>,
     /// New versions of add-ons, offered to the listener and not yet taken (see `/api/addons/check`).
     offered: Mutex<HashMap<String, Offered>>,
+    /// YouTube Music, when this core has it built in.
+    youtube: Option<BuiltInYouTube>,
 }
 
 /// An add-on as its link gave it when it was checked, waiting for the listener to say yes. What is taken is what they
@@ -970,7 +1002,7 @@ impl State {
     }
 
     fn reload_addons(&self) -> Result<()> {
-        let loaded = load_addons(&self.library.lock().unwrap())?;
+        let loaded = load_addons(&self.library.lock().unwrap(), self.youtube.as_ref())?;
         *self.addons.write().unwrap() = loaded;
         Ok(())
     }
@@ -1009,7 +1041,7 @@ impl Core {
             .to_ip()
             .map(|a| a.port())
             .unwrap_or(options.port);
-        let addons: Registry = Arc::new(RwLock::new(load_addons(&library)?));
+        let addons: Registry = Arc::new(RwLock::new(load_addons(&library, None)?));
         // Copies of songs as they were played sit next to the library, in a folder of their own.
         let relays = Arc::new(crate::relay::Relays::new(
             options
@@ -1133,8 +1165,41 @@ impl Core {
                 radio: crate::radio::Radio::new(None),
                 offered: Mutex::new(HashMap::new()),
                 opener: None,
+                youtube: None,
             },
         })
+    }
+
+    /// YouTube Music, built in: the last of the listener's sources, there before they add any add-on. `reach` is the
+    /// internet (a test's server: this computer). The visitor id YouTube hands out is kept from one run to the next.
+    pub fn with_youtube(mut self, youtube: YouTube, reach: stash_core::reach::Reach) -> Self {
+        let kept = self
+            .state
+            .library
+            .lock()
+            .unwrap()
+            .setting(YOUTUBE_VISITOR)
+            .ok()
+            .flatten();
+        if let Some(visitor) = kept {
+            youtube.set_visitor(&visitor);
+        }
+        let library = Arc::clone(&self.state.library);
+        youtube.on_visitor(Box::new(move |visitor: &str| {
+            // On a thread of its own: whoever asked YouTube may hold the library.
+            let (library, visitor) = (Arc::clone(&library), visitor.to_string());
+            std::thread::spawn(move || {
+                let _ = library
+                    .lock()
+                    .unwrap()
+                    .set_setting(YOUTUBE_VISITOR, &visitor);
+            });
+        }));
+        self.state.youtube = Some((Arc::new(youtube), reach));
+        if let Err(e) = self.state.reload_addons() {
+            eprintln!("YouTube Music could not be listed: {e}");
+        }
+        self
     }
 
     pub fn port(&self) -> u16 {
@@ -2096,6 +2161,25 @@ fn addons_route(
     let id = body.get("id").and_then(Value::as_str).unwrap_or_default();
     // Saving is woken once the list of add-ons is read again, so it asks the add-ons as they now are.
     let mut wake = false;
+    // YouTube Music is not an add-on the listener added: it is switched on and off, and nothing else.
+    if state.youtube.is_some() && id == youtube::ID {
+        if path != "/api/addons/enabled" {
+            return Ok(Some(refuse(400, BUILT_IN_STAYS)));
+        }
+        let enabled = body.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+        state
+            .library
+            .lock()
+            .unwrap()
+            .set_setting(YOUTUBE_OFF, if enabled { "0" } else { "1" })?;
+        state.reload_addons()?;
+        if enabled {
+            state.lacks.forget_addon(id);
+            state.saving.release();
+            state.saving.ring();
+        }
+        return Ok(Some(state.addons_reply()));
+    }
     match path {
         // Adds the add-on at `link` (the address of its manifest); one that is there already is read again.
         "/api/addons" => {
@@ -2115,6 +2199,12 @@ fn addons_route(
                 Ok(addon) => addon,
                 Err(e) => return Ok(Some(unread(&e))),
             };
+            if state.youtube.is_some() && addon.manifest.id == youtube::ID {
+                return Ok(Some(refuse(
+                    400,
+                    "that add-on calls itself by the name of Stash's own YouTube Music, and cannot be added",
+                )));
+            }
             state.offered.lock().unwrap().remove(&addon.manifest.id);
             state.library.lock().unwrap().save_addon(
                 &addon.manifest.id,
@@ -2915,6 +3005,7 @@ mod tests {
             code,
             message: "trouble".into(),
             retry_after: None,
+            who: None,
         };
         let kept = |first: Code, then: Code| {
             let mut kept = None;

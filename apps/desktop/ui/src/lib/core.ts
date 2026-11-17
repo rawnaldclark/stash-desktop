@@ -351,6 +351,8 @@ export type AddonInfo = {
 	enabled: boolean;
 	/** Why it cannot be used, when it cannot. */
 	problem: string | null;
+	/** Part of Stash itself (YouTube Music): asked after the listener's add-ons; switched off, never removed. */
+	builtIn?: boolean;
 };
 
 /** A track an add-on found. */

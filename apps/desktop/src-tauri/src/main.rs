@@ -97,6 +97,13 @@ fn main() -> Result<()> {
                 Some(proxy) => core.with_similar(proxy),
                 None => core,
             };
+            // YouTube Music, built in: there before the listener adds any add-on. Left out of a measurement, and
+            // when a check of the app asks for it (STASH_NO_YOUTUBE=1), so that neither asks YouTube anything.
+            let core = if measuring || std::env::var_os("STASH_NO_YOUTUBE").is_some_and(|v| v == "1") {
+                core
+            } else {
+                core.with_youtube(Default::default(), stash_core::reach::Reach::Internet)
+            };
             // The page may ask for the mini player (a measurement keeps the one window it measures).
             let core = if measuring {
                 core

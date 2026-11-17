@@ -1516,3 +1516,40 @@ An add-on is a server someone else runs. What it answers is held to the place it
 - A cover saved into a file is fetched held to the reach of the add-on the song came from, which may not be the one that named the cover.
 - Every add-on stream's certificate is now checked against the roots the core carries (it went to the engine unchecked before). A server whose certificate does not hold no longer plays.
 - Proxy tools that answer every name with an address of their own (198.18.0.0/15) leave the guard seeing that address, which it takes for the internet. The computer's own internet IPv6 addresses, and the router's, are taken for the internet too.
+
+## 39. YouTube Music, built in
+
+Stash for Android and Stash on the web are YouTube Music clients first; the desktop now is too. YouTube Music is the last of the listener's sources, there before they add any add-on: what their add-ons have (lossless) comes first, and what they lack is found on YouTube. Nobody signs in, and YouTube is told nothing of the listener but what is searched for and played.
+
+### How it is built
+
+- **A source like an add-on, inside the core** ([`youtube/`](../crates/stash-core/src/youtube/mod.rs), `addons::BuiltIn`): the rest of the core asks it the way it asks an add-on, so search, matching a library song, the relay, kept copies, the list of songs nobody could find and Settings all work with it as they are. Its id is `youtube`, the name songs brought in from Stash for Android already carry their YouTube video under: those play from it at once, with no search.
+- **Asked as YouTube's own apps ask** ([`innertube.rs`](../crates/stash-core/src/youtube/innertube.rs)), following Stash for Android: YouTube Music's web app for search (its "Songs" filter), and four of YouTube's device apps for where a song plays from. No cookie, no sign-in. The visitor id YouTube hands out to anyone is kept from one run to the next, so that Stash is one visitor and not a new one each start.
+- **Search rows are read by what their parts link to** ([`parse.rs`](../crates/stash-core/src/youtube/parse.rs)): artists by their links (an unlinked one in the same group is kept), the album by its link (a linked "4:44" is an album, an unlinked one a length), "16M plays" never an album; both the "Songs" shelf and the flat layout YouTube gives a visitor who is not signed in. Covers are asked for at 544 px.
+- **A stream is a plain file that gives its last byte** ([`player.rs`](../crates/stash-core/src/youtube/player.rs)): the apps are asked in turn, the one that last gave a stream first; only sound named by a plain address is taken (never a scrambled one, never a levelled-out or dubbed version), Opus at the highest bitrate before anything else; and the file's last byte is asked for before the address is believed, as an app can name addresses that play a megabyte and then refuse.
+- **Bot checks**: one app asking whether the listener is a bot is that app's trouble, and the next is asked (the first live run met exactly this). All of them asking is YouTube's word: it is left alone for 4 minutes, and every call until then is answered at once without asking it. "Too many requests" leaves it alone for a minute. "Sign in to confirm your age" is not a bot check.
+- **In Settings › Add-ons** it is listed last, "built in", with a switch and nothing else: it is not removed, checked or reordered, and an add-on that calls itself `youtube` is not added. Off holds for the next start.
+
+### Measured (the real YouTube, 2026-11-16, this computer)
+
+| | |
+|---|---|
+| A search for songs | 0.7 s |
+| Where a song plays from (2 apps asked: the first asked for a bot check) | 0.75 s |
+| Play pressed to sound moving, through the relay and the engine | about 1 s |
+| A seek to the middle, and near the end, to sound moving again | under 0.1 s each |
+| What plays | Opus, 135 to 141 kbit/s, 48 kHz |
+
+### Checked
+
+- **Unit tests** (10): dates for the web app's version, visitor ids, a row's second line in each layout, lengths and counts, picture sizes, the pick among formats, refusals told apart, an address's own expiry.
+- **`crates/stash-core/tests/youtube.rs`** (3, and 1 by hand): recorded answers of the real YouTube (from Stash for Android's tests) read as songs; a server of the test's own asked as YouTube is: what is sent (the app's name and number, no cookie, the visitor id only once it was given), the apps in turn past one that may not play and one whose file stops, the winner first next time, a gone video, an age gate, what is not a video id never sent, one app's bot check passed over, all apps' bot check leaving YouTube alone. By hand (`--ignored`): the real YouTube, one search and one stream.
+- **`crates/stashd/tests/youtube.rs`**: listed as part of Stash; not removed, checked or updated; searched like an add-on; the visitor id kept for a core started later; a liked song no add-on has found on it and played by the real engine through the relay, and not searched for the second time; switched off, asked nothing, and still off for a core started later.
+
+### Not yet
+
+- Albums, artists and playlists from YouTube (search tabs and pages); the home feed; moods and genres; lyrics.
+- Songs YouTube plays only through its web app (scrambled addresses) or only when signed in: Stash for Android hands those to yt-dlp. The same for the proof-of-origin token Android mints when the device apps' addresses get gated.
+- Signing in (liked songs, library playlists, mixes).
+- Saving a song from YouTube to a file (played copies are kept as before).
+- Words here and there still say "add-on" where YouTube Music is meant too ("no add-on could find").

@@ -236,6 +236,9 @@ pub struct AddonError {
     pub message: String,
     /// How long the add-on asked to be left alone, in seconds.
     pub retry_after: Option<u32>,
+    /// Who failed, when it was no add-on but a source built into Stash ("YouTube"): its message is then in the
+    /// listener's words already.
+    pub who: Option<&'static str>,
 }
 
 impl Code {
@@ -263,6 +266,9 @@ impl AddonError {
     pub fn in_words(&self) -> String {
         if self.code == Code::Refused {
             return self.message.clone();
+        }
+        if let Some(who) = self.who {
+            return self.built_in_words(who);
         }
         let what = match self.code {
             Code::BadRequest => "the add-on did not understand the request",
@@ -296,6 +302,25 @@ impl AddonError {
             code,
             message: message.into(),
             retry_after: None,
+            who: None,
+        }
+    }
+
+    /// The failure of a source built into Stash: its own words when it gave any, else the usual ones with its name.
+    fn built_in_words(&self, who: &str) -> String {
+        if !self.message.is_empty() {
+            return self.message.clone();
+        }
+        match self.code {
+            Code::NotFound => format!("{who} does not have it"),
+            Code::QualityUnavailable | Code::RegionUnavailable => {
+                format!("{who} cannot play it here")
+            }
+            Code::RateLimited | Code::QuotaExceeded => format!("{who} is being asked too often"),
+            Code::Timeout => format!("{who} did not answer in time"),
+            Code::Network => format!("{who} could not be reached"),
+            Code::InvalidResponse => format!("{who}'s answer could not be read"),
+            _ => format!("{who} is not working right now"),
         }
     }
 
@@ -314,6 +339,15 @@ impl AddonError {
 
 type Result<T> = std::result::Result<T, AddonError>;
 
+/// A source that is part of Stash itself (YouTube Music), asked the way an add-on is: the rest of the core then
+/// deals with one kind of source.
+pub trait BuiltIn: Send + Sync {
+    /// Songs matching `query`, at most `limit`.
+    fn search(&self, query: &str, limit: u32) -> Result<Vec<Track>>;
+    /// Where its track `id` plays from: one plain file.
+    fn stream(&self, id: &str) -> Result<StreamInfo>;
+}
+
 /// An add-on the listener added, ready to be asked.
 pub struct Addon {
     pub manifest: Manifest,
@@ -322,6 +356,8 @@ pub struct Addon {
     /// As near as it may send Stash: every connection made for it, and every address it names, is held to this.
     reach: Reach,
     agent: ureq::Agent,
+    /// Set for a source built into Stash: it is asked in place of a server.
+    built_in: Option<std::sync::Arc<dyn BuiltIn>>,
 }
 
 impl Addon {
@@ -407,6 +443,7 @@ impl Addon {
             base,
             reach,
             agent: agent(reach),
+            built_in: None,
         })
     }
 
@@ -428,7 +465,31 @@ impl Addon {
             base,
             reach,
             agent: agent(reach),
+            built_in: None,
         })
+    }
+
+    /// A source built into Stash, as an add-on of `reach`: it has no link, and `source` is asked in place of a
+    /// server. Its manifest is checked like any other.
+    pub fn built_in(
+        manifest: Manifest,
+        source: std::sync::Arc<dyn BuiltIn>,
+        reach: Reach,
+    ) -> Result<Self> {
+        check_manifest(&manifest)?;
+        Ok(Self {
+            manifest,
+            link: String::new(),
+            base: String::new(),
+            reach,
+            agent: agent(reach),
+            built_in: Some(source),
+        })
+    }
+
+    /// Whether it is part of Stash itself, not an add-on the listener added.
+    pub fn is_built_in(&self) -> bool {
+        self.built_in.is_some()
     }
 
     /// Where its link is: as near as it may send Stash.
@@ -678,6 +739,11 @@ impl Addon {
 
     fn search_as_given(&self, query: &str, limit: u32) -> Result<Vec<Track>> {
         self.offers("search")?;
+        if let Some(source) = &self.built_in {
+            let mut tracks = source.search(query, limit.clamp(1, 200))?;
+            tracks.truncate(limit.clamp(1, 200) as usize);
+            return Ok(tracks);
+        }
         let mut url = Url::parse(&format!("{}/search", self.base))
             .map_err(|e| AddonError::invalid(e.to_string()))?;
         let q: String = query.chars().take(200).collect();
@@ -864,6 +930,11 @@ impl Addon {
 
     fn stream_as_given(&self, id: &str, want: &StreamRequest) -> Result<StreamInfo> {
         self.offers("stream")?;
+        if let Some(source) = &self.built_in {
+            let info = source.stream(id)?;
+            check_stream(&info, want)?;
+            return Ok(info);
+        }
         let mut url = Url::parse(&format!("{}/stream/", self.base))
             .map_err(|e| AddonError::invalid(e.to_string()))?;
         url.path_segments_mut()
@@ -1154,7 +1225,7 @@ struct ErrorDetail {
 /// What a request for a manifest says when the place asked has no address for the name (see `Addon::from_link`).
 const NONE_THERE: &str = "the name has no address there";
 
-fn unanswered(e: ureq::Error) -> AddonError {
+pub(crate) fn unanswered(e: ureq::Error) -> AddonError {
     use std::io::ErrorKind;
     // An address nearer than the add-on may send Stash: refused before anything was sent.
     if let Some(words) = reach::refusal(&e) {
@@ -1308,6 +1379,7 @@ fn get_json<T: serde::de::DeserializeOwned>(agent: &ureq::Agent, url: &str) -> R
         code,
         message,
         retry_after,
+        who: None,
     })
 }
 

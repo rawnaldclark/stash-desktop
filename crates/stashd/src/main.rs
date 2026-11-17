@@ -58,6 +58,9 @@ enum Command {
         /// STASH_LASTFM_PROXY; without either there is no radio). It is never printed.
         #[arg(long, hide = true)]
         lastfm_proxy: Option<String>,
+        /// Leave YouTube Music out: only the listener's add-ons are asked for songs.
+        #[arg(long)]
+        no_youtube: bool,
     },
     /// Play a moment of silence at several formats and report what the sound card opened at for each.
     OutputCheck {
@@ -309,6 +312,7 @@ fn main() -> Result<()> {
             no_audio,
             silent,
             lastfm_proxy,
+            no_youtube,
         } => {
             let mut core = stashd::serve::Core::bind(stashd::serve::Options {
                 db,
@@ -328,6 +332,9 @@ fn main() -> Result<()> {
                 .filter(|p| !p.trim().is_empty())
             {
                 core = core.with_similar(&proxy);
+            }
+            if !no_youtube {
+                core = core.with_youtube(Default::default(), stash_core::reach::Reach::Internet);
             }
             println!("listening on http://127.0.0.1:{}", core.port());
             core.run()

@@ -32,6 +32,7 @@ pub mod smart;
 pub mod station;
 pub mod synth;
 pub mod usage;
+pub mod youtube;
 pub mod youtube_title;
 
 pub use library::{
