@@ -4,7 +4,7 @@
 	import { browse, library, player } from '../../../../lib/app';
 	import type { Album, LibraryItem } from '../../../../lib/api';
 	import { Refused } from '../../../../lib/core';
-	import { artistHref, artistLink, LIB_REF, toLibraryItem } from '../../../../lib/identity';
+	import { artistHref, artistLink, LIB_REF, LIBRARY_SOURCE, toLibraryItem } from '../../../../lib/identity';
 	import BrowseMsg from '../../../../lib/ui/BrowseMsg.svelte';
 	import Cover from '../../../../lib/ui/Cover.svelte';
 	import Icon from '../../../../lib/ui/Icon.svelte';
@@ -42,8 +42,12 @@
 		load();
 	});
 
-	// The album's songs are rows of the library: each carries its row (`refs.lib`) and the library's own album and artist pages.
-	const items = $derived<LibraryItem[]>(album ? album.tracks.map((t) => toLibraryItem(t, { [LIB_REF]: t.id }, Date.now(), sid)) : []);
+	// The library's album: its songs are rows of the library, each carrying its row (`refs.lib`) and the library's own album
+	// and artist pages. YouTube Music's album or playlist: its songs are that source's (`refs.youtube`), not on this computer.
+	const items = $derived<LibraryItem[]>(
+		album ? album.tracks.map((t) => (sid === LIBRARY_SOURCE ? toLibraryItem(t, { [LIB_REF]: t.id }, Date.now(), sid) : { ...toLibraryItem(t, { [sid]: t.id }, 0, sid), here: false })) : []
+	);
+	const isPlaylist = $derived(album?.kind === 'playlist');
 	// The album's artist links to their page when every track carries the same artist id (a compilation has several: no link).
 	const artistTo = $derived.by(() => {
 		const links = items.map((i) => artistLink(i)?.id);
@@ -93,7 +97,7 @@
 		<div class="alb-top">
 			<div class="alb-cover"><Cover artwork={album.artwork ?? items[0]?.artwork} seed={album.title} min={300} class="cv" eager /></div>
 			<div class="alb-txt">
-				<p class="caps">Album</p>
+				<p class="caps">{isPlaylist ? 'Playlist' : album.kind === 'single' ? 'Single' : 'Album'}</p>
 				<h1 class="alb-title">{album.title}</h1>
 				<p class="alb-meta">
 					{#if artistTo}<a class="alb-by" href={artistHref(artistTo)}>{album.artist}</a>{:else}<b>{album.artist}</b>{/if}{#if album.year}<span class="sep">{' · '}</span><span>{album.year}</span>{/if}<span class="sep">{' · '}</span><span>{songs(items.length)}{#if items.length}, {totalLength(items)}{/if}</span>
@@ -109,11 +113,12 @@
 		{#if items.length}
 			<div class="trk-list">
 				{#each items as it, i (it.key + i)}
-					<TrackRow item={it} num={i + 1} cover={false} {pick} at={i} onplay={() => play(i)} />
+					<TrackRow item={it} num={i + 1} cover={isPlaylist} album={isPlaylist} {pick} at={i} onplay={() => play(i)} />
 				{/each}
 			</div>
+			{#if album.more}<p class="s-hint">The first {items.length} songs of this playlist are shown.</p>{/if}
 		{:else}
-			<p class="s-hint">This album has no songs to show.</p>
+			<p class="s-hint">This {isPlaylist ? 'playlist' : 'album'} has no songs to show.</p>
 		{/if}
 	{/if}
 </div>

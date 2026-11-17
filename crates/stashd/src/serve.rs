@@ -1001,6 +1001,18 @@ impl State {
         true
     }
 
+    /// YouTube Music, when this core has it and the listener has it switched on.
+    pub(crate) fn youtube_on(&self) -> Option<Arc<YouTube>> {
+        let (source, _) = self.youtube.as_ref()?;
+        let on = self
+            .addons
+            .read()
+            .unwrap()
+            .iter()
+            .any(|a| a.stored.id == youtube::ID && a.usable().is_some());
+        on.then(|| Arc::clone(source))
+    }
+
     fn reload_addons(&self) -> Result<()> {
         let loaded = load_addons(&self.library.lock().unwrap(), self.youtube.as_ref())?;
         *self.addons.write().unwrap() = loaded;
@@ -2693,6 +2705,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::saving::route(state, request, &path, &param)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::youtube_pages::route(state, request, &path, &param)? {
         return Ok((response, false));
     }
     if let Some(response) = crate::unfound::route(state, request, &path, &param)? {

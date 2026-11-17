@@ -50,6 +50,14 @@ fn wav(seconds: u32) -> Vec<u8> {
     b
 }
 
+/// An answer of the real YouTube, as the core's own tests keep them.
+fn recorded(name: &str) -> Vec<u8> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../stash-core/tests/fixtures/youtube")
+        .join(name);
+    std::fs::read(path).unwrap()
+}
+
 /// What the test's YouTube was asked: the path, and the visitor id sent with it.
 type Asked = Arc<Mutex<Vec<(String, Option<String>)>>>;
 
@@ -84,8 +92,25 @@ fn youtube() -> (String, Asked) {
             }
             let mut body = vec![0u8; length];
             let _ = reader.read_exact(&mut body);
+            let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             noted.lock().unwrap().push((path.clone(), visitor));
-            let (kind, answer): (&str, Vec<u8>) = if path.starts_with("/youtubei/v1/search") {
+            let asked_for = |name: &str| body.get(name).and_then(Value::as_str).unwrap_or_default();
+            let (kind, answer): (&str, Vec<u8>) = if path.starts_with("/youtubei/v1/browse") {
+                // A page, or the songs after a playlist's first: the real YouTube's answers, cut down.
+                let page = asked_for("browseId");
+                let name = if !asked_for("continuation").is_empty() {
+                    "playlist_more_live.json"
+                } else if page.starts_with("MPREb_") {
+                    "album_live.json"
+                } else if page.starts_with("UC") {
+                    "artist_live.json"
+                } else {
+                    "playlist_live.json"
+                };
+                ("application/json", recorded(name))
+            } else if path.starts_with("/youtubei/v1/search") && body.get("params").is_none() {
+                ("application/json", recorded("found_live.json"))
+            } else if path.starts_with("/youtubei/v1/search") {
                 let row = json!({ "musicResponsiveListItemRenderer": {
                     "playlistItemData": { "videoId": "testtone001" },
                     "flexColumns": [
@@ -344,6 +369,74 @@ fn youtube_music_is_the_last_of_the_listener_s_sources() {
         eprintln!("SKIPPED the player: no libmpv found");
     }
 
+    // Its own pages: what a search finds beside the songs, an album, an artist, a playlist.
+    let (status, found) = client.get("/api/youtube/search?q=daft%20punk");
+    assert_eq!(status, 200, "{found}");
+    assert_eq!(
+        (
+            found["top"]["kind"].as_str(),
+            found["top"]["artist"]["name"].as_str()
+        ),
+        (Some("artist"), Some("Daft Punk"))
+    );
+    assert_eq!(found["albums"][0]["title"], "Random Access Memories");
+    assert_eq!(
+        (
+            found["albums"].as_array().map(Vec::len),
+            found["artists"].as_array().map(Vec::len),
+            found["playlists"].as_array().map(Vec::len)
+        ),
+        (Some(3), Some(3), Some(5))
+    );
+    let (status, album) = client.get("/api/youtube/album?id=MPREb_DYSzDJvUSDu");
+    assert_eq!(status, 200, "{album}");
+    assert_eq!(
+        (
+            album["artist"].as_str(),
+            album["single"].as_bool(),
+            album["songs"].as_array().map(Vec::len)
+        ),
+        (Some("Daft Punk"), Some(true), Some(4))
+    );
+    assert_eq!(album["songs"][1]["album_id"], "MPREb_DYSzDJvUSDu");
+    let (status, artist) = client.get("/api/youtube/artist?id=UCRr1xG_2WIDs18a6cIiCxeA");
+    assert_eq!(status, 200, "{artist}");
+    assert_eq!(
+        (
+            artist["name"].as_str(),
+            artist["songs"].as_array().map(Vec::len),
+            artist["albums"].as_array().map(Vec::len),
+            artist["singles"].as_array().map(Vec::len),
+            artist["related"].as_array().map(Vec::len)
+        ),
+        (Some("Daft Punk"), Some(5), Some(3), Some(3), Some(3))
+    );
+    // A playlist is read on until an answer brings nothing new (this one's "songs after these" are the same again).
+    asked.lock().unwrap().clear();
+    let (status, playlist) =
+        client.get("/api/youtube/playlist?id=RDCLAK5uy_l607eBFIYRZ_itkDW19eigUzFefu5bJ6Y");
+    assert_eq!(status, 200, "{playlist}");
+    assert_eq!(
+        (
+            playlist["author"].as_str(),
+            playlist["songs"].as_array().map(Vec::len),
+            playlist["more"].as_bool()
+        ),
+        (Some("YouTube Music"), Some(5), Some(false))
+    );
+    assert_eq!(asked.lock().unwrap().len(), 2);
+    // What is no page of its kind is never asked of YouTube.
+    asked.lock().unwrap().clear();
+    for path in [
+        "/api/youtube/album?id=UCabc",
+        "/api/youtube/artist?id=../x",
+        "/api/youtube/playlist?id=MPREb_x",
+        "/api/youtube/album",
+    ] {
+        assert_eq!(client.get(path).0, 404, "{path}");
+    }
+    assert!(asked.lock().unwrap().is_empty());
+
     // Switched off, it is asked nothing; and it stays off for the next start.
     let (status, off) = client.post(
         "/api/addons/enabled",
@@ -360,6 +453,7 @@ fn youtube_music_is_the_last_of_the_listener_s_sources() {
         nothing["groups"].as_array().is_none_or(|g| g.is_empty()),
         "{nothing}"
     );
+    assert_eq!(client.get("/api/youtube/search?q=daft%20punk").0, 404);
     assert!(asked.lock().unwrap().is_empty());
     let later = core(&dir.join("library.db"), &api, None);
     assert_eq!(

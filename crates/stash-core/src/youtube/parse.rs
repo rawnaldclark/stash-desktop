@@ -54,11 +54,14 @@ pub struct Song {
     pub art: Option<String>,
     pub explicit: bool,
     pub kind: Option<Kind>,
+    /// The page of its first artist, and of its album, when the row links to them.
+    pub artist_id: Option<String>,
+    pub album_id: Option<String>,
 }
 
 static DURATION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\d{1,2}:\d{2}(?::\d{2})?$").unwrap());
-static YEAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d{4}$").unwrap());
+pub(super) static YEAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d{4}$").unwrap());
 /// "16M plays", "1,234 views": a row's count, never an artist or an album.
 static COUNT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^[\d.,]+\s*[KMB]?\s*(plays?|views?)$").unwrap());
@@ -66,7 +69,7 @@ static WIDE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"=w\d+-h\d+").unwrap
 static SQUARE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"=s\d+").unwrap());
 
 /// Between the groups of a row's second line: artists • album • length.
-const GROUPS: &str = " • ";
+pub(super) const GROUPS: &str = " • ";
 /// Between the names of one group.
 const JOINERS: [&str; 3] = [", ", " & ", " x "];
 /// What a row of the flat layout says first: its kind, not its artist.
@@ -81,31 +84,31 @@ pub fn video_id(text: &str) -> Option<&str> {
     fits.then_some(text)
 }
 
-fn text(value: Option<&Value>) -> Option<String> {
+pub(super) fn text(value: Option<&Value>) -> Option<String> {
     let cleaned = clean_text(value?.as_str()?, TEXT);
     (!cleaned.is_empty()).then_some(cleaned)
 }
 
 /// The runs of text of a row's column `n`.
-fn column(row: &Value, n: usize) -> Option<&Vec<Value>> {
+pub(super) fn column(row: &Value, n: usize) -> Option<&Vec<Value>> {
     row.get("flexColumns")?
         .get(n)?
         .pointer("/musicResponsiveListItemFlexColumnRenderer/text/runs")?
         .as_array()
 }
 
-fn run_text(run: &Value) -> &str {
+pub(super) fn run_text(run: &Value) -> &str {
     run.get("text").and_then(Value::as_str).unwrap_or_default()
 }
 
 /// The page a run links to.
-fn run_page(run: &Value) -> Option<&str> {
+pub(super) fn run_page(run: &Value) -> Option<&str> {
     run.pointer("/navigationEndpoint/browseEndpoint/browseId")?
         .as_str()
 }
 
 /// A run that links to an artist, a channel or a podcast.
-fn names_artist(run: &Value) -> bool {
+pub(super) fn names_artist(run: &Value) -> bool {
     run_page(run).is_some_and(|page| {
         page.starts_with("UC") || page.starts_with("MPLAUC") || page.starts_with("MPSPP")
     })
@@ -126,8 +129,34 @@ fn length_ms(text: &str) -> Option<u64> {
     (seconds > 0).then_some(seconds * 1_000)
 }
 
+/// A page's id as a row links to it: an artist's with the "MPLA" some rows put before it taken off.
+pub(super) fn page_id(page: &str) -> Option<String> {
+    let page = page
+        .strip_prefix("MPLA")
+        .filter(|rest| rest.starts_with("UC"))
+        .unwrap_or(page);
+    let fits = (2..=128).contains(&page.len())
+        && page
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
+    fits.then(|| page.to_string())
+}
+
+/// What a row's second line says.
+#[derive(Debug, Default, PartialEq)]
+pub(super) struct Line {
+    /// Its artists, joined with ", "; empty when it names none.
+    pub artist: String,
+    /// The page of the first artist it links to.
+    pub artist_id: Option<String>,
+    /// The album it links to, and that album's page.
+    pub album: Option<String>,
+    pub album_id: Option<String>,
+    pub length: Option<u64>,
+}
+
 /// What a row's second line says: its artists, the album it links to, and its length.
-fn second_line(runs: Option<&Vec<Value>>) -> (String, Option<String>, Option<u64>) {
+pub(super) fn second_line(runs: Option<&Vec<Value>>) -> Line {
     let mut groups: Vec<Vec<&Value>> = vec![Vec::new()];
     for run in runs.into_iter().flatten() {
         if run_text(run) == GROUPS {
@@ -162,21 +191,32 @@ fn second_line(runs: Option<&Vec<Value>>) -> (String, Option<String>, Option<u64
         .filter_map(|said| text(Some(&Value::from(said))))
         .collect::<Vec<_>>()
         .join(", ");
-    let album = groups
+    let artist_id = named
+        .into_iter()
+        .flatten()
+        .filter_map(|run| run_page(run))
+        .find(|page| page.starts_with("UC") || page.starts_with("MPLAUC"))
+        .and_then(page_id);
+    let linked = groups
         .iter()
         .flatten()
-        .find(|run| run_page(run).is_some_and(|page| page.starts_with("MPREb_")))
-        .and_then(|run| text(run.get("text")));
+        .find(|run| run_page(run).is_some_and(|page| page.starts_with("MPREb_")));
     // A length is never linked: a linked "4:44" is an album.
     let length = groups.iter().find_map(|group| match group.as_slice() {
         [only] if run_page(only).is_none() => length_ms(run_text(only)),
         _ => None,
     });
-    (artist, album, length)
+    Line {
+        artist,
+        artist_id,
+        album: linked.and_then(|run| text(run.get("text"))),
+        album_id: linked.and_then(|run| run_page(run)).and_then(page_id),
+        length,
+    }
 }
 
 /// The largest of a row's pictures, asked for at a size fit for a grid.
-fn picture(holder: &Value, under: &str) -> Option<String> {
+pub(super) fn picture(holder: &Value, under: &str) -> Option<String> {
     let pictures = holder
         .get(under)?
         .pointer("/musicThumbnailRenderer/thumbnail/thumbnails")?
@@ -203,7 +243,7 @@ fn sized(url: &str) -> String {
 }
 
 /// Whether a row (or a card) carries the "explicit" badge.
-fn explicit(holder: &Value) -> bool {
+pub(super) fn explicit(holder: &Value) -> bool {
     ["badges", "subtitleBadges", "subtitleBadge"]
         .iter()
         .filter_map(|key| holder.get(key)?.as_array())
@@ -216,7 +256,7 @@ fn explicit(holder: &Value) -> bool {
         })
 }
 
-fn kind(watch: Option<&Value>) -> Option<Kind> {
+pub(super) fn kind(watch: Option<&Value>) -> Option<Kind> {
     Kind::of(
         watch?
             .pointer("/watchEndpointMusicSupportedConfigs/watchEndpointMusicConfig/musicVideoType")?
@@ -237,14 +277,23 @@ pub(crate) fn row(row: &Value) -> Option<Song> {
         .and_then(video_id)?;
     let first = column(row, 0)?.first()?;
     let title = text(first.get("text"))?;
-    let (artist, linked_album, line_length) = second_line(column(row, 1));
-    // The third column is the album on an album's page, and a count ("16M plays") in a search.
-    let album = column(row, 2)
-        .and_then(|runs| runs.first())
+    let line = second_line(column(row, 1));
+    // The album: a column after the second that links to an album's page (an artist's songs, a playlist's rows);
+    // else the third column's words, unless they are a count ("16M plays", as in a search); else the second line's.
+    let later = (2..=3).filter_map(|n| column(row, n)?.first());
+    let linked = later
+        .clone()
+        .find(|run| run_page(run).is_some_and(|page| page.starts_with("MPREb_")));
+    let album = linked
+        .or_else(|| column(row, 2)?.first())
         .map(run_text)
         .filter(|said| !is_stat(said))
         .and_then(|said| text(Some(&Value::from(said))))
-        .or(linked_album);
+        .or(line.album);
+    let album_id = linked
+        .and_then(run_page)
+        .and_then(page_id)
+        .or(line.album_id);
     let fixed = row
         .pointer("/fixedColumns/0/musicResponsiveListItemFixedColumnRenderer/text/runs/0/text")
         .and_then(Value::as_str)
@@ -252,17 +301,19 @@ pub(crate) fn row(row: &Value) -> Option<Song> {
     Some(Song {
         id: id.to_string(),
         title,
-        artist,
+        artist: line.artist,
         album,
-        duration_ms: fixed.or(line_length),
+        duration_ms: fixed.or(line.length),
         art: picture(row, "thumbnail"),
         explicit: explicit(row),
         kind: kind(play.or_else(|| first.pointer("/navigationEndpoint/watchEndpoint"))),
+        artist_id: line.artist_id,
+        album_id,
     })
 }
 
 /// The shelves of a search's answer.
-fn shelves(answer: &Value) -> impl Iterator<Item = &Value> {
+pub(super) fn shelves(answer: &Value) -> impl Iterator<Item = &Value> {
     answer
         .pointer("/contents/tabbedSearchResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents")
         .and_then(Value::as_array)
@@ -323,11 +374,13 @@ mod tests {
         ];
         assert_eq!(
             second_line(Some(&runs)),
-            (
-                "Yeahman, Hajna, Mina Shankha".to_string(),
-                Some("4:44".to_string()),
-                Some(313_000)
-            )
+            Line {
+                artist: "Yeahman, Hajna, Mina Shankha".to_string(),
+                artist_id: Some("UC1".to_string()),
+                album: Some("4:44".to_string()),
+                album_id: Some("MPREb_x".to_string()),
+                length: Some(313_000),
+            }
         );
         // The flat layout: its kind first; a video's count is not its artist.
         let runs = vec![
@@ -339,17 +392,28 @@ mod tests {
         ];
         assert_eq!(
             second_line(Some(&runs)),
-            ("Grimm's VGM".to_string(), None, None)
+            Line {
+                artist: "Grimm's VGM".to_string(),
+                ..Line::default()
+            }
         );
         // A year alone names nobody; a first group that links elsewhere neither.
         let runs = vec![run("1989", None)];
-        assert_eq!(second_line(Some(&runs)).0, "");
+        assert_eq!(second_line(Some(&runs)).artist, "");
         let runs = vec![run("Some album", Some("MPREb_y"))];
         assert_eq!(
             second_line(Some(&runs)),
-            (String::new(), Some("Some album".to_string()), None)
+            Line {
+                album: Some("Some album".to_string()),
+                album_id: Some("MPREb_y".to_string()),
+                ..Line::default()
+            }
         );
-        assert_eq!(second_line(None), (String::new(), None, None));
+        assert_eq!(second_line(None), Line::default());
+        // An artist's page under either of its names is one page.
+        assert_eq!(page_id("MPLAUCabc").as_deref(), Some("UCabc"));
+        assert_eq!(page_id("MPLARZxyz").as_deref(), Some("MPLARZxyz"));
+        assert_eq!(page_id("UC/../x"), None);
     }
 
     #[test]

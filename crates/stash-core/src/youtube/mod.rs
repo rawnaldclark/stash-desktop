@@ -7,6 +7,7 @@
 //! the core's relay like any other.
 
 pub mod innertube;
+pub mod pages;
 pub mod parse;
 mod player;
 
@@ -14,9 +15,10 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use crate::addons::{Addon, AddonError, Artwork, BuiltIn, Manifest, StreamInfo, Tier, Track};
+use crate::addons::{Addon, AddonError, Artwork, BuiltIn, Code, Manifest, StreamInfo, Tier, Track};
 use crate::reach::Reach;
-use innertube::{InnerTube, WEB_REMIX};
+use innertube::{InnerTube, WEB_REMIX, trouble};
+use pages::{AlbumPage, ArtistPage, Found, PlaylistPage};
 use parse::Song;
 
 /// The id it has among the listener's sources. Songs brought in from Stash for Android carry their YouTube video
@@ -27,6 +29,10 @@ pub const ID: &str = "youtube";
 const SONGS_ONLY: &str = "EgWKAQIIAWoKEAoQAxAJEAQQBQ%3D%3D";
 /// The longest search sent.
 const QUERY_CAP: usize = 200;
+/// How many answers a playlist is read through: a hundred songs each.
+const PLAYLIST_PAGES: usize = 10;
+/// An answer to "the songs after these" that brings fewer new songs than this is the playlist's last.
+const PLAYLIST_FEW_NEW: usize = 5;
 
 /// YouTube Music as a source.
 #[derive(Default)]
@@ -70,6 +76,92 @@ impl YouTube {
             json!({ "query": query, "params": SONGS_ONLY }),
         )?;
         Ok(parse::songs(&answer))
+    }
+
+    /// Everything YouTube Music finds for `query`: the albums, artists and playlists beside the songs, and what it
+    /// puts first. (Its songs come without their album and length here: [`YouTube::songs`] has those.)
+    pub fn found(&self, query: &str) -> Result<Found, AddonError> {
+        let query: String = query.chars().take(QUERY_CAP).collect();
+        if query.trim().is_empty() {
+            return Ok(Found::default());
+        }
+        let answer = self
+            .line
+            .call(&WEB_REMIX, "search", json!({ "query": query }))?;
+        Ok(pages::found(&answer))
+    }
+
+    /// The page `id` of the kind whose ids start with one of `starts`, as YouTube answers it.
+    fn page(&self, id: &str, starts: &[&str]) -> Result<serde_json::Value, AddonError> {
+        let known =
+            parse::page_id(id).filter(|id| starts.iter().any(|start| id.starts_with(start)));
+        let Some(id) = known else {
+            return Err(trouble(
+                Code::NotFound,
+                "that is not a page of YouTube Music",
+            ));
+        };
+        self.line
+            .call(&WEB_REMIX, "browse", json!({ "browseId": id }))
+    }
+
+    /// An album's page ("MPREb_…").
+    pub fn album(&self, id: &str) -> Result<AlbumPage, AddonError> {
+        let answer = self.page(id, &["MPREb_"])?;
+        pages::album(&answer, id)
+            .filter(|album| !album.songs.is_empty())
+            .ok_or_else(|| trouble(Code::NotFound, "YouTube Music has no such album"))
+    }
+
+    /// An artist's page ("UC…").
+    pub fn artist(&self, id: &str) -> Result<ArtistPage, AddonError> {
+        let answer = self.page(id, &["UC"])?;
+        pages::artist(&answer)
+            .ok_or_else(|| trouble(Code::NotFound, "YouTube Music has no such artist"))
+    }
+
+    /// A playlist's page, by its page ("VL…") or by the playlist's own id ("PL…", "RD…", "OLAK5uy_…"): its songs,
+    /// read on through at most [`PLAYLIST_PAGES`] answers. A station (an id that starts with "RD" and is no list
+    /// YouTube keeps) never ends: its first answer is all that is read.
+    pub fn playlist(&self, id: &str) -> Result<PlaylistPage, AddonError> {
+        let page = if id.starts_with("VL") {
+            id.to_string()
+        } else {
+            format!("VL{id}")
+        };
+        let answer = self.page(&page, &["VLPL", "VLRD", "VLOLAK5uy_", "VLLM"])?;
+        let mut playlist = pages::playlist(&answer)
+            .ok_or_else(|| trouble(Code::NotFound, "YouTube Music has no such playlist"))?;
+        let endless = page.starts_with("VLRD") && !page.starts_with("VLRDCLAK5uy_");
+        let mut read = 1;
+        while let Some(more) = playlist
+            .more
+            .take()
+            .filter(|_| !endless && read < PLAYLIST_PAGES)
+        {
+            // What was read so far is given when the rest cannot be.
+            let Ok(answer) = self
+                .line
+                .call(&WEB_REMIX, "browse", json!({ "continuation": more }))
+            else {
+                break;
+            };
+            let (songs, next) = pages::playlist_more(&answer);
+            // Only what was not read yet: a list of YouTube Music's own answers "the songs after these" with the
+            // same songs again, without end. An answer that brings nearly nothing new is the last one read.
+            let before = playlist.songs.len();
+            for song in songs {
+                if !playlist.songs.iter().any(|known| known.id == song.id) {
+                    playlist.songs.push(song);
+                }
+            }
+            if playlist.songs.len() - before < PLAYLIST_FEW_NEW {
+                break;
+            }
+            playlist.more = next;
+            read += 1;
+        }
+        Ok(playlist)
     }
 
     /// The manifest it is listed with among the listener's sources.

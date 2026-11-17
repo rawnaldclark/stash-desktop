@@ -4,7 +4,8 @@
 	import { browse, player } from '../../../../lib/app';
 	import type { Artist, LibraryItem } from '../../../../lib/api';
 	import { Refused } from '../../../../lib/core';
-	import { albumHref, LIB_REF, toLibraryItem } from '../../../../lib/identity';
+	import { albumHref, artistHref, LIB_REF, LIBRARY_SOURCE, toLibraryItem } from '../../../../lib/identity';
+	import type { Track } from '../../../../lib/sources/contract';
 	import BrowseMsg from '../../../../lib/ui/BrowseMsg.svelte';
 	import Card from '../../../../lib/ui/Card.svelte';
 	import Cover from '../../../../lib/ui/Cover.svelte';
@@ -44,10 +45,12 @@
 	});
 
 	// The artist's songs are rows of the library: each carries its row (`refs.lib`) and the library's own album and artist pages.
-	const items = $derived<LibraryItem[]>(artist ? artist.topTracks.map((t) => toLibraryItem(t, { [LIB_REF]: t.id }, Date.now(), sid)) : []);
+	// (YouTube Music's artist: the songs are that source's, `refs.youtube`, not on this computer.)
+	const asItem = (t: Track): LibraryItem => (sid === LIBRARY_SOURCE ? toLibraryItem(t, { [LIB_REF]: t.id }, Date.now(), sid) : { ...toLibraryItem(t, { [sid]: t.id }, 0, sid), here: false });
+	const items = $derived<LibraryItem[]>(artist ? artist.topTracks.map(asItem) : []);
 	const play = (i = 0) => void player.playItems(items, i, { from: artist?.name });
 	// Their songs with others ("A & B", "B feat. A"): a list of its own.
-	const withItems = $derived<LibraryItem[]>(artist ? (artist.withOthers ?? []).map((t) => toLibraryItem(t, { [LIB_REF]: t.id }, Date.now(), sid)) : []);
+	const withItems = $derived<LibraryItem[]>(artist ? (artist.withOthers ?? []).map(asItem) : []);
 	const playWith = (i: number) => void player.playItems(withItems, i, { from: artist?.name });
 	const pickWith: PickList = {
 		get scope() {
@@ -106,6 +109,26 @@
 				<div class="shelf">
 					{#each artist.albums as al (al.id)}
 						<Card title={al.title} sub={albumSub(al)} artwork={al.artwork} href={albumHref({ sourceId: sid, id: al.id })} />
+					{/each}
+				</div>
+			</div>
+		{/if}
+		{#if artist.singles?.length}
+			<h2 class="vh2">Singles and EPs</h2>
+			<div class="shelf-w" use:shelf>
+				<div class="shelf">
+					{#each artist.singles as al (al.id)}
+						<Card title={al.title} sub={albumSub(al)} artwork={al.artwork} href={albumHref({ sourceId: sid, id: al.id })} />
+					{/each}
+				</div>
+			</div>
+		{/if}
+		{#if artist.related?.length}
+			<h2 class="vh2">Fans also like</h2>
+			<div class="shelf-w" use:shelf>
+				<div class="shelf shelf-artists">
+					{#each artist.related as r (r.id)}
+						<Card title={r.name} artwork={r.artwork} href={artistHref({ sourceId: sid, id: r.id })} ini={r.name.slice(0, 2).toUpperCase()} />
 					{/each}
 				</div>
 			</div>

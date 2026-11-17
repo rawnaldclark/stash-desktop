@@ -65,6 +65,21 @@ export const artUrl = (art: string | null | undefined): string | undefined => {
 	return undefined;
 };
 
+/**
+ * The cover's own address, from one `artUrl` made for a cover on a server: what the core is told when a song is handed
+ * back to it (it keeps the address the add-on gave, never the window's way to it). Undefined for any other picture.
+ */
+export const rawArt = (url: string | null | undefined): string | undefined => {
+	if (!url) return undefined;
+	try {
+		const parsed = new URL(url, 'http://core.invalid');
+		if (parsed.pathname === '/api/art/remote') return parsed.searchParams.get('u') ?? undefined;
+	} catch {
+		/* not an address */
+	}
+	return undefined;
+};
+
 // ---- The library
 
 export type TrackRow = {
@@ -398,6 +413,29 @@ export const updateAddon = (id: string, token: string) => post<Listed>('/api/add
 export type AddonUse = { streams: number; downloads: number; found_at_ms: number | null; trouble: { at_ms: number; message: string } | null };
 /** Each add-on's use since `since` (ms; the window's own midnight for "today"). */
 export const addonUse = (since: number) => get<{ addons: Record<string, AddonUse> }>(`/api/addons/use?since=${since}`).then((r) => r.addons);
+
+// ---- YouTube Music's own pages: what a search finds beside the songs, and an album's, an artist's and a playlist's page
+
+/** The built-in source's id among the listener's sources. */
+export const YOUTUBE = 'youtube';
+export type TubeSong = { id: string; title: string; artist: string; album: string | null; duration_ms: number | null; art: string | null; explicit: boolean; artist_id: string | null; album_id: string | null };
+export type TubeAlbum = { id: string; title: string; artist: string; artist_id: string | null; year: number | null; single: boolean; art: string | null };
+export type TubeArtist = { id: string; name: string; art: string | null };
+export type TubePlaylist = { id: string; title: string; author: string; art: string | null };
+export type TubeFound = {
+	top: { kind: 'artist'; artist: TubeArtist } | { kind: 'album'; album: TubeAlbum } | { kind: 'song'; song: TubeSong } | null;
+	albums: TubeAlbum[];
+	artists: TubeArtist[];
+	playlists: TubePlaylist[];
+};
+export type TubeAlbumPage = TubeAlbum & { songs: TubeSong[] };
+export type TubeArtistPage = TubeArtist & { songs: TubeSong[]; albums: TubeAlbum[]; singles: TubeAlbum[]; related: TubeArtist[] };
+export type TubePlaylistPage = TubePlaylist & { songs: TubeSong[]; more: boolean };
+const tube = (what: string, id: string) => `/api/youtube/${what}?id=${encodeURIComponent(id)}`;
+export const tubeSearch = (query: string, signal?: AbortSignal) => get<TubeFound>(`/api/youtube/search?q=${encodeURIComponent(query)}`, signal);
+export const tubeAlbum = (id: string) => get<TubeAlbumPage>(tube('album', id));
+export const tubeArtist = (id: string) => get<TubeArtistPage>(tube('artist', id));
+export const tubePlaylist = (id: string) => get<TubePlaylistPage>(tube('playlist', id));
 
 /** Asks one add-on for tracks. */
 export const searchAddon = (id: string, query: string, limit: number, signal?: AbortSignal) =>

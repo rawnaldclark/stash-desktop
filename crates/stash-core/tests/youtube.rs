@@ -421,3 +421,241 @@ fn the_real_youtube_finds_a_song_and_says_where_it_plays_from() {
         started.elapsed().as_millis()
     );
 }
+
+#[test]
+fn a_search_for_everything_is_sorted_by_what_each_row_opens() {
+    use stash_core::youtube::pages::{self, Top};
+    // The real YouTube's answer to "Daft Punk", cut down; the rows naming people are given made-up names.
+    let found = pages::found(&recorded("found_live.json"));
+    let Some(Top::Artist(top)) = &found.top else {
+        panic!("the card is the artist: {:?}", found.top);
+    };
+    assert_eq!(
+        (top.id.as_str(), top.name.as_str()),
+        ("UCRr1xG_2WIDs18a6cIiCxeA", "Daft Punk")
+    );
+    assert!(
+        top.art
+            .as_deref()
+            .is_some_and(|art| art.contains("=w544-h544"))
+    );
+    let albums: Vec<_> = found
+        .albums
+        .iter()
+        .map(|a| {
+            (
+                a.id.as_str(),
+                a.title.as_str(),
+                a.artist.as_str(),
+                a.year,
+                a.single,
+            )
+        })
+        .collect();
+    assert_eq!(
+        albums,
+        [
+            (
+                "MPREb_K8qWMWVqXGi",
+                "Random Access Memories",
+                "Daft Punk",
+                Some(2013),
+                false
+            ),
+            (
+                "MPREb_7ltM34kr0mH",
+                "Discovery",
+                "Daft Punk",
+                Some(2001),
+                false
+            ),
+            (
+                "MPREb_CtOaObihCXA",
+                "Alive 2007",
+                "Daft Punk",
+                Some(2007),
+                false
+            ),
+        ]
+    );
+    assert!(
+        found
+            .albums
+            .iter()
+            .all(|a| a.artist_id.as_deref() == Some("UCRr1xG_2WIDs18a6cIiCxeA") && a.art.is_some())
+    );
+    let artists: Vec<_> = found.artists.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(artists, ["The Weeknd", "Gesaffelstein", "Pharrell"]);
+    // A listener's playlist and YouTube Music's own; who made each.
+    let playlists: Vec<_> = found
+        .playlists
+        .iter()
+        .map(|p| (p.title.as_str(), p.author.as_str()))
+        .collect();
+    assert_eq!(
+        playlists,
+        [
+            ("A listener's playlist 1", "A listener"),
+            ("A listener's playlist 2", "A listener"),
+            ("Summer Sonic 2026: Lineup", "YouTube Music"),
+            ("Indie Disco", "YouTube Music"),
+            ("Acclaimed: Music Videos as Art", "YouTube Music"),
+        ]
+    );
+    assert!(found.playlists.iter().all(|p| p.id.starts_with("VL")));
+    // Songs and videos; the songs on the artist's card are the artist's. No episode, podcast or person's channel.
+    assert_eq!(found.songs.len(), 11);
+    assert!(
+        found
+            .songs
+            .iter()
+            .all(|s| s.artist.starts_with("Daft Punk")),
+        "{:?}",
+        found.songs
+    );
+    assert_eq!(
+        (
+            found.songs[0].title.as_str(),
+            found.songs[0].duration_ms,
+            found.songs[0].artist_id.as_deref()
+        ),
+        (
+            "Something About Us (Love Theme from Interstella 5555)",
+            Some(135_000),
+            Some("UCRr1xG_2WIDs18a6cIiCxeA")
+        )
+    );
+    assert_eq!(
+        found
+            .songs
+            .iter()
+            .filter(|s| s.kind == Some(Kind::Video))
+            .count(),
+        3
+    );
+    assert_eq!(pages::found(&json!({})), pages::Found::default());
+}
+
+#[test]
+fn the_pages_of_an_album_an_artist_and_a_playlist_are_read() {
+    use stash_core::youtube::pages;
+    // An album: its rows name no artist and no album of their own; two of its tracks are one video.
+    let album = pages::album(&recorded("album_live.json"), "MPREb_DYSzDJvUSDu").unwrap();
+    assert_eq!(
+        (
+            album.title.as_str(),
+            album.artist.as_str(),
+            album.year,
+            album.single
+        ),
+        (
+            "Something About Us (Love Theme from Interstella)",
+            "Daft Punk",
+            Some(2003),
+            true
+        )
+    );
+    assert_eq!(album.artist_id.as_deref(), Some("UCRr1xG_2WIDs18a6cIiCxeA"));
+    let tracks: Vec<_> = album
+        .songs
+        .iter()
+        .map(|s| (s.id.as_str(), s.title.as_str(), s.duration_ms))
+        .collect();
+    assert_eq!(
+        tracks,
+        [
+            (
+                "sOS9aOIXPEk",
+                "Something About Us (Love Theme from Interstella 5555)",
+                Some(135_000)
+            ),
+            ("HhZaHf8RP6g", "Veridis Quo", Some(346_000)),
+            (
+                "c8a-XCZjTRs",
+                "Voyager (Dominique Torti's Wild Style Edit)",
+                Some(393_000)
+            ),
+            ("sOS9aOIXPEk", "Something About Us", Some(233_000)),
+        ]
+    );
+    assert!(album.songs.iter().all(|s| s.artist == "Daft Punk"
+        && s.album.as_deref() == Some(album.title.as_str())
+        && s.album_id.as_deref() == Some("MPREb_DYSzDJvUSDu")
+        && s.art == album.art
+        && s.art.is_some()));
+    assert_eq!(pages::album(&recorded("artist_live.json"), "MPREb_x"), None);
+
+    // An artist: their songs with the album each is on, their albums and their singles apart, and who else.
+    let artist = pages::artist(&recorded("artist_live.json")).unwrap();
+    assert_eq!(artist.name, "Daft Punk");
+    assert!(artist.art.is_some());
+    let songs: Vec<_> = artist
+        .songs
+        .iter()
+        .map(|s| (s.title.as_str(), s.artist.as_str(), s.album.as_deref()))
+        .collect();
+    assert_eq!(songs.len(), 5);
+    assert_eq!(
+        songs[0],
+        (
+            "Instant Crush (feat. Julian Casablancas)",
+            "Daft Punk, Julian Casablancas",
+            Some("Random Access Memories")
+        )
+    );
+    assert_eq!(
+        artist.songs[4].album_id.as_deref(),
+        Some("MPREb_7ltM34kr0mH")
+    );
+    let albums: Vec<_> = artist
+        .albums
+        .iter()
+        .map(|a| (a.title.as_str(), a.artist.as_str(), a.year))
+        .collect();
+    assert_eq!(
+        albums,
+        [
+            (
+                "Random Access Memories (Drumless Edition)",
+                "Daft Punk",
+                Some(2023)
+            ),
+            ("Random Access Memories", "Daft Punk", Some(2013)),
+            ("TRON: Legacy", "Daft Punk", Some(2010)),
+        ]
+    );
+    let singles: Vec<_> = artist
+        .singles
+        .iter()
+        .map(|a| (a.title.as_str(), a.year, a.single))
+        .collect();
+    assert_eq!(singles[0], ("GLBTM (Studio Outtakes)", Some(2023), true));
+    assert_eq!(singles.len(), 3);
+    let related: Vec<_> = artist.related.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(related, ["Capital Cities", "Gotye", "Justice"]);
+    assert_eq!(pages::artist(&recorded("album_live.json")), None);
+
+    // A playlist: who made it, its rows, and the word that asks for the songs after them.
+    let playlist = pages::playlist(&recorded("playlist_live.json")).unwrap();
+    assert_eq!(
+        (
+            playlist.title.as_str(),
+            playlist.author.as_str(),
+            playlist.songs.len()
+        ),
+        ("Summer Sonic 2026: Lineup", "YouTube Music", 5)
+    );
+    assert_eq!(
+        (
+            playlist.songs[0].title.as_str(),
+            playlist.songs[0].artist.as_str(),
+            playlist.songs[0].duration_ms
+        ),
+        ("Reptilia (Official HD Video)", "The Strokes", Some(216_000))
+    );
+    assert!(playlist.more.as_deref().is_some_and(|word| word.len() > 50));
+    let (more, next) = pages::playlist_more(&recorded("playlist_more_live.json"));
+    assert_eq!(more.len(), 4);
+    assert!(next.is_some());
+    assert_eq!(pages::playlist_more(&json!({})), (Vec::new(), None));
+}

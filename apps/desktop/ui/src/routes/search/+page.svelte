@@ -62,7 +62,7 @@
 	const songStart = $derived(pick.kind === 'track' ? 1 : 0);
 	const top = $derived(pick.kind === 'track' ? topItems[0] : undefined);
 	const topRest = $derived(topItems.slice(songStart, songStart + 5));
-	const nothing = $derived(!!result && !result.pending.length && topItems.length === 0 && result.artists.length === 0 && result.albums.length === 0 && sections.every((s) => s.items.length === 0));
+	const nothing = $derived(!!result && !result.pending.length && topItems.length === 0 && result.artists.length === 0 && result.albums.length === 0 && result.playlists.length === 0 && sections.every((s) => s.items.length === 0));
 	/** Two letters for an artist with no picture ("Vince Staples" -> "VS"). */
 	const initials = (name: string) => name.replace(/[([{].*?[)\]}]/g, ' ').split(/\s+/).filter((w) => /\p{L}/u.test(w)).slice(0, 2).map((w) => w.match(/\p{L}/u)![0].toUpperCase()).join('');
 	/** The add-ons that gave no results, each with its own words for why. */
@@ -202,6 +202,16 @@
 					<div class="shelf shelf-albums">
 						{#each result.albums as al (al.sourceId + al.id)}
 							<Card title={al.title} sub={[al.year, al.artist].filter(Boolean).join(' · ')} artwork={al.artwork} href={albumHref({ sourceId: al.sourceId, id: al.id })} />
+						{/each}
+					</div>
+				</div>
+			{/if}
+			{#if result.playlists.length}
+				<h2 class="vh2 sec-h">Playlists</h2>
+				<div class="shelf-w" use:shelf>
+					<div class="shelf shelf-albums">
+						{#each result.playlists as pl (pl.sourceId + pl.id)}
+							<Card title={pl.title} sub={pl.author} artwork={pl.artwork} href={albumHref({ sourceId: pl.sourceId, id: pl.id })} />
 						{/each}
 					</div>
 				</div>

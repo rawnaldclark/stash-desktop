@@ -20,10 +20,21 @@ export type Track = {
 	artwork?: Artwork[];
 };
 
-export type Album = { id: string; title: string; artist: string; year?: number; artwork?: Artwork[]; tracks: Track[] };
+/** `kind`: what the page calls it (an album unless said otherwise; a playlist's `artist` is who made it). */
+export type Album = { id: string; title: string; artist: string; year?: number; artwork?: Artwork[]; tracks: Track[]; kind?: 'album' | 'single' | 'playlist'; /** A playlist longer than was read. */ more?: boolean };
 export type ArtistAlbum = { id: string; title: string; year?: number; artwork?: Artwork[]; trackCount?: number };
 /** `withOthers`: songs credited to the artist together with others ("A & B", "B feat. A"). */
-export type Artist = { id: string; name: string; artwork?: Artwork[]; topTracks: Track[]; albums: ArtistAlbum[]; withOthers?: Track[] };
+export type Artist = {
+	id: string;
+	name: string;
+	artwork?: Artwork[];
+	topTracks: Track[];
+	albums: ArtistAlbum[];
+	withOthers?: Track[];
+	/** Singles and EPs, when the source tells them from albums; and artists their listeners also play. */
+	singles?: ArtistAlbum[];
+	related?: { id: string; name: string; artwork?: Artwork[] }[];
+};
 
 export type Descriptor = { title: string; artist: string; album?: string; durationMs?: number; isrc?: string };
 

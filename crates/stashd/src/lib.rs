@@ -17,3 +17,4 @@ mod scrobbling;
 pub mod serve;
 mod shortcuts;
 mod unfound;
+mod youtube_pages;

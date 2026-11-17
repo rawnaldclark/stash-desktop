@@ -31,7 +31,7 @@ import {
 } from './api';
 import { descriptorKey, fold, LIB_REF, LIBRARY_SOURCE, sameSong } from './identity';
 import type { Descriptor } from './sources/contract';
-import { emptySearch, mergeTop, type SearchAlbum, type SearchArtist, type SearchResult, type SearchSection, type TopPick } from './sources/search';
+import { emptySearch, mergeTop, type SearchAlbum, type SearchArtist, type SearchPlaylist, type SearchResult, type SearchSection, type TopPick } from './sources/search';
 
 const ro = <T>(s: Readable<T>): Readable<T> => ({ subscribe: s.subscribe });
 
@@ -208,7 +208,8 @@ function entryOf(item: LibraryItem): core.PlayEntry | null {
 	if (id !== null) return { id };
 	const a = addonRefOf(item);
 	if (!a) return null;
-	const art = item.artwork?.[0]?.url;
+	// The cover as the add-on named it: the core keeps that, and makes the window's way to it again.
+	const art = core.rawArt(item.artwork?.[0]?.url);
 	return { addon: a.addon, track: art ? { ...a.track, art } : a.track };
 }
 
@@ -841,13 +842,21 @@ const search: SearchAPI = {
 		const named = artists.find((a) => bare(a.name) === typed);
 		const titled = albums.find((a) => bare(a.title) === typed);
 		const topPick: TopPick = named ? { kind: 'artist', artist: named } : titled ? { kind: 'album', album: titled } : { kind: 'track' };
-		const found = { artists, albums, topPick };
+		const found = { artists, albums, playlists: [] as SearchPlaylist[], topPick };
 		// The add-ons a search asks: switched on, usable, and offering search. In the listener's order.
 		const asked = get(offline) ? [] : get(addonStore).filter((a) => a.enabled && !a.problem && a.resources.includes('search'));
 		if (!asked.length) return { top: mergeTop([lib]), ...found, bySource: [lib], failed: [], pending: [] };
 		opts?.onLibrary?.({ top: mergeTop([lib]), ...found, bySource: [lib], failed: [], pending: asked.map((a) => a.name) });
 
 		const failed: SearchResult['failed'] = [];
+		// YouTube Music, when it is one of them, is also asked for the albums, artists and playlists the text names. Its
+		// trouble is told with its songs' (the same line to it), so here it only comes back empty.
+		const more: Promise<core.TubeFound | null> = asked.some((a) => a.id === core.YOUTUBE)
+			? core.tubeSearch(query, opts?.signal).catch((e) => {
+					if (opts?.signal?.aborted) throw e;
+					return null;
+				})
+			: Promise.resolve(null);
 		const sections: (SearchSection | null)[] = await Promise.all(
 			asked.map(async (a): Promise<SearchSection | null> => {
 				try {
@@ -869,7 +878,26 @@ const search: SearchAPI = {
 		const bySource = [lib, ...sections.filter((s): s is SearchSection => s !== null)];
 		// In the add-ons' own order, whichever answered first.
 		failed.sort((x, y) => asked.findIndex((a) => a.id === x.sourceId) - asked.findIndex((a) => a.id === y.sourceId));
-		return { top: mergeTop(bySource), ...found, bySource, failed, pending: [] };
+		const tube = await more;
+		if (!tube) return { top: mergeTop(bySource), ...found, bySource, failed, pending: [] };
+		// The library's own first, then YouTube Music's. The card at the top: the library's artist or album of that name,
+		// else YouTube Music's when what it puts first is the artist or the album whose name was typed.
+		const theirArtists = tube.artists.map(tubeArtist);
+		const theirAlbums = tube.albums.map(tubeAlbumCard);
+		let pick = topPick;
+		if (pick.kind === 'track' && tube.top?.kind === 'artist' && bare(tube.top.artist.name) === typed) pick = { kind: 'artist', artist: tubeArtist(tube.top.artist) };
+		if (pick.kind === 'track' && tube.top?.kind === 'album' && bare(tube.top.album.title) === typed) pick = { kind: 'album', album: tubeAlbumCard(tube.top.album) };
+		const playlists: SearchPlaylist[] = tube.playlists.map((p) => ({ sourceId: core.YOUTUBE, id: p.id, title: p.title, author: p.author, ...(artOf(p.art) ? { artwork: artOf(p.art) } : {}) }));
+		return {
+			top: mergeTop(bySource),
+			artists: [...artists, ...theirArtists],
+			albums: [...albums, ...theirAlbums],
+			playlists,
+			topPick: pick,
+			bySource,
+			failed,
+			pending: []
+		};
 	}
 };
 
@@ -884,8 +912,33 @@ const artOf = (art: string | null) => {
 	return url ? [{ url }] : undefined;
 };
 
+// YouTube Music's cards and songs as the UI's.
+const tubeArtist = (a: core.TubeArtist): SearchArtist => ({ sourceId: core.YOUTUBE, id: a.id, name: a.name, ...(artOf(a.art) ? { artwork: artOf(a.art) } : {}) });
+const tubeAlbumCard = (a: core.TubeAlbum): SearchAlbum => ({ sourceId: core.YOUTUBE, id: a.id, title: a.title, artist: a.artist, ...(a.year ? { year: a.year } : {}), ...(artOf(a.art) ? { artwork: artOf(a.art) } : {}) });
+const tubeArtistAlbum = (a: core.TubeAlbum) => ({ id: a.id, title: a.title, ...(a.year ? { year: a.year } : {}), ...(artOf(a.art) ? { artwork: artOf(a.art) } : {}) });
+const tubeTrack = (s: core.TubeSong): Track => ({
+	id: s.id,
+	title: s.title,
+	artist: s.artist,
+	...(s.album ? { album: s.album } : {}),
+	...(s.album_id ? { albumId: s.album_id } : {}),
+	...(s.artist_id ? { artistId: s.artist_id } : {}),
+	...(s.duration_ms ? { durationMs: s.duration_ms } : {}),
+	...(s.explicit ? { explicit: true } : {}),
+	...(artOf(s.art) ? { artwork: artOf(s.art) } : {})
+});
+
 const browse: BrowseAPI = {
 	async album(sourceId, id) {
+		if (sourceId === core.YOUTUBE) {
+			// An album's page, or a playlist's (which opens the same way: its songs under who made it).
+			if (id.startsWith('MPREb_')) {
+				const a = await core.tubeAlbum(id);
+				return { id, title: a.title, artist: a.artist, kind: a.single ? 'single' : 'album', tracks: a.songs.map(tubeTrack), ...(a.year ? { year: a.year } : {}), ...(artOf(a.art) ? { artwork: artOf(a.art) } : {}) };
+			}
+			const p = await core.tubePlaylist(id);
+			return { id, title: p.title, artist: p.author, kind: 'playlist', more: p.more, tracks: p.songs.map(tubeTrack), ...(artOf(p.art) ? { artwork: artOf(p.art) } : {}) };
+		}
 		const a = await core.album(numbered(sourceId, id, 'album'));
 		const out: Album = { id, title: a.album.title, artist: a.album.artist, tracks: a.rows.map(trackOfRow) };
 		if (a.album.year) out.year = a.album.year;
@@ -894,6 +947,18 @@ const browse: BrowseAPI = {
 		return out;
 	},
 	async artist(sourceId, id) {
+		if (sourceId === core.YOUTUBE) {
+			const a = await core.tubeArtist(id);
+			return {
+				id,
+				name: a.name,
+				topTracks: a.songs.map(tubeTrack),
+				albums: a.albums.map(tubeArtistAlbum),
+				singles: a.singles.map(tubeArtistAlbum),
+				related: a.related.map((r) => ({ id: r.id, name: r.name, ...(artOf(r.art) ? { artwork: artOf(r.art) } : {}) })),
+				...(artOf(a.art) ? { artwork: artOf(a.art) } : {})
+			};
+		}
 		const a = await core.artist(numbered(sourceId, id, 'artist'));
 		const out: Artist = {
 			id,

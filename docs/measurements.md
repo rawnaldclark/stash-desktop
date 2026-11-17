@@ -1585,3 +1585,39 @@ BitChord speaks Eclipse's add-on protocol with habits of its own, and add-ons wr
 - A row without an artist is still left out; `streamURL` on a row is not used.
 - No per-add-on quality pick; no `title` and `artist` beside `q` (BitChord 1.9.2).
 - Whether the engine picks the FLAC rendition of a Tidal-style DASH manifest (they list HE-AAC first) is not measured.
+
+## 41. YouTube Music: albums, artists and playlists
+
+A search now shows YouTube Music's albums, artists and playlists beside its songs, and each opens a page of its own: an album's tracks, an artist's songs, albums, singles and the artists their listeners also play, a playlist's songs.
+
+### How it is built
+
+- **One more request per search.** YouTube answers a plain search with a card (the artist or album whose name was typed, or a song) and rows of every kind. They are sorted by what each row opens (an album's page, an artist's, a playlist's), never by a shelf's title; episodes, podcasts and people's channels are left out ([`pages.rs`](../crates/stash-core/src/youtube/pages.rs)). The songs still come from the search for songs, which has their album and length.
+- **Pages** (`browse`): an album ("MPREb_…": its rows name no artist or album of their own and are given the album's; two tracks may be one video, and both are kept), an artist ("UC…": the first list of rows is their songs, each with the album it is on; cards are albums or singles by YouTube's own label), a playlist ("VL…", or the list's own id).
+- **A long playlist** is read on a hundred songs at a time, through at most ten answers. A list of YouTube Music's own answers "the songs after these" with the same songs again, without end: only what was not read yet is taken, and an answer that brings fewer than five new songs is the last.
+- **Ids are checked before anything is sent**: what is no page of its kind is never asked of YouTube.
+- **Routes**: `GET /api/youtube/search?q=`, `/album?id=`, `/artist?id=`, `/playlist?id=` ([`youtube_pages.rs`](../crates/stashd/src/youtube_pages.rs)); not found when YouTube Music is switched off, refused offline.
+- **The window**: the search's Artists and Albums shelves hold the library's first, then YouTube Music's; a Playlists shelf; the card at the top is the library's artist or album of that name, else YouTube Music's. The album and artist pages take either source; a playlist opens as the album page does, with each row's cover and album.
+- **Found on the way**: a song handed back to the core (played from a search or a page) lost its cover in the player bar and Up next since section 38: the window sent its own way to the cover, where the core keeps only the cover's own address. It sends that again.
+
+### Measured (the real YouTube, 2026-11-16 and 17, this computer)
+
+| | |
+|---|---|
+| "Daft Punk": the card, 3 albums, 3 artists, 6 playlists, with the songs | 2 requests |
+| The artist's page: 5 songs, 10 albums, 10 singles, 10 related | 1 request |
+| An album of 13 tracks | 1 request |
+| A playlist of 143 songs | 2 requests (100, then 43, none twice) |
+| One of YouTube Music's own lists ("177 songs") | its first hundred, and what little its later answers add |
+
+### Checked
+
+- **`crates/stash-core/tests/youtube.rs`** (2 new): the real answers, cut down (rows naming people given made-up names): a search sorted by what each row opens, the artist's card, the songs on it given its artist, no episode, podcast or channel; an album (four tracks, two of them one video), an artist, a playlist and the songs after its first.
+- **`crates/stashd/tests/youtube.rs`**: the four routes through the core against a server of the test's own; a playlist read until nothing new comes; what is no page of its kind never sent; not found when switched off.
+- **The window, against the real YouTube** (`tube.mjs`, 1400 px dark): the search's card and shelves, the artist's page from the card, an album from it, its second track played (Opus, from YouTube), every cover in the player bar and Up next drawn, a playlist of 119 rows.
+
+### Not yet
+
+- "More" on an artist's albums and singles (the page shows the ten newest of each); an artist's playlists and videos.
+- YouTube Music's home, moods and genres; lyrics; a song's "related".
+- Keeping one of YouTube's playlists or albums in the library as one (its songs can be saved as a playlist from the page).
