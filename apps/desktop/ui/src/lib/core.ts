@@ -819,3 +819,92 @@ export const scriptStartedMs = Math.round(performance.now());
 export async function postMeasurement(result: unknown): Promise<void> {
 	await fetch(at('/api/bench-result'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(result) });
 }
+
+// ---- Mornye extensions (SpotiFLAC-format packages, run by the core)
+
+export type MornyeAccess = { kind: 'verification' | 'login' | 'settings' | 'none' | string; verified: boolean; missing: string[]; ready: boolean };
+/** A field of an extension's settings, as its manifest declares it. */
+export type MornyeField = {
+	key: string;
+	type?: string;
+	label?: string;
+	description?: string;
+	help?: string;
+	default?: unknown;
+	required?: boolean;
+	secret?: boolean;
+	options?: (string | { value: string; label?: string })[];
+	action?: string;
+	placeholder?: string;
+};
+export type MornyeQuality = { id: string; label?: string; name?: string; kind?: string; description?: string };
+export type MornyeInstalled = {
+	key: string;
+	name: string;
+	display_name: string;
+	version: string;
+	description: string;
+	enabled: boolean;
+	playable: boolean;
+	methods: string[];
+	repository: string | null;
+	installed_at: number;
+	settings: MornyeField[] | null;
+	quality_options: MornyeQuality[] | null;
+	global_actions: { action: string; label?: string }[] | null;
+	access: MornyeAccess;
+};
+export type MornyeRepository = { id: string; url: string; name: string | null; official: boolean; refreshed_at: number | null; error: string | null; count: number };
+export type MornyeEntry = { repository: string; id: string; version: string; display_name: string; description: string; compatible: boolean; installed: string | null; update: boolean };
+export type Mornye = {
+	installed: MornyeInstalled[];
+	repositories: MornyeRepository[];
+	catalogue: MornyeEntry[];
+	refreshing: boolean;
+	verifying: string | null;
+	/** The core can open a verification page in a window of its own. */
+	window: boolean;
+	/** FFmpeg, for songs some services send encrypted (Amazon Music's) or in pieces (SoundCloud's). */
+	ffmpeg: { found: boolean; can_fetch: boolean; fetching: { got: number; total: number | null } | null; trouble: string | null };
+};
+export type MornyeStatus = {
+	authenticated: boolean;
+	verification_required?: boolean;
+	open_auth_url?: string;
+	access: MornyeAccess;
+	verifying: boolean;
+	/** What came of the last verification in the window: "ok", or why not. */
+	result: string | null;
+};
+/** What an action answered: words, a page to open, or a form to fill in. */
+export type MornyeActed = {
+	message?: string;
+	success?: boolean;
+	error?: string;
+	open_auth_url?: string;
+	window?: boolean;
+	action_form?: { version: number; title?: string; description?: string; submit_action: string; fields: MornyeField[] };
+	byoa_form?: MornyeActed['action_form'];
+	formToken?: string;
+};
+export const mornye = () => get<Mornye>('/api/mornye');
+export const mornyeAddRepository = (url: string) => post<Mornye>('/api/mornye/repositories', { url });
+export const mornyeRemoveRepository = (id: string) => post<Mornye>('/api/mornye/repositories/remove', { id });
+export const mornyeRefresh = (id?: string) => post<Mornye>('/api/mornye/refresh', { id: id ?? '' });
+export const mornyeInstall = (repository: string, id: string) => post<{ installed: MornyeInstalled }>('/api/mornye/install', { repository, id });
+export async function mornyeInstallFile(file: Blob): Promise<{ installed: MornyeInstalled }> {
+	const sent = { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file };
+	return answer<{ installed: MornyeInstalled }>('/api/mornye/install-file', await fetch(at('/api/mornye/install-file'), sent));
+}
+export const mornyeFetchFfmpeg = () => post<Mornye>('/api/mornye/ffmpeg', {});
+export const mornyeRemove = (key: string) => post<Mornye>('/api/mornye/remove', { key });
+export const mornyeSetEnabled = (key: string, on: boolean) => post<Mornye>('/api/mornye/enabled', { key, on });
+export const mornyeSettings = (key: string) =>
+	get<{ settings: Record<string, unknown>; schema: MornyeField[] | null; quality_options: MornyeQuality[] | null; global_actions: { action: string; label?: string }[] | null }>(`/api/mornye/settings?key=${encodeURIComponent(key)}`);
+export const mornyeSaveSettings = (key: string, values: Record<string, unknown>) => post<{ settings: Record<string, unknown> }>('/api/mornye/settings', { key, values });
+export const mornyeStatus = (key: string) => get<MornyeStatus>(`/api/mornye/access?key=${encodeURIComponent(key)}`);
+export const mornyeVerify = (key: string) => post<{ ready: boolean; window?: boolean; url?: string }>('/api/mornye/verify', { key });
+export const mornyeCallback = (key: string, url: string) => post<unknown>('/api/mornye/callback', { key, url });
+export const mornyeLogout = (key: string) => post<{ ok: boolean }>('/api/mornye/logout', { key });
+export const mornyeAction = (key: string, action: string, input?: Record<string, unknown>, token?: string) =>
+	post<MornyeActed>('/api/mornye/action', { key, action, input: input ?? null, token: token ?? null });

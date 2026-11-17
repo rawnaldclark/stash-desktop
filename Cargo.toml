@@ -1,12 +1,17 @@
 [workspace]
 resolver = "3"
-members = ["apps/desktop/src-tauri","crates/stash-core", "crates/stashd"]
+members = ["apps/desktop/src-tauri","crates/stash-core", "crates/stash-mornye", "crates/stashd"]
 
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/rawnaldclark/stash-desktop"
+
+# Mornye extensions run in QuickJS: its C code unoptimized is several times slower, too slow to try them in a
+# debug build.
+[profile.dev.package.rquickjs-sys]
+opt-level = 3
 
 [profile.release]
 opt-level = 3

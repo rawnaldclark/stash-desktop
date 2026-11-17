@@ -9,6 +9,7 @@ mod media_controls;
 mod shortcuts;
 mod sign_in;
 mod tray;
+mod verify;
 mod windows;
 
 use std::path::PathBuf;
@@ -62,6 +63,11 @@ fn main() -> Result<()> {
         .parent()
         .map(|folder| folder.join("youtube-sign-in"))
         .unwrap_or_else(|| PathBuf::from("youtube-sign-in"));
+    // And a Mornye extension's verification page, the same way.
+    let verify_folder = db
+        .parent()
+        .map(|folder| folder.join("mornye-verify"))
+        .unwrap_or_else(|| PathBuf::from("mornye-verify"));
 
     let mut shell = tauri::Builder::default();
     if own_library {
@@ -119,6 +125,7 @@ fn main() -> Result<()> {
                 let opener = app.handle().clone();
                 core.with_window(Arc::new(move |view| windows::show(&handle, view)))
                     .with_sign_in(sign_in::shell(app.handle().clone(), sign_in_folder.clone()))
+                    .with_verify(verify::shell(app.handle().clone(), verify_folder.clone()))
                     .with_shortcuts(shortcuts::keys_shell(app.handle().clone(), port))
                     .with_opener(Arc::new(move |link: &str| {
                         use tauri_plugin_opener::OpenerExt;

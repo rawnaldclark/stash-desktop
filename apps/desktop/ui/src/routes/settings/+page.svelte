@@ -9,6 +9,7 @@
 	import Scrobbling from '../../lib/desktop/Scrobbling.svelte';
 	import TubeAccount from '../../lib/desktop/TubeAccount.svelte';
 	import TubeFallback from '../../lib/desktop/TubeFallback.svelte';
+	import MornyeExtensions from '../../lib/desktop/MornyeExtensions.svelte';
 	import Shortcuts from '../../lib/desktop/Shortcuts.svelte';
 	import Blocked from '../../lib/desktop/Blocked.svelte';
 	import { R } from '../../lib/desktop/radio.svelte';
@@ -198,7 +199,7 @@
 	};
 	/** Where it is, when that is nearer than the internet: it may send Stash only as near as that. */
 	const where = (a: SourceStatus) => (a.reach === 'home' ? 'on your network' : a.reach === 'here' ? 'on this computer' : '');
-	const detail = (a: SourceStatus) => (a.builtIn ? ['built in', does(a)] : [a.version ? `version ${a.version}` : '', a.host ?? '', where(a), does(a)]).filter((p) => p !== '').join(' · ');
+	const detail = (a: SourceStatus) => (a.builtIn ? [a.id.startsWith('mornye.') ? 'Mornye extension' : 'built in', does(a)] : [a.version ? `version ${a.version}` : '', a.host ?? '', where(a), does(a)]).filter((p) => p !== '').join(' · ');
 	/** How many of the sources are the listener's own add-ons (they come first in the list). */
 	const own = $derived(L.sources.filter((a) => !a.builtIn).length);
 
@@ -560,6 +561,11 @@
 		<h2 class="set-h" id="h-youtube">YouTube Music</h2>
 		<TubeAccount />
 		<TubeFallback />
+	</section>
+
+	<section class="set-sec" id="mornye" aria-labelledby="h-mornye">
+		<h2 class="set-h" id="h-mornye">Mornye extensions</h2>
+		<MornyeExtensions />
 	</section>
 
 	<section class="set-sec" id="lyrics" aria-labelledby="h-lyrics">

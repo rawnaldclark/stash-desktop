@@ -65,3 +65,5 @@ The audio tests need libmpv. On Windows, `powershell -ExecutionPolicy Bypass -Fi
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
+
+`crates/stash-mornye`, which runs Mornye (SpotiFLAC-format) extensions, is a port of the Mornye host in [Lokal](https://github.com/lokal-music/mobile) (GPL-3.0); its prelude (`prelude.js`) is Lokal's, unchanged.

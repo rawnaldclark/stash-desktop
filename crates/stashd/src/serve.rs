@@ -97,6 +97,7 @@ pub type KeysShell = Arc<dyn Fn(&[(String, String)]) -> Vec<(String, String)> + 
 /// when it was opened.
 pub type OpenShell = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+pub use crate::mornye::{VerifyShell, VerifyWindow};
 pub use crate::youtube_account::{SignInShell, SignedIn};
 
 pub(crate) type Reply = Response<std::io::Cursor<Vec<u8>>>;
@@ -242,20 +243,36 @@ const YOUTUBE_VISITOR: &str = "youtube.visitor";
 const BUILT_IN_STAYS: &str =
     "YouTube Music is part of Stash: it can be switched off, not removed or changed";
 
-/// The listener's add-ons in their order, then YouTube Music (when this core has it): what the add-ons have comes
-/// first, and what they lack is found on YouTube.
-fn load_addons(library: &Library, youtube: Option<&BuiltInYouTube>) -> Result<Vec<Arc<Loaded>>> {
+/// The listener's add-ons in their order, then their Mornye extensions, then YouTube Music (when this core has it):
+/// what the add-ons have comes first, and what they lack is found on YouTube.
+fn load_addons(
+    library: &Library,
+    youtube: Option<&BuiltInYouTube>,
+    mornye: Option<&Arc<crate::mornye::Mornye>>,
+) -> Result<Vec<Arc<Loaded>>> {
     let mut loaded: Vec<Arc<Loaded>> = library
         .addons()?
         .into_iter()
         // An add-on kept under YouTube's own id (from before it was built in) gives way to it.
         .filter(|stored| youtube.is_none() || stored.id != youtube::ID)
+        .filter(|stored| !stored.id.starts_with(crate::mornye::PREFIX))
         .map(|stored| {
             let addon =
                 Addon::from_stored(&stored.link, &stored.manifest).map_err(|e| e.in_words());
             Arc::new(Loaded { stored, addon })
         })
         .collect();
+    for (enabled, addon) in mornye.map(|m| m.sources()).unwrap_or_default() {
+        loaded.push(Arc::new(Loaded {
+            stored: StoredAddon {
+                id: addon.manifest.id.clone(),
+                link: String::new(),
+                manifest: addon.manifest_json(),
+                enabled,
+            },
+            addon: Ok(addon),
+        }));
+    }
     if let Some((source, reach)) = youtube {
         let addon = source.source(*reach);
         loaded.push(Arc::new(Loaded {
@@ -924,6 +941,8 @@ pub(crate) struct State {
     youtube_account: Option<Arc<crate::youtube_account::TubeAccount>>,
     /// yt-dlp, for the songs YouTube's apps will not play to Stash.
     youtube_fallback: Option<Arc<crate::youtube_fallback::TubeFallback>>,
+    /// Mornye extensions, each one a source (see [`crate::mornye`]).
+    mornye: Option<Arc<crate::mornye::Mornye>>,
     /// Opens Google's sign-in for YouTube in a window, when the core runs inside one.
     pub(crate) sign_in: Option<SignInShell>,
 }
@@ -1025,13 +1044,22 @@ impl State {
         self.youtube_account.clone()
     }
 
+    /// Mornye extensions, when they could be opened.
+    pub(crate) fn mornye(&self) -> Option<Arc<crate::mornye::Mornye>> {
+        self.mornye.clone()
+    }
+
     /// yt-dlp, when this core has YouTube Music built in.
     pub(crate) fn youtube_fallback(&self) -> Option<Arc<crate::youtube_fallback::TubeFallback>> {
         self.youtube_fallback.clone()
     }
 
-    fn reload_addons(&self) -> Result<()> {
-        let loaded = load_addons(&self.library.lock().unwrap(), self.youtube.as_ref())?;
+    pub(crate) fn reload_addons(&self) -> Result<()> {
+        let loaded = load_addons(
+            &self.library.lock().unwrap(),
+            self.youtube.as_ref(),
+            self.mornye.as_ref(),
+        )?;
         *self.addons.write().unwrap() = loaded;
         Ok(())
     }
@@ -1070,7 +1098,7 @@ impl Core {
             .to_ip()
             .map(|a| a.port())
             .unwrap_or(options.port);
-        let addons: Registry = Arc::new(RwLock::new(load_addons(&library, None)?));
+        let addons: Registry = Arc::new(RwLock::new(load_addons(&library, None, None)?));
         // Copies of songs as they were played sit next to the library, in a folder of their own.
         let relays = Arc::new(crate::relay::Relays::new(
             options
@@ -1197,8 +1225,27 @@ impl Core {
                 youtube: None,
                 youtube_account: None,
                 youtube_fallback: None,
+                mornye: None,
                 sign_in: None,
             },
+        })
+        .map(|mut core: Self| {
+            // Mornye extensions are kept beside the library, in a folder of their own.
+            let folder = core
+                .state
+                .options
+                .db
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("mornye");
+            match crate::mornye::Mornye::open(&core.state.library, folder, core.state.port) {
+                Ok(mornye) => core.state.mornye = Some(mornye),
+                Err(e) => eprintln!("Mornye extensions could not be opened: {e:#}"),
+            }
+            if let Err(e) = core.state.reload_addons() {
+                eprintln!("the add-ons could not be listed: {e:#}");
+            }
+            core
         })
     }
 
@@ -1274,6 +1321,14 @@ impl Core {
     /// [`crate::radio`]). The address is never shown, in an answer or a message.
     pub fn with_similar(mut self, proxy: &str) -> Self {
         self.state.radio = crate::radio::Radio::new(Some(proxy));
+        self
+    }
+
+    /// Lets the listener pass a Mornye extension's verification page (or sign in to it) in a window `shell` opens.
+    pub fn with_verify(self, shell: crate::mornye::VerifyShell) -> Self {
+        if let Some(mornye) = &self.state.mornye {
+            let _ = mornye.shell.set(shell);
+        }
         self
     }
 
@@ -1406,6 +1461,14 @@ fn answer(state: &State, mut request: Request) -> bool {
         _ => true,
     };
 
+    // The relay reading a Mornye extension's song from its file: answered on a thread of its own.
+    if host_ok
+        && request.url().starts_with("/mornye/play/")
+        && let Some(mornye) = state.mornye()
+    {
+        mornye.answer(request);
+        return false;
+    }
     // The engine reading a stream the core relays: answered on a thread of its own, as long as the song plays.
     if host_ok && request.url().starts_with("/relay/") {
         state
@@ -2217,6 +2280,25 @@ fn addons_route(
     let id = body.get("id").and_then(Value::as_str).unwrap_or_default();
     // Saving is woken once the list of add-ons is read again, so it asks the add-ons as they now are.
     let mut wake = false;
+    // A Mornye extension is managed in its own part of Settings: here it is switched on and off, and nothing else.
+    if id.starts_with(crate::mornye::PREFIX)
+        && let Some(mornye) = state.mornye()
+    {
+        if path != "/api/addons/enabled" {
+            return Ok(Some(refuse(400, crate::mornye::MANAGED_THERE)));
+        }
+        let enabled = body.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+        if let Err(e) = mornye.set_enabled_by_id(id, enabled) {
+            return Ok(Some(refuse(400, &e)));
+        }
+        state.reload_addons()?;
+        if enabled {
+            state.lacks.forget_addon(id);
+            state.saving.release();
+            state.saving.ring();
+        }
+        return Ok(Some(state.addons_reply()));
+    }
     // YouTube Music is not an add-on the listener added: it is switched on and off, and nothing else.
     if state.youtube.is_some() && id == youtube::ID {
         if path != "/api/addons/enabled" {
@@ -2255,6 +2337,12 @@ fn addons_route(
                 Ok(addon) => addon,
                 Err(e) => return Ok(Some(unread(&e))),
             };
+            if addon.manifest.id.starts_with(crate::mornye::PREFIX) {
+                return Ok(Some(refuse(
+                    400,
+                    "that add-on calls itself by the name Stash gives Mornye extensions, and cannot be added",
+                )));
+            }
             if state.youtube.is_some() && addon.manifest.id == youtube::ID {
                 return Ok(Some(refuse(
                     400,
@@ -2704,6 +2792,12 @@ fn import_route(state: &State, request: &mut Request) -> Result<Reply> {
 
 /// The answer to one request, and whether the server is done (a measurement arrived).
 fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
+    // A Mornye extension verified in its window since the last request becomes a source now.
+    if let Some(mornye) = state.mornye()
+        && mornye.take_changed()
+    {
+        state.reload_addons()?;
+    }
     let url =
         Url::parse(&format!("http://local{}", request.url())).context("the request's path")?;
     let param = |name: &str| {
@@ -2755,6 +2849,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::youtube_fallback::route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::mornye::route(state, request, &path)? {
         return Ok((response, false));
     }
     if let Some(response) = crate::youtube_pages::route(state, request, &path, &param)? {

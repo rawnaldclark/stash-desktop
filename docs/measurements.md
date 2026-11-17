@@ -1684,3 +1684,35 @@ Some songs YouTube's apps will not play to Stash: a video that asks to confirm t
 
 - Updating Stash's copy by itself (it is fetched again when the listener asks).
 - Saying in the player that a song came through yt-dlp.
+
+## 44. Mornye extensions
+
+Mornye extensions are the packages made for Mornye and SpotiFLAC (`.sflx`: a ZIP of `manifest.json` and `index.js`): Tidal, Qobuz, Deezer, Amazon Music, SoundCloud, JioSaavn, Beatport, Jellyfin and others. Stash now runs them itself, the way Lokal (Android) does, and each one installed and switched on is one of the listener's sources, after their own add-ons and before YouTube Music.
+
+### How it is built
+
+- **A runtime per add-on** ([`crates/stash-mornye`](../crates/stash-mornye), `engine.rs`): QuickJS (rquickjs) on a thread of its own, 64 MiB (256 for a download), after Lokal's prelude, unchanged (`prelude.js`), so packages see the same `http`, `file`, `storage`, `credentials`, `session`, `auth`, `utils`, `URL`… as in Mornye and Lokal. A call into the add-on that runs past its time closes it; the next call makes a new one.
+- **The host** (`host.rs`, `net.rs`, `store.rs`, `session.rs`, `auth.rs`): a port of Lokal's. An add-on reaches only the hosts its manifest names (every redirect checked again; private addresses refused unless named as such), in `https` unless it says otherwise; it writes files only in its own folder and the download's; what it keeps of a login is sealed (AES-256-GCM, a key per record drawn from one kept in the library, `mornye.seal`).
+- **Signed sessions**: the gateways most official extensions use ask a person to pass a verification page once. Stash opens that page in a window of its own (no script, no key, no permission; its own data folder, wiped before and after), stops the window when the page sends it to the extension's callback (`spotiflac://session-grant…`, never registered with the system), and exchanges the grant for the session. The page's last address can also be pasted, when there is no window.
+- **Installing** (`packages.rs`, `manifest.rs`, `registry.rs`): from a repository (Mornye's own is always listed; a package's bytes must have the SHA-256 the repository gives, and its name and version), or from a file. A package is checked as Lokal checks it (paths, sizes, manifest, the runtime features it needs) and run once to read what it registered before it is put in place; the one it replaces is kept until then.
+- **Playing** (`download.rs`, `live.rs`, and the core's [`mornye.rs`](../crates/stashd/src/mornye.rs)): an extension has no stream address to give; it downloads the song. The core asks it to, and hands the engine its own address for the file (`/mornye/play/{token}`, read through the relay as any other stream). A single-file FLAC or fast-start MP4 whose length the server told is played as it comes in (once 64 KiB are in and its first bytes are checked); anything else once it is whole. The last songs downloaded are kept, and play again without asking.
+- **FFmpeg** ([`ffmpeg.rs`](../crates/stash-mornye/src/ffmpeg.rs)), for songs sent encrypted with their key (Amazon Music's) or in pieces (SoundCloud's): Stash's own copy in its tools folder, else the system's. On Windows Stash fetches it when asked: the newest release build of FFmpeg-Builds (LGPL), checked against the release's `checksums.sha256`; only `ffmpeg.exe` is kept.
+- **Routes**: `GET /api/mornye` and the others listed at the top of `mornye.rs`. Settings › Mornye extensions lists them, installs, updates, switches on and off, opens each one's settings, verification and actions, and holds the repositories.
+- **Sources**: an extension is a source once it is ready: one that still needs its verification page or its sign-in is left out until it has them (it would only fail), and the sources are read again when a verification comes back from its window, on a sign-in, a sign-out or new settings. They are asked in the order they were installed, after the listener's own add-ons. Settings › Add-ons lists them as "Mornye extension".
+- **Chunked downloads**: a package that asks for its file in pieces (`chunked`, `chunkSize`: YouTube Music's does) gets it one `Range` at a time, at least 64 KiB each. Lokal fetches such a file in one request, which YouTube answers with the first 3.6 MB at once and then about 50 KB/s, playing speed.
+- **Where Stash goes beyond Lokal**: the YouTube Music extension (`ytmusic-spotiflac`) is handed its own song's video id in `spotify_id` (SpotiFLAC's field for a provider's own id, as for SoundCloud). Without it the extension looks the song up again, and that search never matches: its rows carry `artist` and `duration`, while its check reads `artists` and `duration_ms`.
+
+### Measured
+
+On this PC, in a scratch library (volume 0), with the official repository (9 packages, 17 November 2026):
+
+- **Installed**: 8 of 9. Jellyfin is refused, as Lokal refuses it: its manifest asks for any address (`"network": ["*"]`) where a package must name the sites it reaches. Ready at once: JioSaavn, SoundCloud, YouTube Music. Tidal, Qobuz, Deezer, Amazon Music and Beatport need their verification page; Tidal's session starts and hands back the page to open (a person passes it).
+- **From pressing play to sound** (search first, then play): JioSaavn 1.8 s (AAC), SoundCloud 3.3 s (AAC, in pieces joined by FFmpeg; a two-hour mix 67 s, as it plays only once whole), YouTube Music 3.2 s (Opus; 189 s before chunked downloads).
+- **A library song with no source** (from a playlist file that names it): found and played through JioSaavn in 2.8 s; one JioSaavn lacks went on through the next sources and played through YouTube Music's in 5.8 s. Played again, the kept copy plays without asking.
+- **Debug builds**: QuickJS's C code is built optimized in them too (`[profile.dev.package.rquickjs-sys]`): unoptimized, YouTube Music's extension took 3 s to read one page of 40 search results.
+- **Tests**: `cargo test -p stash-mornye` (the engine, host calls, signed sessions against their reference vector, ciphers against NIST's vectors, packages, downloads) and `cargo test -p stashd --test mornye` (a package installed from a file, searched, and its download played through the relay).
+
+### Not yet
+
+- Albums, artists and playlists of an extension (only its songs are searched and played; Lokal shows songs only too).
+- Dolby Atmos, and post-processing hooks.

@@ -7,6 +7,7 @@ pub mod demo_addon;
 mod equalizer;
 mod folders;
 mod kept;
+mod mornye;
 mod pieces;
 mod playlist_files;
 mod radio;
