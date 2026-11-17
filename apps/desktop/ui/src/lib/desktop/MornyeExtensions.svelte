@@ -378,10 +378,12 @@
 </div>
 
 <style>
-	.mx-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+	/* As wide as the card, also inside a column (Available): a long description is cut short, the buttons stay in view. */
+	.mx-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; align-self: stretch; min-width: 0; }
 	.mx { padding: 10px 16px; border-top: 1px solid var(--line, rgba(127, 127, 127, 0.15)); }
 	.mx.off .tr-t { opacity: 0.6; }
-	.mx-top { display: flex; align-items: center; gap: 12px; }
+	.mx-top { display: flex; align-items: center; gap: 12px; min-width: 0; }
+	.mx-top .src-acts { flex-shrink: 0; }
 	.mx-top .tr-t { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 	.mx-v { font-style: normal; font-weight: 400; opacity: 0.6; margin-left: 4px; }
 	.mx-panel { display: flex; flex-direction: column; gap: 10px; margin: 12px 0 4px; padding: 12px; border-radius: 10px; background: var(--raise, rgba(127, 127, 127, 0.08)); }
