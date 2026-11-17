@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { savePlaylistFile } from '../../lib/desktop/playlist-files';
 	import { focusNow } from '../../lib/ui/focus';
-	import { untrack } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { P, type PickList } from '../../lib/ui/pick.svelte';
 	import { page } from '$app/state';
@@ -15,6 +15,8 @@
 	import NotFound from '../../lib/desktop/NotFound.svelte';
 	import { NF } from '../../lib/desktop/unfound.svelte';
 	import Songs from '../../lib/desktop/Songs.svelte';
+	import TubeLibrary from '../../lib/desktop/TubeLibrary.svelte';
+	import { T } from '../../lib/desktop/youtube.svelte';
 	import { fold } from '../../lib/identity';
 	import Card from '../../lib/ui/Card.svelte';
 	import { atEvent, deleteFolder, folderHref, folderMenu, playlistMenu, playlistsWord } from '../../lib/desktop/playlist-folders';
@@ -23,7 +25,7 @@
 	import { L, LS, ui } from '../../lib/ui/state.svelte';
 	import { dayLabel, songs } from '../../lib/ui/format';
 
-	const TABS = ['songs', 'likes', 'playlists', 'albums', 'artists', 'downloads', 'notfound', 'history'] as const;
+	const TABS = ['songs', 'likes', 'playlists', 'albums', 'artists', 'youtube', 'downloads', 'notfound', 'history'] as const;
 	type Tab = (typeof TABS)[number];
 	const tab = $derived<Tab>(TABS.find((t) => t === page.url.searchParams.get('tab')) ?? 'songs');
 
@@ -33,15 +35,17 @@
 		['playlists', 'Playlists'],
 		['albums', 'Albums'],
 		['artists', 'Artists'],
+		['youtube', 'YouTube Music'],
 		['downloads', 'Downloads'],
 		['notfound', 'Not found'],
 		['history', 'History']
 	];
-	// Not found shows only while songs wait on it.
-	const shownTabs = $derived(tabs.filter(([id]) => id !== 'notfound' || NF.open > 0 || tab === 'notfound'));
+	// Not found shows only while songs wait on it; YouTube Music, once the listener signed in to it.
+	const shownTabs = $derived(tabs.filter(([id]) => (id !== 'notfound' || NF.open > 0 || tab === 'notfound') && (id !== 'youtube' || (T.on && T.signedIn) || tab === 'youtube')));
 	$effect(() => {
 		void NF.refresh();
 	});
+	onMount(() => void T.refreshAccount());
 
 	// Sort orders, remembered in this window per tab.
 	const LIKE_SORTS = { recent: 'Recently added', title: 'Title A–Z', artist: 'Artist A–Z', plays: 'Most played', duration: 'Duration' } as const;
@@ -265,6 +269,8 @@
 		{#key L.changed}<Albums />{/key}
 	{:else if tab === 'artists'}
 		{#key L.changed}<Artists />{/key}
+	{:else if tab === 'youtube'}
+		<TubeLibrary />
 	{:else if tab === 'downloads'}
 		<Downloads />
 	{:else if tab === 'notfound'}

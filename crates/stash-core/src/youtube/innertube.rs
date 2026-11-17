@@ -1,16 +1,19 @@
 //! YouTube's own API ("InnerTube"), spoken the way its apps speak it: a JSON `context` naming the app that asks, sent
 //! to `music.youtube.com` for everything about music (search, pages) and to `www.youtube.com` for where a song plays
-//! from. Nobody is signed in here, and nothing of the listener's is sent: an id YouTube hands out to any visitor is
-//! all it is told, so that it answers the same visitor the same way.
+//! from. An id YouTube hands out to any visitor is sent, so that it answers the same visitor the same way; and, when the
+//! listener signed in and the request is one asked as them ([`Signed`]), their login ([`super::login`]), to YouTube
+//! Music's own address only.
 //!
 //! The apps named here are the ones Stash for Android asks as (its `InnerTubeClient.kt`): YouTube Music on the web
 //! for music, and four of YouTube's own apps whose answers carry plain addresses for the sound.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use super::login::{Login, ORIGIN};
 use crate::addons::{AddonError, Code};
 
 /// Who the built-in source is, in the listener's words.
@@ -164,6 +167,20 @@ pub struct InnerTube {
     quiet: Mutex<Option<(Instant, &'static str)>>,
     /// Told the visitor id when YouTube first gives one, so that it can be kept.
     learned: Mutex<Option<Learned>>,
+    /// The account the listener signed in with, and whether YouTube stopped taking it.
+    login: Mutex<Option<Login>>,
+    spent: AtomicBool,
+}
+
+/// Whether a request is asked as the listener.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Signed {
+    /// Signed out, whatever the listener signed in with (a search: it would land in their history).
+    No,
+    /// As the listener when they signed in, else signed out (a page: the same page, with what is theirs on it).
+    IfAny,
+    /// Only as the listener (their library): refused here when they have not signed in.
+    Must,
 }
 
 /// What is told a visitor id YouTube gave.
@@ -192,7 +209,30 @@ impl InnerTube {
             visitor: Mutex::default(),
             quiet: Mutex::default(),
             learned: Mutex::default(),
+            login: Mutex::default(),
+            spent: AtomicBool::new(false),
         }
+    }
+
+    /// Signs in with `login`, or out (nothing).
+    pub fn set_login(&self, login: Option<Login>) {
+        *self.login.lock().unwrap() = login;
+        self.spent.store(false, Ordering::Relaxed);
+    }
+
+    /// The login signed in with, and whether YouTube stopped taking it (the listener signed out on the web, or it
+    /// ran out).
+    pub fn login(&self) -> Option<Login> {
+        self.login.lock().unwrap().clone()
+    }
+
+    pub fn login_spent(&self) -> bool {
+        self.spent.load(Ordering::Relaxed)
+    }
+
+    /// Notes that YouTube no longer takes the login: it is not sent again until the listener signs in again.
+    pub(crate) fn spend(&self) {
+        self.spent.store(true, Ordering::Relaxed);
     }
 
     /// The visitor id YouTube gave, to keep for the next start.
@@ -233,17 +273,64 @@ impl InnerTube {
         })
     }
 
-    /// Asks `action` ("search", "player", "browse") as `client`, with `more` beside the context. Answers YouTube's
-    /// JSON, whatever it says.
+    /// Asks `action` ("search", "player", "browse") as `client`, with `more` beside the context, signed out. Answers
+    /// YouTube's JSON, whatever it says.
     pub(crate) fn call(
         &self,
         client: &Client,
         action: &str,
         more: Value,
     ) -> Result<Value, AddonError> {
+        self.call_as(client, action, more, Signed::No)
+    }
+
+    /// The same, asked as the listener as `signed` says. A login YouTube refuses is not sent again (until the listener
+    /// signs in again): a page asked as them if they signed in is asked again signed out; their library is refused.
+    pub(crate) fn call_as(
+        &self,
+        client: &Client,
+        action: &str,
+        more: Value,
+        signed: Signed,
+    ) -> Result<Value, AddonError> {
         if let Some(quiet) = self.quiet() {
             return Err(quiet);
         }
+        let login = match signed {
+            Signed::No => None,
+            _ if !client.music || self.login_spent() => None,
+            _ => self.login(),
+        };
+        if signed == Signed::Must && login.is_none() {
+            return Err(trouble(
+                Code::Unauthorized,
+                if self.login_spent() {
+                    "YouTube no longer takes your sign-in: sign in again in Settings"
+                } else {
+                    "Sign in to YouTube Music in Settings to see your library"
+                },
+            ));
+        }
+        match self.ask(client, action, &more, login.as_ref()) {
+            Err(e) if login.is_some() && e.code == Code::Unauthorized => {
+                self.spent.store(true, Ordering::Relaxed);
+                if signed == Signed::IfAny {
+                    self.ask(client, action, &more, None)
+                } else {
+                    Err(e)
+                }
+            }
+            other => other,
+        }
+    }
+
+    fn ask(
+        &self,
+        client: &Client,
+        action: &str,
+        more: &Value,
+        login: Option<&Login>,
+    ) -> Result<Value, AddonError> {
         let visitor = self.visitor();
         let mut about = json!({
             "clientName": client.client_name,
@@ -262,9 +349,12 @@ impl InnerTube {
         }
         let mut body = json!({ "context": { "client": about, "user": {} } });
         if let (Some(body), Value::Object(more)) = (body.as_object_mut(), more) {
-            body.extend(more);
+            body.extend(more.clone());
         }
-        let url = if client.music {
+        let url = if login.is_some() {
+            // Signed in, the web page sends no key: the login says who asks.
+            format!("{}/{action}?prettyPrint=false", self.music)
+        } else if client.music {
             format!("{}/{action}?key={MUSIC_KEY}&prettyPrint=false", self.music)
         } else {
             format!("{}/{action}?prettyPrint=false", self.www)
@@ -279,8 +369,27 @@ impl InnerTube {
         if let Some(visitor) = &visitor {
             request = request.header("X-Goog-Visitor-Id", visitor);
         }
+        if let Some(login) = login {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            request = request
+                .header("Cookie", &login.header())
+                .header("Authorization", &login.authorization(now))
+                .header("Origin", ORIGIN)
+                .header("X-Origin", ORIGIN)
+                .header("Referer", &format!("{ORIGIN}/"))
+                .header("X-Goog-AuthUser", "0");
+        }
         let mut response = request.send(body.to_string()).map_err(unanswered)?;
         let status = response.status().as_u16();
+        if login.is_some() && matches!(status, 401 | 403) {
+            return Err(trouble(
+                Code::Unauthorized,
+                "YouTube no longer takes your sign-in: sign in again in Settings",
+            ));
+        }
         if status == 429 {
             self.quiet_for(AFTER_TOO_MANY, "YouTube is being asked too often");
             return Err(self

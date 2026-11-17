@@ -1621,3 +1621,38 @@ A search now shows YouTube Music's albums, artists and playlists beside its song
 - "More" on an artist's albums and singles (the page shows the ten newest of each); an artist's playlists and videos.
 - YouTube Music's home, moods and genres; lyrics; a song's "related".
 - Keeping one of YouTube's playlists or albums in the library as one (its songs can be saved as a playlist from the page).
+
+## 42. YouTube Music: signing in, your library, and its home
+
+A listener can sign in to YouTube Music, as in Stash for Android. Signed in, Library › YouTube Music holds their playlists (Liked music first), the albums they saved and the artists of their library, each opening its page; Home shows the shelves YouTube Music makes for them (Quick picks, Mixed for you, Albums for you…). Signed out, Home shows the shelves YouTube Music shows anyone.
+
+### How it is built
+
+- **The login** is the cookies of a web session ([`login.rs`](../crates/stash-core/src/youtube/login.rs)): read from a `Cookie` header or a `cookies.txt` file (only YouTube's cookies), and nothing without `SAPISID`. A request asked as the listener carries them with the header YouTube Music's own page sends (`SAPISIDHASH`: the SHA-1 of the time, the session and the origin), its origin, and no key; only to music.youtube.com, and never with a search: a search sent signed in lands in the account's history, and Stash searches for every song it looks for. Pages are asked as the listener when they signed in; their library only then.
+- **A login YouTube no longer takes** (a 401, or an answer to "who is this" with no account in it: the session signed out on the web) is not sent again until the listener signs in again; pages are asked again signed out, the library is refused with words that say so.
+- **Signing in in a window** ([`sign_in.rs`](../apps/desktop/src-tauri/src/sign_in.rs)): the shell opens Google's own sign-in for YouTube (YouTube Music's "Sign in" address) in a window of its own, with no script, no key to the core and no permission, and a data folder apart from the main window's, deleted before it opens and after it closes. Once `SAPISID` and `LOGIN_INFO` are set, the cookies go to the core, the window's browsing data is wiped and it closes. Google's page took the window as a browser (WebView2): no "this browser may not be secure".
+- **Kept** ([`youtube_account.rs`](../crates/stashd/src/youtube_account.rs)): YouTube is asked who the login belongs to before it is kept (in the library's settings); a login it does not take is never kept. The window is told who signed in, never the cookies. Pasting cookies works too, for a Stash without a window.
+- **The home page and the library** ([`home.rs`](../crates/stash-core/src/youtube/home.rs)): their cards are taken from wherever in the answer they are (a grid one year, a shelf the next), and read on through YouTube's "more" (the home page four answers, the library ten). A card plays (a song, a mix that starts at once) or opens a page (an album, an artist, a playlist); an artist of the listener's library opens as the artist.
+- **Routes**: `GET/POST /api/youtube/account`, `POST /api/youtube/account/window`, `POST /api/youtube/account/out`, `GET /api/youtube/home`, `GET /api/youtube/library?kind=playlists|albums|artists`.
+
+### Measured (the real YouTube, 2026-11-17, this computer, a real account signed in through the window)
+
+| | |
+|---|---|
+| Signing in: Google's page to the window closing by itself | the listener's own time; the window closed at once after |
+| Liked music (ten answers of a hundred) | 5.5 s |
+| The library's artists (one answer, then YouTube's "more") | 1.7 s |
+| The home page signed in | 11 shelves (albums, playlists, mixes, Quick picks) |
+| A Quick picks song played | Opus, from YouTube |
+
+### Checked
+
+- **`crates/stash-core/tests/youtube.rs`**: a signed-in listener's requests carry the cookies, the hash and the origin and no key; a search carries none of it; the library is refused without asking when nobody signed in; a refused login (401, or an answer with no account) is not sent again, pages are asked signed out; the home page read shelf by shelf from YouTube's real answer, cut down.
+- **`crates/stashd/tests/youtube.rs`**: signing in with cookies (no `SAPISID`: 400; a login YouTube refuses: 401, not kept), the window told who and never the cookies, the library and home through the core, the login kept for the next start, signing out.
+- **The window** (`tube-account.mjs`, `tube-signed.mjs`): Home's shelves signed out; Settings' cookie checks against the real YouTube; signed in, the account and its picture, the library tab, Liked music opened whole, the home shelves, a song played. Found on the way: the library tab read itself again whenever the account was asked for (it now reads once each time the listener is signed in).
+
+### Not yet
+
+- Brand accounts (a second profile of one Google account): the account itself is used.
+- Liking a song in Stash does not like it on YouTube, and playing does not add to YouTube's history.
+- Keeping one of the listener's YouTube playlists in Stash's library.

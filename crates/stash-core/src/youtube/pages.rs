@@ -139,13 +139,13 @@ fn playlist_line(runs: Option<&Vec<Value>>) -> String {
 }
 
 /// A row of a list (`musicResponsiveListItemRenderer`) that opens a page: an album, an artist or a playlist.
-enum Opens {
+pub(super) enum Opens {
     Album(AlbumCard),
     Artist(ArtistCard),
     Playlist(PlaylistCard),
 }
 
-fn opening_row(item: &Value) -> Option<Opens> {
+pub(super) fn opening_row(item: &Value) -> Option<Opens> {
     let (kind, id) = link(item)?;
     let title = text(column(item, 0)?.first()?.get("text"))?;
     let art = picture(item, "thumbnail");
@@ -163,7 +163,8 @@ fn opening_row(item: &Value) -> Option<Opens> {
                 art,
             })
         }
-        "ARTIST" => Opens::Artist(ArtistCard {
+        // An artist of the listener's library opens as the artist (its id, "MPLAUC…", is the artist's with "MPLA" before it).
+        "ARTIST" | "LIBRARY_ARTIST" => Opens::Artist(ArtistCard {
             id,
             name: title,
             art,
@@ -179,7 +180,7 @@ fn opening_row(item: &Value) -> Option<Opens> {
 }
 
 /// A card of a carousel (`musicTwoRowItemRenderer`) that opens a page.
-fn opening_card(card: &Value) -> Option<Opens> {
+pub(super) fn opening_card(card: &Value) -> Option<Opens> {
     let (kind, id) = link(card)?;
     let title = text(card.pointer("/title/runs/0/text"))?;
     let art = picture(card, "thumbnailRenderer");
@@ -197,7 +198,8 @@ fn opening_card(card: &Value) -> Option<Opens> {
                 art,
             })
         }
-        "ARTIST" => Opens::Artist(ArtistCard {
+        // An artist of the listener's library opens as the artist (its id, "MPLAUC…", is the artist's with "MPLA" before it).
+        "ARTIST" | "LIBRARY_ARTIST" => Opens::Artist(ArtistCard {
             id,
             name: title,
             art,
@@ -213,7 +215,7 @@ fn opening_card(card: &Value) -> Option<Opens> {
 }
 
 /// Whether a row is an episode of a podcast: its second line says so, or links to the podcast.
-fn episode(item: &Value) -> bool {
+pub(super) fn episode(item: &Value) -> bool {
     let line = column(item, 1);
     let says = line
         .and_then(|runs| runs.first())

@@ -437,6 +437,33 @@ export const tubeAlbum = (id: string) => get<TubeAlbumPage>(tube('album', id));
 export const tubeArtist = (id: string) => get<TubeArtistPage>(tube('artist', id));
 export const tubePlaylist = (id: string) => get<TubePlaylistPage>(tube('playlist', id));
 
+// ---- YouTube Music for a listener who signed in: their account, their library, and the home page
+
+/** A card of the home page or of the library: a song plays; the rest open a page. */
+export type TubeCard = { kind: 'song'; song: TubeSong } | { kind: 'album'; album: TubeAlbum } | { kind: 'artist'; artist: TubeArtist } | { kind: 'playlist'; playlist: TubePlaylist };
+export type TubeShelf = { title: string; over: string | null; cards: TubeCard[] };
+/** The account as the window is told it (never the login itself). `window`: this Stash can open Google's sign-in. */
+export type TubeAccount = {
+	signed_in: boolean;
+	/** YouTube no longer takes the login: sign in again. */
+	spent: boolean;
+	/** A sign-in window is open. */
+	signing: boolean;
+	window: boolean;
+	/** Why the last sign-in was not kept. */
+	trouble: string | null;
+	account: { name: string; handle: string | null; photo: string | null } | null;
+};
+export type TubeSaved = 'playlists' | 'albums' | 'artists';
+export const tubeHome = () => get<{ shelves: TubeShelf[] }>('/api/youtube/home').then((r) => r.shelves);
+export const tubeLibrary = (kind: TubeSaved) => get<{ cards: TubeCard[] }>(`/api/youtube/library?kind=${kind}`).then((r) => r.cards);
+export const tubeAccount = () => get<TubeAccount>('/api/youtube/account');
+/** Opens Google's sign-in in a window of its own; the account says when it is done (`signing` false). */
+export const tubeSignInWindow = () => post<TubeAccount>('/api/youtube/account/window', {});
+/** Signs in with cookies copied from a browser (a `Cookie` header or a cookies.txt file). */
+export const tubeSignInWith = (cookies: string) => post<TubeAccount>('/api/youtube/account', { cookies });
+export const tubeSignOut = () => post<TubeAccount>('/api/youtube/account/out', {});
+
 /** Asks one add-on for tracks. */
 export const searchAddon = (id: string, query: string, limit: number, signal?: AbortSignal) =>
 	get<{ groups: AddonGroup[] }>(`/api/addons/search?q=${encodeURIComponent(query)}&addon=${encodeURIComponent(id)}&limit=${limit}`, signal).then((r) => r.groups[0] ?? null);

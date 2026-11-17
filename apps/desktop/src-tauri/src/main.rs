@@ -7,6 +7,7 @@
 
 mod media_controls;
 mod shortcuts;
+mod sign_in;
 mod tray;
 mod windows;
 
@@ -55,6 +56,12 @@ fn main() -> Result<()> {
     // second program playing over the first. A library named by `STASH_DB` (a test, a measurement) runs on its own.
     let own_library = std::env::var_os("STASH_DB").is_none();
     let db = library_path()?;
+    // Where Google's sign-in for YouTube keeps its browsing data while it is open (beside the library, apart from the
+    // main window's).
+    let sign_in_folder = db
+        .parent()
+        .map(|folder| folder.join("youtube-sign-in"))
+        .unwrap_or_else(|| PathBuf::from("youtube-sign-in"));
 
     let mut shell = tauri::Builder::default();
     if own_library {
@@ -111,6 +118,7 @@ fn main() -> Result<()> {
                 let handle = app.handle().clone();
                 let opener = app.handle().clone();
                 core.with_window(Arc::new(move |view| windows::show(&handle, view)))
+                    .with_sign_in(sign_in::shell(app.handle().clone(), sign_in_folder.clone()))
                     .with_shortcuts(shortcuts::keys_shell(app.handle().clone(), port))
                     .with_opener(Arc::new(move |link: &str| {
                         use tauri_plugin_opener::OpenerExt;

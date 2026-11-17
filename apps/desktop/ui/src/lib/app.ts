@@ -12,6 +12,7 @@ import {
 	INITIAL_PLAYER_STATE,
 	type Album,
 	type AppAPI,
+	type Artwork,
 	type Artist,
 	type BrowseAPI,
 	type Counts,
@@ -29,7 +30,7 @@ import {
 	type SourceStatus,
 	type Track
 } from './api';
-import { descriptorKey, fold, LIB_REF, LIBRARY_SOURCE, sameSong } from './identity';
+import { albumHref, artistHref, descriptorKey, fold, LIB_REF, LIBRARY_SOURCE, sameSong, toLibraryItem } from './identity';
 import type { Descriptor } from './sources/contract';
 import { emptySearch, mergeTop, type SearchAlbum, type SearchArtist, type SearchPlaylist, type SearchResult, type SearchSection, type TopPick } from './sources/search';
 
@@ -927,6 +928,22 @@ const tubeTrack = (s: core.TubeSong): Track => ({
 	...(s.explicit ? { explicit: true } : {}),
 	...(artOf(s.art) ? { artwork: artOf(s.art) } : {})
 });
+
+/** A song of YouTube Music's (a card of its home page, of the library) as a song the queue takes. */
+export const tubeItem = (s: core.TubeSong): LibraryItem => ({ ...toLibraryItem(tubeTrack(s), { [core.YOUTUBE]: s.id }, 0, core.YOUTUBE), here: false });
+/** A card of YouTube Music's as the UI shows it: its title, the line under it, its picture, and the page it opens. */
+export const tubeCard = (c: core.TubeCard): { key: string; title: string; sub: string; artwork?: Artwork[]; href?: string; song?: LibraryItem; round?: boolean } => {
+	switch (c.kind) {
+		case 'song':
+			return { key: `s:${c.song.id}`, title: c.song.title, sub: c.song.artist, artwork: artOf(c.song.art), song: tubeItem(c.song) };
+		case 'album':
+			return { key: `a:${c.album.id}`, title: c.album.title, sub: [c.album.single ? 'Single' : 'Album', c.album.artist, c.album.year ? String(c.album.year) : ''].filter(Boolean).join(' · '), artwork: artOf(c.album.art), href: albumHref({ sourceId: core.YOUTUBE, id: c.album.id }) };
+		case 'artist':
+			return { key: `r:${c.artist.id}`, title: c.artist.name, sub: 'Artist', artwork: artOf(c.artist.art), href: artistHref({ sourceId: core.YOUTUBE, id: c.artist.id }), round: true };
+		case 'playlist':
+			return { key: `p:${c.playlist.id}`, title: c.playlist.title, sub: c.playlist.author, artwork: artOf(c.playlist.art), href: albumHref({ sourceId: core.YOUTUBE, id: c.playlist.id }) };
+	}
+};
 
 const browse: BrowseAPI = {
 	async album(sourceId, id) {

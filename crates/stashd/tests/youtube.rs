@@ -76,7 +76,7 @@ fn youtube() -> (String, Asked) {
                 continue;
             }
             let path = first.split_whitespace().nth(1).unwrap_or("/").to_string();
-            let (mut length, mut visitor) = (0usize, None);
+            let (mut length, mut visitor, mut cookie) = (0usize, None, String::new());
             loop {
                 let mut line = String::new();
                 if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
@@ -86,6 +86,7 @@ fn youtube() -> (String, Asked) {
                     match name.trim().to_lowercase().as_str() {
                         "content-length" => length = value.trim().parse().unwrap_or(0),
                         "x-goog-visitor-id" => visitor = Some(value.trim().to_string()),
+                        "cookie" => cookie = value.trim().to_string(),
                         _ => {}
                     }
                 }
@@ -95,7 +96,44 @@ fn youtube() -> (String, Asked) {
             let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             noted.lock().unwrap().push((path.clone(), visitor));
             let asked_for = |name: &str| body.get(name).and_then(Value::as_str).unwrap_or_default();
-            let (kind, answer): (&str, Vec<u8>) = if path.starts_with("/youtubei/v1/browse") {
+            // Signed in as the test's account: "good"; any other login is one YouTube does not take.
+            let good = cookie.contains("SAPISID=good");
+            let mut status = 200;
+            let (kind, answer): (&str, Vec<u8>) = if path
+                .starts_with("/youtubei/v1/account/accounts_list")
+            {
+                if !good {
+                    status = 401;
+                }
+                let item = json!({ "accountName": { "simpleText": "Stash Tester" }, "channelHandle": { "simpleText": "@tester" }, "isSelected": true });
+                (
+                    "application/json",
+                    json!({ "contents": [{ "accountItem": item }] })
+                        .to_string()
+                        .into_bytes(),
+                )
+            } else if path.starts_with("/youtubei/v1/browse")
+                && asked_for("browseId") == "FEmusic_liked_playlists"
+            {
+                if !good {
+                    status = 401;
+                }
+                let card = |id: &str, title: &str| {
+                    json!({ "musicTwoRowItemRenderer": {
+                    "title": { "runs": [{ "text": title }] },
+                    "subtitle": { "runs": [{ "text": "Stash Tester" }] },
+                    "navigationEndpoint": { "browseEndpoint": { "browseId": id, "browseEndpointContextSupportedConfigs": { "browseEndpointContextMusicConfig": { "pageType": "MUSIC_PAGE_TYPE_PLAYLIST" } } } },
+                } })
+                };
+                let grid = json!({ "contents": { "singleColumnBrowseResultsRenderer": { "tabs": [{ "tabRenderer": { "content": { "sectionListRenderer": { "contents": [
+                    { "gridRenderer": { "items": [card("VLLM", "Liked music"), card("VLPLmine", "Road trip")] } }
+                ] } } } }] } } });
+                ("application/json", grid.to_string().into_bytes())
+            } else if path.starts_with("/youtubei/v1/browse")
+                && asked_for("browseId") == "FEmusic_home"
+            {
+                ("application/json", recorded("home_live.json"))
+            } else if path.starts_with("/youtubei/v1/browse") {
                 // A page, or the songs after a playlist's first: the real YouTube's answers, cut down.
                 let page = asked_for("browseId");
                 let name = if !asked_for("continuation").is_empty() {
@@ -147,7 +185,7 @@ fn youtube() -> (String, Asked) {
             let mut out = stream;
             let _ = write!(
                 out,
-                "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 {status} OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 answer.len()
             );
             let _ = out.write_all(&answer);
@@ -465,5 +503,79 @@ fn youtube_music_is_the_last_of_the_listener_s_sources() {
         json!({ "id": "youtube", "enabled": true }),
     );
     assert_eq!(on["addons"][0]["enabled"].as_bool(), Some(true));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn signing_in_to_youtube_brings_in_the_listener_s_library() {
+    let dir = std::env::temp_dir().join(format!("stash-youtube-account-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("library.db");
+    let (base, _asked) = youtube();
+    let api = format!("{base}/youtubei/v1");
+    let client = core(&db, &api, None);
+
+    // Nobody yet; this core has no window to sign in with, so cookies are the way.
+    let (status, account) = client.get("/api/youtube/account");
+    assert_eq!(status, 200);
+    assert_eq!(account["signed_in"], false, "{account}");
+    assert_eq!(account["window"], false);
+    assert_eq!(client.post("/api/youtube/account/window", json!({})).0, 404);
+    let (status, _) = client.get("/api/youtube/library?kind=playlists");
+    assert_eq!(status, 401);
+
+    // Cookies without SAPISID are no sign-in; a login YouTube does not take is not kept.
+    let (status, said) = client.post(
+        "/api/youtube/account",
+        json!({ "cookies": "HSID=x; SID=y" }),
+    );
+    assert_eq!(status, 400, "{said}");
+    let (status, said) = client.post("/api/youtube/account", json!({ "cookies": "SAPISID=bad" }));
+    assert_eq!(status, 401, "{said}");
+    assert_eq!(client.get("/api/youtube/account").1["signed_in"], false);
+
+    // A good one: YouTube says whose it is, and the window is told that, never the cookies.
+    let (status, account) = client.post(
+        "/api/youtube/account",
+        json!({ "cookies": "SAPISID=good; LOGIN_INFO=l; SID=s" }),
+    );
+    assert_eq!(status, 200, "{account}");
+    assert_eq!(account["signed_in"], true);
+    assert_eq!(account["spent"], false);
+    assert_eq!(account["account"]["name"], "Stash Tester");
+    assert_eq!(account["account"]["handle"], "@tester");
+    assert!(!account.to_string().contains("SAPISID"), "{account}");
+
+    // Their library, and the home page.
+    let (status, found) = client.get("/api/youtube/library?kind=playlists");
+    assert_eq!(status, 200, "{found}");
+    let titles: Vec<_> = found["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["playlist"]["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, ["Liked music", "Road trip"]);
+    assert_eq!(found["cards"][0]["kind"], "playlist");
+    assert_eq!(client.get("/api/youtube/library?kind=everything").0, 400);
+    let (status, home) = client.get("/api/youtube/home");
+    assert_eq!(status, 200, "{home}");
+    assert_eq!(home["shelves"][0]["title"], "Pump it up");
+    assert_eq!(home["shelves"][0]["cards"][0]["kind"], "playlist");
+
+    // Kept for the next start.
+    let again = core(&db, &api, None);
+    let (_, account) = again.get("/api/youtube/account");
+    assert_eq!(account["signed_in"], true, "{account}");
+    assert_eq!(account["account"]["name"], "Stash Tester");
+
+    // Signed out: gone here, and at the next start.
+    let (status, account) = again.post("/api/youtube/account/out", json!({}));
+    assert_eq!(status, 200);
+    assert_eq!(account["signed_in"], false);
+    assert_eq!(again.get("/api/youtube/library?kind=albums").0, 401);
+    let third = core(&db, &api, None);
+    assert_eq!(third.get("/api/youtube/account").1["signed_in"], false);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -8,8 +8,10 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 use stash_core::addons::{Code, StreamRequest, Tier};
 use stash_core::reach::Reach;
+use stash_core::youtube::home::{self, Card};
+use stash_core::youtube::login::Login;
 use stash_core::youtube::parse::{self, Kind};
-use stash_core::youtube::{self, YouTube};
+use stash_core::youtube::{self, Saved, YouTube};
 
 fn recorded(name: &str) -> Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -166,7 +168,46 @@ fn server() -> (String, Arc<Mutex<Vec<Asked>>>) {
                 })
             };
             let refused = |status: &str, reason: &str| json!({ "playabilityStatus": { "status": status, "reason": reason } });
-            let (status, answer): (u16, String) = if path.starts_with("/youtubei/v1/search") {
+            // Signed in: the test's account is "good"; "spent" is one YouTube no longer takes.
+            let signed = request.header("cookie").unwrap_or_default().to_string();
+            let refuse_spent = signed.contains("SAPISID=spent");
+            let (status, answer): (u16, String) = if refuse_spent {
+                (401, String::new())
+            } else if path.starts_with("/youtubei/v1/account/accounts_list") {
+                if signed.contains("SAPISID=good") {
+                    let item = json!({ "accountName": { "simpleText": "Stash Tester" }, "channelHandle": { "simpleText": "@tester" }, "isSelected": true });
+                    (
+                        200,
+                        json!({ "contents": [{ "accountItem": item }] }).to_string(),
+                    )
+                } else if signed.contains("SAPISID=nobody") {
+                    // A session that signed out: answered as anyone is, with no account in it.
+                    (200, json!({ "contents": [] }).to_string())
+                } else {
+                    (401, String::new())
+                }
+            } else if path.starts_with("/youtubei/v1/browse") {
+                let page = request.body["browseId"].as_str().unwrap_or_default();
+                if !request.body["continuation"].is_null() {
+                    (200, recorded("home_more_live.json").to_string())
+                } else if page == "FEmusic_home" {
+                    (200, recorded("home_live.json").to_string())
+                } else if page == "FEmusic_liked_playlists" && signed.contains("SAPISID=good") {
+                    let card = |id: &str, title: &str| {
+                        json!({ "musicTwoRowItemRenderer": {
+                        "title": { "runs": [{ "text": title }] },
+                        "subtitle": { "runs": [{ "text": "Stash Tester" }] },
+                        "navigationEndpoint": { "browseEndpoint": { "browseId": id, "browseEndpointContextSupportedConfigs": { "browseEndpointContextMusicConfig": { "pageType": "MUSIC_PAGE_TYPE_PLAYLIST" } } } },
+                    } })
+                    };
+                    let grid = json!({ "contents": { "singleColumnBrowseResultsRenderer": { "tabs": [{ "tabRenderer": { "content": { "sectionListRenderer": { "contents": [
+                        { "gridRenderer": { "items": [card("VLLM", "Liked music"), card("VLPLmine", "Road trip")] } }
+                    ] } } } }] } } });
+                    (200, grid.to_string())
+                } else {
+                    (401, String::new())
+                }
+            } else if path.starts_with("/youtubei/v1/search") {
                 let mut found = recorded("search_songs_explicit_twins.json");
                 found["responseContext"] = json!({ "visitorData": "VISITOR%3D" });
                 (200, found.to_string())
@@ -658,4 +699,113 @@ fn the_pages_of_an_album_an_artist_and_a_playlist_are_read() {
     assert_eq!(more.len(), 4);
     assert!(next.is_some());
     assert_eq!(pages::playlist_more(&json!({})), (Vec::new(), None));
+}
+
+#[test]
+fn a_listener_who_signed_in_is_asked_for_as_themselves_but_never_searches_so() {
+    let (base, asked) = server();
+    let api = format!("{base}/youtubei/v1");
+    let youtube = YouTube::at(&api, &api);
+    let last = || asked.lock().unwrap().last().cloned().unwrap();
+
+    // Not signed in: the library is not asked for at all.
+    let before = asked.lock().unwrap().len();
+    let e = youtube.library(Saved::Playlists).unwrap_err();
+    assert_eq!(e.code, Code::Unauthorized);
+    assert!(e.message.contains("Sign in"), "{}", e.message);
+    assert_eq!(asked.lock().unwrap().len(), before);
+
+    youtube.set_login(Login::read("SAPISID=good; LOGIN_INFO=x; SID=s"));
+    let account = youtube.account().unwrap();
+    assert_eq!(
+        (account.name.as_str(), account.handle.as_deref()),
+        ("Stash Tester", Some("@tester"))
+    );
+    // As YouTube Music's own page asks: the cookies, the hash of the session, its origin, and no key.
+    let signed = last();
+    assert_eq!(
+        signed.header("cookie"),
+        Some("SAPISID=good; LOGIN_INFO=x; SID=s")
+    );
+    assert!(
+        signed
+            .header("authorization")
+            .is_some_and(|a| a.starts_with("SAPISIDHASH ") && a.len() == 12 + 11 + 40)
+    );
+    assert_eq!(signed.header("origin"), Some("https://music.youtube.com"));
+    assert_eq!(signed.header("x-goog-authuser"), Some("0"));
+    assert!(!signed.path.contains("key="), "{}", signed.path);
+
+    // A search never is: it would land in the account's history.
+    youtube.songs("daft punk").unwrap();
+    let search = last();
+    assert_eq!(search.header("cookie"), None);
+    assert_eq!(search.header("authorization"), None);
+    assert!(search.path.contains("key="));
+
+    // Their library, and their home (read on through the rest).
+    let cards = youtube.library(Saved::Playlists).unwrap();
+    let ids: Vec<_> = cards
+        .iter()
+        .map(|card| match card {
+            Card::Playlist(p) => p.id.as_str(),
+            _ => "",
+        })
+        .collect();
+    assert_eq!(ids, ["VLLM", "VLPLmine"]);
+    let shelves = youtube.home().unwrap();
+    assert_eq!(shelves.len(), 8);
+    assert_eq!(
+        shelves[..4]
+            .iter()
+            .map(|s| s.title.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Pump it up",
+            "Throwbacks",
+            "Feeling happy",
+            "Irresistible sing-alongs"
+        ]
+    );
+    assert!(last().header("cookie").is_some());
+
+    // A login YouTube no longer takes: said once, not sent again; pages are asked signed out, the library refused.
+    youtube.set_login(Login::read("SAPISID=spent"));
+    assert_eq!(youtube.account().unwrap_err().code, Code::Unauthorized);
+    assert!(youtube.login_spent());
+    assert_eq!(youtube.home().unwrap().len(), 8);
+    assert_eq!(last().header("cookie"), None);
+    let before = asked.lock().unwrap().len();
+    let e = youtube.library(Saved::Albums).unwrap_err();
+    assert!(e.message.contains("sign in again"), "{}", e.message);
+    assert_eq!(asked.lock().unwrap().len(), before);
+
+    // A session YouTube answers as anyone (it signed out on the web) is one it no longer takes, too.
+    youtube.set_login(Login::read("SAPISID=nobody"));
+    assert_eq!(youtube.account().unwrap_err().code, Code::Unauthorized);
+    assert!(youtube.login_spent());
+
+    // Signed out.
+    youtube.set_login(None);
+    assert!(!youtube.login_spent() && youtube.login().is_none());
+}
+
+#[test]
+fn the_home_page_is_read_shelf_by_shelf() {
+    let (shelves, more) = home::shelves(&recorded("home_live.json"));
+    assert_eq!(shelves.len(), 2);
+    assert_eq!(shelves[1].title, "Throwbacks");
+    assert_eq!(
+        shelves[1].over.as_deref(),
+        Some("CLASSICS FROM EVERY DECADE")
+    );
+    assert_eq!(shelves[0].cards.len(), 3);
+    let Card::Playlist(first) = &shelves[0].cards[0] else {
+        panic!("{:?}", shelves[0].cards[0])
+    };
+    assert!(first.id.starts_with("VL") && !first.title.is_empty() && first.art.is_some());
+    assert!(more.is_some());
+    let (rest, after) = home::shelves(&recorded("home_more_live.json"));
+    assert_eq!(rest.len(), 2);
+    assert!(after.is_some());
 }

@@ -97,6 +97,8 @@ pub type KeysShell = Arc<dyn Fn(&[(String, String)]) -> Vec<(String, String)> + 
 /// when it was opened.
 pub type OpenShell = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+pub use crate::youtube_account::{SignInShell, SignedIn};
+
 pub(crate) type Reply = Response<std::io::Cursor<Vec<u8>>>;
 
 pub(crate) fn header(name: &str, value: &str) -> Header {
@@ -917,8 +919,11 @@ pub(crate) struct State {
     pub(crate) opener: Option<OpenShell>,
     /// New versions of add-ons, offered to the listener and not yet taken (see `/api/addons/check`).
     offered: Mutex<HashMap<String, Offered>>,
-    /// YouTube Music, when this core has it built in.
+    /// YouTube Music, when this core has it built in, and the account the listener signed in to it with.
     youtube: Option<BuiltInYouTube>,
+    youtube_account: Option<Arc<crate::youtube_account::TubeAccount>>,
+    /// Opens Google's sign-in for YouTube in a window, when the core runs inside one.
+    pub(crate) sign_in: Option<SignInShell>,
 }
 
 /// An add-on as its link gave it when it was checked, waiting for the listener to say yes. What is taken is what they
@@ -1011,6 +1016,11 @@ impl State {
             .iter()
             .any(|a| a.stored.id == youtube::ID && a.usable().is_some());
         on.then(|| Arc::clone(source))
+    }
+
+    /// The account signed in to YouTube Music, when this core has it built in.
+    pub(crate) fn youtube_account(&self) -> Option<Arc<crate::youtube_account::TubeAccount>> {
+        self.youtube_account.clone()
     }
 
     fn reload_addons(&self) -> Result<()> {
@@ -1178,6 +1188,8 @@ impl Core {
                 offered: Mutex::new(HashMap::new()),
                 opener: None,
                 youtube: None,
+                youtube_account: None,
+                sign_in: None,
             },
         })
     }
@@ -1207,7 +1219,12 @@ impl Core {
                     .set_setting(YOUTUBE_VISITOR, &visitor);
             });
         }));
-        self.state.youtube = Some((Arc::new(youtube), reach));
+        let youtube = Arc::new(youtube);
+        self.state.youtube_account = Some(Arc::new(crate::youtube_account::TubeAccount::new(
+            Arc::clone(&self.state.library),
+            Arc::clone(&youtube),
+        )));
+        self.state.youtube = Some((youtube, reach));
         if let Err(e) = self.state.reload_addons() {
             eprintln!("YouTube Music could not be listed: {e}");
         }
@@ -1236,6 +1253,12 @@ impl Core {
     /// [`crate::radio`]). The address is never shown, in an answer or a message.
     pub fn with_similar(mut self, proxy: &str) -> Self {
         self.state.radio = crate::radio::Radio::new(Some(proxy));
+        self
+    }
+
+    /// Lets the listener sign in to YouTube in a window `shell` opens (Google's own sign-in).
+    pub fn with_sign_in(mut self, shell: SignInShell) -> Self {
+        self.state.sign_in = Some(shell);
         self
     }
 
@@ -2705,6 +2728,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::saving::route(state, request, &path, &param)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::youtube_account::route(state, request, &path)? {
         return Ok((response, false));
     }
     if let Some(response) = crate::youtube_pages::route(state, request, &path, &param)? {

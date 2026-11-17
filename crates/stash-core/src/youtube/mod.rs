@@ -1,12 +1,16 @@
 //! YouTube Music, built into Stash: the source every listener has before they add any add-on, as in Stash for
-//! Android and Stash on the web. It finds songs and says where they play from; nobody signs in, and YouTube is told
-//! nothing of the listener but what is searched for and played.
+//! Android and Stash on the web. It finds songs and says where they play from without anyone signing in, and YouTube
+//! is told nothing of the listener but what is searched for and played. A listener who signs in ([`login`]) also has
+//! their own: their liked songs, playlists, albums and artists, and the home page YouTube Music makes them; its pages
+//! are then asked as them. Searches never are (they would land in the account's history).
 //!
 //! The rest of the core asks it the way it asks an add-on ([`crate::addons::BuiltIn`]): it is searched, a library
 //! song is found in it by the same matching as in an add-on that can only be searched, and its streams go through
 //! the core's relay like any other.
 
+pub mod home;
 pub mod innertube;
+pub mod login;
 pub mod pages;
 pub mod parse;
 mod player;
@@ -17,7 +21,9 @@ use serde_json::json;
 
 use crate::addons::{Addon, AddonError, Artwork, BuiltIn, Code, Manifest, StreamInfo, Tier, Track};
 use crate::reach::Reach;
-use innertube::{InnerTube, WEB_REMIX, trouble};
+use home::{Account, Card, Shelf};
+use innertube::{InnerTube, Signed, WEB_REMIX, trouble};
+use login::Login;
 use pages::{AlbumPage, ArtistPage, Found, PlaylistPage};
 use parse::Song;
 
@@ -33,6 +39,28 @@ const QUERY_CAP: usize = 200;
 const PLAYLIST_PAGES: usize = 10;
 /// An answer to "the songs after these" that brings fewer new songs than this is the playlist's last.
 const PLAYLIST_FEW_NEW: usize = 5;
+/// How many answers the home page is read through (each a few shelves), and a page of the library (each a hundred or
+/// so cards).
+const HOME_PAGES: usize = 4;
+const LIBRARY_PAGES: usize = 10;
+
+/// A page of the listener's library on YouTube Music.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Saved {
+    Playlists,
+    Albums,
+    Artists,
+}
+
+impl Saved {
+    fn page(self) -> &'static str {
+        match self {
+            Saved::Playlists => "FEmusic_liked_playlists",
+            Saved::Albums => "FEmusic_liked_albums",
+            Saved::Artists => "FEmusic_library_corpus_track_artists",
+        }
+    }
+}
 
 /// YouTube Music as a source.
 #[derive(Default)]
@@ -62,6 +90,98 @@ impl YouTube {
     /// Has `learned` told the visitor id when YouTube first gives one.
     pub fn on_visitor(&self, learned: innertube::Learned) {
         self.line.on_visitor(learned);
+    }
+
+    /// Signs in with `login`, or out (nothing).
+    pub fn set_login(&self, login: Option<Login>) {
+        self.line.set_login(login);
+    }
+
+    /// The login signed in with.
+    pub fn login(&self) -> Option<Login> {
+        self.line.login()
+    }
+
+    /// Whether YouTube stopped taking the login (the listener signed out on the web, or it ran out).
+    pub fn login_spent(&self) -> bool {
+        self.line.login_spent()
+    }
+
+    /// Who signed in: asks YouTube, so it also tells whether it still takes the login.
+    pub fn account(&self) -> Result<Account, AddonError> {
+        let answer =
+            self.line
+                .call_as(&WEB_REMIX, "account/accounts_list", json!({}), Signed::Must)?;
+        // YouTube answers a session that is not signed in (one signed out on the web, or cookies that are not all
+        // there) as it answers anyone: with no account in it.
+        home::account(&answer).ok_or_else(|| {
+            self.line.spend();
+            trouble(
+                Code::Unauthorized,
+                "YouTube no longer takes your sign-in: sign in again in Settings",
+            )
+        })
+    }
+
+    /// The home page YouTube Music makes: the listener's own when they signed in, else the one it shows anyone.
+    pub fn home(&self) -> Result<Vec<Shelf>, AddonError> {
+        let answer = self.line.call_as(
+            &WEB_REMIX,
+            "browse",
+            json!({ "browseId": "FEmusic_home" }),
+            Signed::IfAny,
+        )?;
+        let (mut shelves, mut more) = home::shelves(&answer);
+        for _ in 1..HOME_PAGES {
+            let Some(token) = more.take() else { break };
+            // What was read so far is given when the rest cannot be.
+            let Ok(answer) = self.line.call_as(
+                &WEB_REMIX,
+                "browse",
+                json!({ "continuation": token }),
+                Signed::IfAny,
+            ) else {
+                break;
+            };
+            let (next, after) = home::shelves(&answer);
+            shelves.extend(next);
+            more = after;
+        }
+        Ok(shelves)
+    }
+
+    /// A page of the listener's library: their playlists, the albums they saved, or the artists of their songs.
+    pub fn library(&self, which: Saved) -> Result<Vec<Card>, AddonError> {
+        let answer = self.line.call_as(
+            &WEB_REMIX,
+            "browse",
+            json!({ "browseId": which.page() }),
+            Signed::Must,
+        )?;
+        let (mut cards, mut more) = home::cards(&answer);
+        for _ in 1..LIBRARY_PAGES {
+            let Some(token) = more.take() else { break };
+            let Ok(answer) = self.line.call_as(
+                &WEB_REMIX,
+                "browse",
+                json!({ "continuation": token }),
+                Signed::Must,
+            ) else {
+                break;
+            };
+            let (next, after) = home::cards(&answer);
+            let before = cards.len();
+            for card in next {
+                if !cards.contains(&card) {
+                    cards.push(card);
+                }
+            }
+            if cards.len() == before {
+                break;
+            }
+            more = after;
+        }
+        Ok(cards)
     }
 
     /// The songs YouTube Music finds for `query`, in its order.
@@ -101,8 +221,12 @@ impl YouTube {
                 "that is not a page of YouTube Music",
             ));
         };
-        self.line
-            .call(&WEB_REMIX, "browse", json!({ "browseId": id }))
+        self.line.call_as(
+            &WEB_REMIX,
+            "browse",
+            json!({ "browseId": id }),
+            Signed::IfAny,
+        )
     }
 
     /// An album's page ("MPREb_…").
@@ -140,10 +264,12 @@ impl YouTube {
             .filter(|_| !endless && read < PLAYLIST_PAGES)
         {
             // What was read so far is given when the rest cannot be.
-            let Ok(answer) = self
-                .line
-                .call(&WEB_REMIX, "browse", json!({ "continuation": more }))
-            else {
+            let Ok(answer) = self.line.call_as(
+                &WEB_REMIX,
+                "browse",
+                json!({ "continuation": more }),
+                Signed::IfAny,
+            ) else {
                 break;
             };
             let (songs, next) = pages::playlist_more(&answer);
@@ -173,7 +299,7 @@ impl YouTube {
             version: env!("CARGO_PKG_VERSION").to_string(),
             kind: "server".to_string(),
             description: Some(
-                "Built into Stash. Finds and plays songs from YouTube Music, without signing in."
+                "Built into Stash. Finds and plays songs from YouTube Music, signed in or not."
                     .to_string(),
             ),
             resources: vec!["search".to_string(), "stream".to_string()],

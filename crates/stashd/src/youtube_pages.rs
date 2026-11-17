@@ -1,13 +1,17 @@
 //! YouTube Music's own pages, for the window: everything a search finds beside the songs (albums, artists,
-//! playlists, and what it puts first), and the pages of an album, an artist and a playlist.
+//! playlists, and what it puts first), the pages of an album, an artist and a playlist, the home page, and the
+//! library of a listener who signed in (see `youtube_account`).
 //!
-//! `GET /api/youtube/search?q=`, `/api/youtube/album?id=`, `/api/youtube/artist?id=`, `/api/youtube/playlist?id=`.
+//! `GET /api/youtube/search?q=`, `/api/youtube/album?id=`, `/api/youtube/artist?id=`, `/api/youtube/playlist?id=`,
+//! `/api/youtube/home`, `/api/youtube/library?kind=playlists|albums|artists`.
 //! Each asks YouTube once (a long playlist: once for every hundred songs). Not found when this core has no YouTube
 //! Music or the listener switched it off; refused while Stash is offline.
 
 use anyhow::Result;
 use serde_json::{Value, json};
 use stash_core::addons::{AddonError, Code};
+use stash_core::youtube::Saved;
+use stash_core::youtube::home::Card;
 use stash_core::youtube::pages::{AlbumCard, ArtistCard, PlaylistCard, Top};
 use stash_core::youtube::parse::Song;
 use tiny_http::{Method, Request};
@@ -48,6 +52,23 @@ fn playlist(playlist: &PlaylistCard) -> Value {
     json!({ "id": playlist.id, "title": playlist.title, "author": playlist.author, "art": playlist.art })
 }
 
+/// A card of the home page or the library: what it is, and it.
+fn card(card: &Card) -> Value {
+    match card {
+        Card::Song(s) => json!({ "kind": "song", "song": song(s) }),
+        Card::Album(a) => json!({ "kind": "album", "album": album(a) }),
+        Card::Artist(a) => json!({ "kind": "artist", "artist": artist(a) }),
+        Card::Playlist(p) => json!({ "kind": "playlist", "playlist": playlist(p) }),
+    }
+}
+
+fn cards(list: &[Card]) -> Vec<Value> {
+    list.iter()
+        .filter(|c| !matches!(c, Card::Song(s) if s.artist.is_empty()))
+        .map(card)
+        .collect()
+}
+
 fn songs(list: &[Song]) -> Vec<Value> {
     list.iter()
         .filter(|s| !s.artist.is_empty())
@@ -59,6 +80,7 @@ fn songs(list: &[Song]) -> Vec<Value> {
 fn failed(e: &AddonError) -> Reply {
     let status = match e.code {
         Code::NotFound => 404,
+        Code::Unauthorized => 401,
         Code::RateLimited => 429,
         _ => 502,
     };
@@ -132,6 +154,26 @@ pub(crate) fn route(
                 "more": page.more.is_some(),
             })
         }),
+        "/api/youtube/home" => youtube.home().map(|shelves| {
+            json!({
+                "shelves": shelves.iter().map(|shelf| json!({
+                    "title": shelf.title,
+                    "over": shelf.over,
+                    "cards": cards(&shelf.cards),
+                })).collect::<Vec<_>>(),
+            })
+        }),
+        "/api/youtube/library" => {
+            let which = match param("kind").as_deref() {
+                Some("playlists") => Saved::Playlists,
+                Some("albums") => Saved::Albums,
+                Some("artists") => Saved::Artists,
+                _ => return Ok(Some(refuse(400, "kind is playlists, albums or artists"))),
+            };
+            youtube
+                .library(which)
+                .map(|found| json!({ "cards": cards(&found) }))
+        }
         _ => return Ok(None),
     };
     Ok(Some(match answer {

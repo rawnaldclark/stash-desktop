@@ -1,9 +1,12 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { shelf } from '../lib/ui/shelf';
 	import { player } from '../lib/app';
 	import type { LibraryItem } from '../lib/api';
 	import Card from '../lib/ui/Card.svelte';
-	import { L } from '../lib/ui/state.svelte';
+	import { L, ui } from '../lib/ui/state.svelte';
+	import { T } from '../lib/desktop/youtube.svelte';
+	import TubeShelves from '../lib/desktop/TubeShelves.svelte';
 	import { songs } from '../lib/ui/format';
 	import { jumpBackIn } from '../lib/home/jump';
 
@@ -27,7 +30,22 @@
 	const quiet = $derived(!recent.length && !L.playlists.length && !albums.length);
 
 	const play = (items: LibraryItem[], i = 0, from?: string) => void player.playItems(items, i, { from });
+
+	// YouTube Music's home page under the library's shelves: the listener's own when they signed in.
+	const tubeOn = $derived(T.on && !ui.offline);
+	$effect(() => {
+		if (tubeOn) untrack(() => void T.refreshAccount().then(() => T.loadHome()));
+	});
+	const tube = $derived(T.on && !ui.offline && T.home?.length ? T.home : null);
 </script>
+
+{#snippet youtube()}
+	{#if tube}
+		<TubeShelves shelves={tube} />
+	{:else if T.on && !ui.offline && T.homeTrouble}
+		<p class="s-hint" role="status">YouTube Music’s home did not load: {T.homeTrouble} <button type="button" class="lnk" onclick={() => void T.loadHome(true)}>Try again</button></p>
+	{/if}
+{/snippet}
 
 {#if !L.loaded}
 	<div class="view"></div>
@@ -36,11 +54,13 @@
 		<p class="empty-line">Add a music folder or import a library to begin.</p>
 		<a class="btn" href="/settings#library">Open Settings</a>
 	</section>
+	{#if tube}<div class="view view-in">{@render youtube()}</div>{/if}
 {:else if quiet}
 	<section class="empty" aria-label="Get started">
 		<p class="empty-line">Play a song and it shows up here.</p>
 		<a class="btn" href="/library?tab=songs">Open your library</a>
 	</section>
+	{#if tube}<div class="view view-in">{@render youtube()}</div>{/if}
 {:else}
 	<div class="view view-in">
 		{#if recent.length}
@@ -73,5 +93,6 @@
 				</div>
 			</div>
 		{/if}
+		{@render youtube()}
 	</div>
 {/if}
