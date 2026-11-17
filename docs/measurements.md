@@ -1656,3 +1656,31 @@ A listener can sign in to YouTube Music, as in Stash for Android. Signed in, Lib
 - Brand accounts (a second profile of one Google account): the account itself is used.
 - Liking a song in Stash does not like it on YouTube, and playing does not add to YouTube's history.
 - Keeping one of the listener's YouTube playlists in Stash's library.
+
+## 43. YouTube Music: yt-dlp for the songs YouTube's apps will not play
+
+Some songs YouTube's apps will not play to Stash: a video that asks to confirm the listener's age, one a label keeps from those apps, one only YouTube's web player gets an address for. yt-dlp asks as more of YouTube's apps, solves the web's scrambled addresses with a JavaScript runtime, and with the listener's sign-in asks as them. Stash now asks it for those songs.
+
+### How it is built
+
+- **Only when Stash's own way failed** with something yt-dlp could get past ([`ytdlp.rs`](../crates/stash-core/src/youtube/ytdlp.rs), `worth_trying`): an age to confirm or another refusal, no plain address, or every app asking whether the listener is a bot. Not for a video that is gone, a line that is down, or YouTube asking to be left alone.
+- **Only the address is taken from it**: yt-dlp is asked to print the address of the sound and what it is (Opus first, as Stash's own way) and nothing else; the song plays through the core's relay as any other. Signed in, the listener's cookies go to it in a file of its own, deleted when it is done. It runs with no window, and is stopped after 45 s.
+- **Which copy**: Stash's own (in `tools`, beside the library), else the system's on the PATH. Its own is fetched when the listener asks (Settings › YouTube Music): yt-dlp's latest release on GitHub, checked against the release's `SHA2-256SUMS`, and Deno's (its archive checked against the sum Deno publishes, in either of its two forms) only when the computer has no runtime yt-dlp can use (Deno, Node 22 or later, QuickJS, Bun). A file that does not match is not kept.
+- **Routes** ([`youtube_fallback.rs`](../crates/stashd/src/youtube_fallback.rs)): `GET /api/youtube/ytdlp`, `POST /api/youtube/ytdlp {"on"}`, `POST /api/youtube/ytdlp/install`.
+
+### Measured (the real YouTube, 2026-11-17, this computer)
+
+| | |
+|---|---|
+| Fetching yt-dlp (Node was here: no Deno) | a few seconds; 2026.10.26, its sum matched |
+| An official music video YouTube's apps refuse ("Sign in to confirm your age"), signed in | played, Opus, 11.3 s from the click (YouTube's four apps asked first) |
+
+### Checked
+
+- **`ytdlp.rs`** (4): what yt-dlp printed read as a stream (an address that is not https refused); its complaints in the listener's words (age, gone, bot, anything else); which failures send a song to it; a release's sums read in both forms, and a file that does not match refused.
+- **`crates/stashd/tests/youtube.rs`**: Stash's own copy found beside the library; the switch, kept for the next start.
+
+### Not yet
+
+- Updating Stash's copy by itself (it is fetched again when the listener asks).
+- Saying in the player that a song came through yt-dlp.

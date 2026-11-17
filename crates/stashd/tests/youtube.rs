@@ -579,3 +579,34 @@ fn signing_in_to_youtube_brings_in_the_listener_s_library() {
     assert_eq!(third.get("/api/youtube/account").1["signed_in"], false);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn yt_dlp_is_found_beside_the_library_and_switched_by_the_listener() {
+    let dir = std::env::temp_dir().join(format!("stash-youtube-ytdlp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("tools")).unwrap();
+    let (base, _asked) = youtube();
+    let api = format!("{base}/youtubei/v1");
+
+    // Stash's own copy is the one in the tools folder beside the library (this one does not run: no version).
+    let name = if cfg!(windows) {
+        "yt-dlp.exe"
+    } else {
+        "yt-dlp"
+    };
+    std::fs::write(dir.join("tools").join(name), b"not a program").unwrap();
+    let client = core(&dir.join("library.db"), &api, None);
+    let (status, said) = client.get("/api/youtube/ytdlp");
+    assert_eq!(status, 200, "{said}");
+    assert_eq!(said["on"], true);
+    assert_eq!(said["found"]["own"], true, "{said}");
+    assert_eq!(said["found"]["version"], Value::Null);
+    assert_eq!(said["fetching"], Value::Null);
+
+    // Switched off, and kept so.
+    let (status, said) = client.post("/api/youtube/ytdlp", json!({ "on": false }));
+    assert_eq!((status, &said["on"]), (200, &json!(false)), "{said}");
+    let again = core(&dir.join("library.db"), &api, None);
+    assert_eq!(again.get("/api/youtube/ytdlp").1["on"], false);
+    let _ = std::fs::remove_dir_all(&dir);
+}

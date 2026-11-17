@@ -464,6 +464,20 @@ export const tubeSignInWindow = () => post<TubeAccount>('/api/youtube/account/wi
 export const tubeSignInWith = (cookies: string) => post<TubeAccount>('/api/youtube/account', { cookies });
 export const tubeSignOut = () => post<TubeAccount>('/api/youtube/account/out', {});
 
+/** yt-dlp, for the songs YouTube's apps will not play to Stash: Stash's own copy (`own`) or the system's. */
+export type TubeFallback = {
+	on: boolean;
+	found: { own: boolean; version: string | null; runtime: string | null } | null;
+	fetching: { what: string; got: number; total: number | null } | null;
+	trouble: string | null;
+	can_fetch: boolean;
+	/** A fetch would bring Deno too (there is no JavaScript runtime yt-dlp can use). */
+	with_deno: boolean;
+};
+export const tubeFallback = () => get<TubeFallback>('/api/youtube/ytdlp');
+export const setTubeFallback = (on: boolean) => post<TubeFallback>('/api/youtube/ytdlp', { on });
+export const fetchTubeFallback = () => post<TubeFallback>('/api/youtube/ytdlp/install', {});
+
 /** Asks one add-on for tracks. */
 export const searchAddon = (id: string, query: string, limit: number, signal?: AbortSignal) =>
 	get<{ groups: AddonGroup[] }>(`/api/addons/search?q=${encodeURIComponent(query)}&addon=${encodeURIComponent(id)}&limit=${limit}`, signal).then((r) => r.groups[0] ?? null);

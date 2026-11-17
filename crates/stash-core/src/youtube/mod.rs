@@ -14,6 +14,7 @@ pub mod login;
 pub mod pages;
 pub mod parse;
 mod player;
+pub mod ytdlp;
 
 use std::sync::Arc;
 
@@ -67,6 +68,8 @@ impl Saved {
 pub struct YouTube {
     line: InnerTube,
     players: player::Players,
+    /// yt-dlp, for the songs YouTube's apps will not play to Stash (see [`ytdlp`]), when the listener has it.
+    fallback: std::sync::RwLock<Option<ytdlp::YtDlp>>,
 }
 
 impl YouTube {
@@ -75,7 +78,17 @@ impl YouTube {
         Self {
             line: InnerTube::at(music, www),
             players: player::Players::default(),
+            fallback: Default::default(),
         }
+    }
+
+    /// Plays what YouTube's apps will not through `fallback` (yt-dlp), or no longer (nothing).
+    pub fn set_fallback(&self, fallback: Option<ytdlp::YtDlp>) {
+        *self.fallback.write().unwrap() = fallback;
+    }
+
+    pub fn fallback(&self) -> Option<ytdlp::YtDlp> {
+        self.fallback.read().unwrap().clone()
     }
 
     /// The visitor id YouTube gave, to keep for the next start; and one kept from before, taken up again.
@@ -352,7 +365,18 @@ impl BuiltIn for YouTube {
             .collect())
     }
 
+    /// Where the video plays from: as one of YouTube's apps; else, when that is something yt-dlp could get past (an
+    /// age to confirm, no plain address, every app asking whether the listener is a bot), through yt-dlp, signed in as
+    /// the listener when they are.
     fn stream(&self, id: &str) -> Result<StreamInfo, AddonError> {
-        self.players.stream(&self.line, id)
+        let failed = match self.players.stream(&self.line, id) {
+            Err(e) if ytdlp::worth_trying(&e) => e,
+            answered => return answered,
+        };
+        let Some(fallback) = self.fallback() else {
+            return Err(failed);
+        };
+        let login = self.line.login().filter(|_| !self.line.login_spent());
+        fallback.stream(id, login.as_ref())
     }
 }

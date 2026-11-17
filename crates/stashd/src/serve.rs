@@ -922,6 +922,8 @@ pub(crate) struct State {
     /// YouTube Music, when this core has it built in, and the account the listener signed in to it with.
     youtube: Option<BuiltInYouTube>,
     youtube_account: Option<Arc<crate::youtube_account::TubeAccount>>,
+    /// yt-dlp, for the songs YouTube's apps will not play to Stash.
+    youtube_fallback: Option<Arc<crate::youtube_fallback::TubeFallback>>,
     /// Opens Google's sign-in for YouTube in a window, when the core runs inside one.
     pub(crate) sign_in: Option<SignInShell>,
 }
@@ -1021,6 +1023,11 @@ impl State {
     /// The account signed in to YouTube Music, when this core has it built in.
     pub(crate) fn youtube_account(&self) -> Option<Arc<crate::youtube_account::TubeAccount>> {
         self.youtube_account.clone()
+    }
+
+    /// yt-dlp, when this core has YouTube Music built in.
+    pub(crate) fn youtube_fallback(&self) -> Option<Arc<crate::youtube_fallback::TubeFallback>> {
+        self.youtube_fallback.clone()
     }
 
     fn reload_addons(&self) -> Result<()> {
@@ -1189,6 +1196,7 @@ impl Core {
                 opener: None,
                 youtube: None,
                 youtube_account: None,
+                youtube_fallback: None,
                 sign_in: None,
             },
         })
@@ -1223,6 +1231,19 @@ impl Core {
         self.state.youtube_account = Some(Arc::new(crate::youtube_account::TubeAccount::new(
             Arc::clone(&self.state.library),
             Arc::clone(&youtube),
+        )));
+        // Stash's own copy of yt-dlp lives beside the library.
+        let tools = self
+            .state
+            .options
+            .db
+            .parent()
+            .map(|folder| folder.join("tools"))
+            .unwrap_or_else(|| PathBuf::from("tools"));
+        self.state.youtube_fallback = Some(Arc::new(crate::youtube_fallback::TubeFallback::new(
+            Arc::clone(&self.state.library),
+            Arc::clone(&youtube),
+            tools,
         )));
         self.state.youtube = Some((youtube, reach));
         if let Err(e) = self.state.reload_addons() {
@@ -2731,6 +2752,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::youtube_account::route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::youtube_fallback::route(state, request, &path)? {
         return Ok((response, false));
     }
     if let Some(response) = crate::youtube_pages::route(state, request, &path, &param)? {

@@ -8,6 +8,7 @@
 	import { folders, lastPart, many, trouble, type Notice } from '../../lib/desktop/folders.svelte';
 	import Scrobbling from '../../lib/desktop/Scrobbling.svelte';
 	import TubeAccount from '../../lib/desktop/TubeAccount.svelte';
+	import TubeFallback from '../../lib/desktop/TubeFallback.svelte';
 	import Shortcuts from '../../lib/desktop/Shortcuts.svelte';
 	import Blocked from '../../lib/desktop/Blocked.svelte';
 	import { R } from '../../lib/desktop/radio.svelte';
@@ -558,6 +559,7 @@
 	<section class="set-sec" id="youtube" aria-labelledby="h-youtube">
 		<h2 class="set-h" id="h-youtube">YouTube Music</h2>
 		<TubeAccount />
+		<TubeFallback />
 	</section>
 
 	<section class="set-sec" id="lyrics" aria-labelledby="h-lyrics">

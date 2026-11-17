@@ -33,6 +33,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 const AFTER_TOO_MANY: Duration = Duration::from_secs(60);
 /// How long after it asks whether the listener is a bot (the web player's measure: asking on makes it ask longer).
 pub(crate) const AFTER_BOT_CHECK: Duration = Duration::from_secs(240);
+/// What is said while YouTube is left alone for asking whether the listener is a bot (the start of it: yt-dlp may get
+/// past that, where it could not get past "too many requests").
+pub(crate) const BOT_CHECK: &str = "YouTube is checking that you are not a bot";
 /// The longest visitor id kept.
 const VISITOR_CAP: usize = 512;
 

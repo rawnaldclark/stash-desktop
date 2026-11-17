@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use super::innertube::{AFTER_BOT_CHECK, Client, InnerTube, PLAYERS, trouble};
+use super::innertube::{AFTER_BOT_CHECK, BOT_CHECK, Client, InnerTube, PLAYERS, trouble};
 use super::parse::video_id;
 use crate::addons::{AddonError, Code, Delivery, StreamInfo, Tier};
 use crate::identity::clean_text;
@@ -255,15 +255,12 @@ impl Players {
             });
         }
         if bot_checks == PLAYERS.len() {
-            line.quiet_for(
-                AFTER_BOT_CHECK,
-                "YouTube is checking that you are not a bot",
-            );
+            line.quiet_for(AFTER_BOT_CHECK, BOT_CHECK);
             return Err(AddonError {
                 retry_after: Some(AFTER_BOT_CHECK.as_secs() as u32),
                 ..trouble(
                     Code::RateLimited,
-                    "YouTube is checking that you are not a bot: it is left alone for a few minutes",
+                    format!("{BOT_CHECK}: it is left alone for a few minutes"),
                 )
             });
         }
