@@ -545,7 +545,7 @@
 					<p class="set-p">An add-on is a server that finds music and plays it, in lossless when it has it; you add one by the link its maker gives you. Your add-ons are asked before YouTube Music.</p>
 				{/if}
 				<form class="dev-rename" onsubmit={add}>
-					<input class="dev-input" type="url" placeholder="https://…/manifest.json" bind:value={link} aria-label="An add-on’s link" autocomplete="off" spellcheck="false" />
+					<input class="dev-input" type="url" placeholder="An add-on’s link (https://…)" bind:value={link} aria-label="An add-on’s link" autocomplete="off" spellcheck="false" />
 					<button type="submit" class="btn" disabled={adding || link.trim() === ''}>{adding ? 'Reading…' : 'Add'}</button>
 				</form>
 				{#if addonTrouble}<p class="set-sub set-trouble" role="alert">{addonTrouble}</p>{/if}

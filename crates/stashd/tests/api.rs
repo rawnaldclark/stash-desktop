@@ -277,13 +277,15 @@ fn a_client_reads_the_library_and_drives_the_player_over_http() {
     std::thread::spawn(move || demo.run());
 
     // A link that is not an add-on is refused with the reason, and nothing is kept.
+    // (A link without "/manifest.json" is taken as the address an add-on is under, and asked for one there.)
     let (status, refused) = client.send(
         "/api/addons",
-        json!({ "link": "https://example.invalid/not-a-manifest" }),
+        json!({ "link": link.replace("/manifest.json", "/nothing-here") }),
     );
     assert_eq!(
-        (status, refused["error"]["code"].as_str()),
-        (400, Some("bad_request"))
+        (status, refused["error"]["message"].as_str()),
+        (502, Some("there is no add-on at that address")),
+        "{refused}"
     );
     let (status, refused) = client.send(
         "/api/addons",
@@ -439,7 +441,7 @@ fn a_client_reads_the_library_and_drives_the_player_over_http() {
     assert_eq!(next["index"].as_u64(), Some(2));
     assert_eq!(
         next["error"].as_str(),
-        Some("Nowhere could not be played: the add-on does not have it")
+        Some("Nowhere could not be played: the add-on does not have it (it says: “no such track”)")
     );
 
     // The add-on is kept with the library: a core opened on the same library has it, without asking it anything.

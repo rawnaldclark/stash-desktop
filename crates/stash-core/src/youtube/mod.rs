@@ -89,6 +89,7 @@ impl YouTube {
             resolve_by_isrc: false,
             quality: None,
             no_downloads: false,
+            sent: Vec::new(),
             reach: Some(Reach::Internet),
         }
     }

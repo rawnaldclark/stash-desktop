@@ -1553,3 +1553,35 @@ Stash for Android and Stash on the web are YouTube Music clients first; the desk
 - Signing in (liked songs, library playlists, mixes).
 - Saving a song from YouTube to a file (played copies are kept as before).
 - Words here and there still say "add-on" where YouTube Music is meant too ("no add-on could find").
+
+## 40. Add-ons made for BitChord
+
+BitChord speaks Eclipse's add-on protocol with habits of its own, and add-ons written for it lean on them. Read against BitChord's source, these were refused or misread here; each is now read as BitChord reads it. (They go beyond the contract's Eclipse mapping, section 10.2, which should take them up.)
+
+| An add-on that… | Before | Now |
+|---|---|---|
+| is handed out as the address it is under (`https://host/key`), or with a manifest under another `.json` name | "an add-on link ends in /manifest.json" | asked for `…/manifest.json` there; the link kept is the manifest's |
+| lists nothing of what it offers, or spells it `Search` | "does not hold an add-on's manifest" | it searches and plays |
+| has an id with capitals, spaces or underscores | refused as not well-formed | the id is made one the contract takes (`Nebula_Tidal` is `nebula-tidal`) |
+| says `bitchordAuth: "no"`, `"off"` or `"False"` | refused as BitChord-only | not asked for: it is used |
+| says `bitchordAuth: true` | "this add-on only works in BitChord" | refused still (the verification is the BitChord app's own, and nothing here tries to pass for it), in words that say what it is and that its maker may have a link without it |
+| says `allowDownloads: "no"` or `"off"` | its songs were saved | they are not |
+| declares settings | none sent | every declared default goes back with every request, and its first quality with a search too (it may count on them, as Eclipse and BitChord send them) |
+| names a stream's quality only in its own words (`"Tidal · Hi-Res FLAC (DASH)"`, `"[Tidal] HI_RES_LOSSLESS"`, `"24-bit / 96 kHz"`) | read as low, unstated: no badge, and refused where only lossless is asked for | lossless or hi-res as the words say (a bitrate in kbps, or a lossy codec named, still wins over them) |
+| names the codec in `fileCodec`, `containerFormat` or `mimeType`; the delivery in `mediaType`, or as `mpd`, `m3u8` or a media type; the rate in kHz (`96`) | not read (96 Hz) | read |
+| says `encrypted: "none"` or `"False"`, or sends a `video` beside the sound | refused | played (a word that is not a clear "no" still refuses) |
+| takes half a minute to fetch a song nobody asked it for before | timed out at 15 s | its stream is waited for 45 s, as BitChord waits |
+| answers "not yet" as `{ error, retryAfter }` in a 200 | "it does not have it", and the song's name there was forgotten | trouble to ask again about; the name is kept |
+| answers `{ error: "Add your key in the add-on's settings" }` | "the add-on does not have it" | "the add-on does not have it (it says: “Add your key in the add-on's settings”)" |
+
+### Checked
+
+- **Unit tests** (`eclipse.rs`, 2 new; `addons.rs`, 1 new): flags in every spelling, bare and oddly cased manifests, ids, settings sent once and never over a request's own words; quality from free words (and words that only look like it), codecs and deliveries in each spelling, kHz, protected and not, errors in a 200 with and without a wait; the link in each form.
+- **`crates/stash-core/tests/bitchord.rs`**: an add-on of the test's own, made as BitChord's are, added by the address it is under: what it is asked (the settings and the quality on each request), hi-res lossless by its words (also where only lossless is asked for), "not yet" and "not there" told apart.
+
+### Not done
+
+- Redirects are still not followed, and plain http is still this computer's alone (a self-hosted add-on at `http://192.168…` is refused).
+- A row without an artist is still left out; `streamURL` on a row is not used.
+- No per-add-on quality pick; no `title` and `artist` beside `q` (BitChord 1.9.2).
+- Whether the engine picks the FLAC rendition of a Tidal-style DASH manifest (they list HE-AAC first) is not measured.

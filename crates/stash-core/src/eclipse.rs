@@ -57,53 +57,153 @@ fn within(value: Option<&Value>, range: std::ops::RangeInclusive<f64>) -> Option
         .map(|n| n as u64)
 }
 
-/// A flag an add-on sets by giving it any value but these.
-fn set(value: Option<&Value>) -> bool {
-    match value {
-        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
-        Some(Value::Number(n)) => n.as_f64() != Some(0.0),
-        Some(Value::String(s)) => !matches!(s.trim(), "" | "false" | "0" | "null"),
-        Some(_) => true,
+/// A flag as BitChord reads one (its `asFlag`): true or false; a number other than 0; the words 1, true, yes, on and
+/// 0, false, no, off. Anything else (nothing, null, an object, another word) says nothing, and the flag's own default
+/// holds.
+fn flag(value: Option<&Value>) -> Option<bool> {
+    match value? {
+        Value::Bool(b) => Some(*b),
+        Value::Number(n) => Some(n.as_f64() != Some(0.0)),
+        Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            other => other.parse::<f64>().ok().map(|n| n != 0.0),
+        },
+        _ => None,
     }
 }
 
+/// Whether a stream is marked as protected: any value but nothing, null, a "no" ([`flag`]) or the words none and
+/// null. A word Stash does not know is taken as a yes: a protected stream played as if it were not is only noise.
+fn protected(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => false,
+        Some(Value::String(s))
+            if matches!(s.trim().to_ascii_lowercase().as_str(), "" | "none" | "null") =>
+        {
+            false
+        }
+        Some(other) => flag(Some(other)) != Some(false),
+    }
+}
+
+/// What is said of an add-on that asks for BitChord's app verification.
+pub(crate) const ONLY_BITCHORD: &str = "this add-on asks for BitChord's app verification, which only the BitChord app on Android can give (its maker may have a link that works without it)";
+
+/// The most settings whose defaults are sent back to an add-on, and the longest of their names and values.
+const MAX_SENT: usize = 32;
+const SENT_NAME: usize = 64;
+const SENT_VALUE: usize = 200;
+
 /// Whether a manifest without `stash` is an Eclipse add-on's: it has an id, and offers search or streams.
 pub fn is_manifest(value: &Value) -> bool {
-    value.get("stash").is_none()
-        && id(value.get("id")).is_some()
-        && value
-            .get("resources")
-            .and_then(Value::as_array)
-            .is_some_and(|r| {
-                r.iter()
-                    .any(|r| matches!(r.as_str(), Some("search" | "stream")))
-            })
+    // No list of what it offers, or an empty one, is given the benefit of the doubt, as BitChord gives it.
+    let offers = match value.get("resources") {
+        None | Some(Value::Null) => true,
+        Some(Value::Array(listed)) => {
+            listed.is_empty()
+                || listed
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|r| matches!(r.trim().to_ascii_lowercase().as_str(), "search" | "stream"))
+        }
+        Some(_) => false,
+    };
+    value.get("stash").is_none() && id(value.get("id")).is_some() && offers
+}
+
+/// An Eclipse add-on's id as one the contract takes: lower-case letters, digits, dots and hyphens, at most 64,
+/// beginning with a letter or a digit. Anything else in it becomes a hyphen (Eclipse and BitChord take any id).
+fn contract_id(given: &str) -> Option<String> {
+    let mut made = String::new();
+    for c in given.trim().to_lowercase().chars() {
+        let fits = c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-';
+        let c = if fits { c } else { '-' };
+        // No run of hyphens, and none at the start.
+        if c == '-' && (made.is_empty() || made.ends_with('-')) {
+            continue;
+        }
+        made.push(c);
+        if made.len() == 64 {
+            break;
+        }
+    }
+    let made = made.trim_matches(|c| c == '-' || c == '.').to_string();
+    (!made.is_empty()).then_some(made)
+}
+
+/// The defaults of the settings an add-on declares, as they are sent back with every request (Eclipse and BitChord
+/// send each declared setting as a query parameter; an add-on may rely on getting them). The quality is sent apart,
+/// and the request's own words are never overridden.
+fn sent(value: &Value) -> Vec<(String, String)> {
+    let mut sent: Vec<(String, String)> = Vec::new();
+    for setting in value
+        .get("settings")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(key) = setting.get("key").and_then(Value::as_str).map(str::trim) else {
+            continue;
+        };
+        let named = (1..=SENT_NAME).contains(&key.len())
+            && key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'));
+        if !named
+            || matches!(
+                key,
+                "q" | "quality" | "title" | "artist" | "isrc" | "durationMs" | "limit"
+            )
+            || sent.iter().any(|(known, _)| known == key)
+        {
+            continue;
+        }
+        let default = match setting.get("default") {
+            Some(Value::String(s)) => clean_text(s, SENT_VALUE),
+            Some(Value::Number(n)) => n.to_string(),
+            Some(Value::Bool(b)) => b.to_string(),
+            _ => continue,
+        };
+        sent.push((key.to_string(), default));
+        if sent.len() == MAX_SENT {
+            break;
+        }
+    }
+    sent
 }
 
 /// An Eclipse add-on's manifest as the contract's. Only the id is required: without a name the id is the name.
 pub fn manifest(value: &Value) -> Result<Manifest, AddonError> {
-    if set(value.get("bitchordAuth")) {
-        return Err(AddonError::host(
-            Code::Refused,
-            "this add-on only works in BitChord",
-        ));
+    if flag(value.get("bitchordAuth")) == Some(true) {
+        return Err(AddonError::host(Code::Refused, ONLY_BITCHORD));
     }
     let id = id(value.get("id"))
-        .map(|id| id.to_lowercase())
+        .and_then(|id| contract_id(&id))
         .ok_or_else(|| AddonError::host(Code::InvalidResponse, "the add-on has no id"))?;
-    let listed: Vec<&str> = value
+    let listed: Vec<String> = value
         .get("resources")
         .and_then(Value::as_array)
-        .map(|r| r.iter().filter_map(Value::as_str).collect())
+        .map(|r| {
+            r.iter()
+                .filter_map(Value::as_str)
+                .map(|r| r.trim().to_ascii_lowercase())
+                .collect()
+        })
         .unwrap_or_default();
+    let lists = |name: &str| listed.iter().any(|r| r == name);
     let mut resources: Vec<String> = Vec::new();
     for known in ["search", "stream", "resolve"] {
-        if listed.contains(&known) {
+        if lists(known) {
             resources.push(known.to_string());
         }
     }
+    // One that lists nothing is taken to search and to play, as BitChord takes it.
+    if listed.is_empty() {
+        resources = vec!["search".to_string(), "stream".to_string()];
+    }
     // An add-on that finds songs only by ISRC is asked that way, and only for songs that have one.
-    let resolve_by_isrc = listed.contains(&"isrc") && !listed.contains(&"resolve");
+    let resolve_by_isrc = lists("isrc") && !lists("resolve");
     if resolve_by_isrc {
         resources.push("resolve".to_string());
     }
@@ -112,10 +212,10 @@ pub fn manifest(value: &Value) -> Result<Manifest, AddonError> {
         .get("settings")
         .and_then(Value::as_array)
         .and_then(|settings| {
-            settings.iter().find(|s| {
-                s.get("key").and_then(Value::as_str) == Some("quality")
-                    && s.get("type").and_then(Value::as_str) == Some("select")
-            })
+            // By its name alone: BitChord does not read a setting's `type`.
+            settings
+                .iter()
+                .find(|s| s.get("key").and_then(Value::as_str) == Some("quality"))
         })
         .and_then(|select| {
             select
@@ -126,12 +226,14 @@ pub fn manifest(value: &Value) -> Result<Manifest, AddonError> {
         })
         .filter(|word| (1..=100).contains(&word.chars().count()))
         .map(str::to_string);
-    // `allowDownloads` given and set to nothing: never a download source. Absent or null allows downloads.
+    // `allowDownloads` given and not a yes ("no" and "off", an empty word, anything Stash cannot read as a yes):
+    // never a download source, as its maker may have meant. Absent or null allows downloads.
     let no_downloads = value
         .get("allowDownloads")
-        .is_some_and(|v| !v.is_null() && !set(Some(v)));
+        .is_some_and(|v| !v.is_null() && flag(Some(v)) != Some(true));
     Ok(Manifest {
         no_downloads,
+        sent: sent(value),
         stash: 1,
         name: text(value.get("name"), 60).unwrap_or_else(|| id.clone()),
         version: text(value.get("version"), 40).unwrap_or_else(|| "0.0.0".to_string()),
@@ -268,22 +370,109 @@ fn codec(word: &str) -> Option<&'static str> {
     })
 }
 
+/// How a stream is delivered, from the words add-ons use for it: a transport's name, a file ending or a media type.
+fn delivery(word: &str) -> Option<Delivery> {
+    Some(match word {
+        "dash" | "mpd" | "application/dash+xml" => Delivery::Dash,
+        "hls" | "m3u8" | "application/x-mpegurl" | "application/vnd.apple.mpegurl" => Delivery::Hls,
+        "none" | "file" | "progressive" | "http" | "https" => Delivery::None,
+        _ => return None,
+    })
+}
+
+/// The codec a media type names ("audio/flac"), when it names one for certain.
+fn codec_of_type(media_type: &str) -> Option<&'static str> {
+    let kind = media_type.split(';').next()?.trim();
+    Some(match kind.strip_prefix("audio/")? {
+        "flac" | "x-flac" => "flac",
+        "mpeg" | "mp3" => "mp3",
+        "wav" | "x-wav" | "wave" => "pcm",
+        "opus" => "opus",
+        "aac" | "aacp" => "aac",
+        _ => return None,
+    })
+}
+
+/// What an add-on's free words say of a stream's quality ("Tidal · Hi-Res FLAC (DASH)", "HI_RES_LOSSLESS",
+/// "24-bit / 96 kHz"): whether they name it lossless, whether they call it hi-res, and the bit depth and sample rate
+/// they give. Add-ons for Tidal and Qobuz often say how good a stream is nowhere else; BitChord reads the same words.
+#[derive(Debug, Default, PartialEq)]
+struct Label {
+    lossless: bool,
+    hi_res: bool,
+    bit_depth: Option<u32>,
+    sample_rate: Option<u32>,
+    kbps: Option<f64>,
+}
+
+fn label(words: &[String]) -> Label {
+    static BITS: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\b(16|24|32)[- ]?bits?\b").unwrap());
+    static KHZ: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\b(\d{2,3}(?:\.\d+)?)\s*khz\b").unwrap());
+    static KBPS: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\b(\d{2,4})\s*kbps\b").unwrap());
+    static LOSSLESS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(^|[^a-z])(lossless|flac|alac|wav)([^a-z]|$)").unwrap()
+    });
+    static HI_RES: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"(^|[^a-z])hi[-_ ]?res([^a-z]|$)").unwrap());
+    let mut said = Label::default();
+    for word in words {
+        let word = word.to_ascii_lowercase();
+        if let Some(bits) = BITS.captures(&word).and_then(|c| c[1].parse::<u32>().ok()) {
+            said.bit_depth.get_or_insert(bits);
+            // A depth is only said of a lossless stream.
+            said.lossless = true;
+        }
+        if let Some(khz) = KHZ.captures(&word).and_then(|c| c[1].parse::<f64>().ok()) {
+            said.sample_rate
+                .get_or_insert((khz * 1000.0).round() as u32);
+        }
+        if let Some(kbps) = KBPS.captures(&word).and_then(|c| c[1].parse::<f64>().ok()) {
+            said.kbps.get_or_insert(kbps);
+        }
+        said.lossless |= LOSSLESS.is_match(&word);
+        said.hi_res |= HI_RES.is_match(&word);
+    }
+    // "Hi-Res" alone says lossless too; a bitrate in kbps says lossy whatever else the words hold.
+    said.lossless = (said.lossless || said.hi_res) && said.kbps.is_none();
+    said
+}
+
 /// Reads a stream answer. `Err` with [`Code::NotFound`] for an answer that is an error in a 200 (the add-on does not
-/// have the track), with [`Code::QualityUnavailable`] for a stream this host does not play (protected, or video).
+/// have the track; with the add-on's own words when it gave any), with [`Code::Unavailable`] when that error asks to
+/// be asked again later, and with [`Code::QualityUnavailable`] for a stream this host does not play (protected).
 pub fn stream(value: &Value) -> Result<Streamed, AddonError> {
     let Some(url) = value.get("url").and_then(Value::as_str) else {
-        return Err(if value.get("error").is_some() {
-            AddonError::host(Code::NotFound, "the add-on does not have it")
-        } else {
-            AddonError::host(
+        let Some(error) = value.get("error") else {
+            return Err(AddonError::host(
                 Code::InvalidResponse,
                 "the add-on answered a stream without an address",
-            )
+            ));
+        };
+        // "Not yet" (still preparing it, too busy): asked again later, never taken for "it is not there".
+        let wait = [error.get("retryAfter"), value.get("retryAfter")]
+            .into_iter()
+            .find_map(|seconds| within(seconds, 1.0..=86_400.0));
+        // The add-on's own words (often what the listener has to set right).
+        let words = text(Some(error), 200)
+            .or_else(|| text(error.get("message"), 200))
+            .unwrap_or_default();
+        return Err(match wait {
+            Some(seconds) => AddonError {
+                retry_after: Some(seconds as u32),
+                ..AddonError::host(Code::Unavailable, words)
+            },
+            None => AddonError::host(Code::NotFound, words),
         });
     };
-    if ["encrypted", "drm", "hybrid", "video"]
+    // Protected, or said to be video. (A `video` object beside the address describes a video that goes with the
+    // sound, which Eclipse plays apart: the address is still the sound.)
+    if ["encrypted", "drm", "hybrid"]
         .iter()
-        .any(|flag| set(value.get(flag)))
+        .any(|mark| protected(value.get(mark)))
+        || flag(value.get("video")) == Some(true)
     {
         return Err(AddonError::host(
             Code::QualityUnavailable,
@@ -299,38 +488,64 @@ pub fn stream(value: &Value) -> Result<Streamed, AddonError> {
             .map(|w| w.trim().to_ascii_lowercase())
     };
     let format = word("format");
-    let named = word("codec").as_deref().and_then(codec).or_else(|| {
-        // `format` names the codec only when `codec` named none, and only with a codec's word.
-        format
-            .as_deref()
-            .filter(|f| matches!(*f, "mp3" | "flac" | "aac" | "m4a"))
-            .and_then(codec)
-    });
-    let delivery = |w: &str| match w {
-        "dash" => Some(Delivery::Dash),
-        "hls" => Some(Delivery::Hls),
-        "none" => Some(Delivery::None),
-        _ => None,
-    };
-    let manifest = word("manifest")
+    // What the add-on says of the quality in its own words, wherever it says it.
+    let said_freely = label(
+        &["quality", "streamQuality", "audioQuality", "format"]
+            .iter()
+            .filter_map(|name| text(value.get(name), 120))
+            .collect::<Vec<_>>(),
+    );
+    let named = word("codec")
         .as_deref()
-        .and_then(delivery)
+        .and_then(codec)
+        .or_else(|| word("fileCodec").as_deref().and_then(codec))
         .or_else(|| {
+            // `format` names the codec only when `codec` named none, and only with a codec's word.
             format
                 .as_deref()
-                .filter(|f| matches!(*f, "dash" | "hls"))
-                .and_then(delivery)
+                .filter(|f| matches!(*f, "mp3" | "flac" | "aac" | "m4a"))
+                .and_then(codec)
         })
+        .or_else(|| {
+            // A container that is its codec.
+            ["container", "containerFormat"]
+                .iter()
+                .filter_map(|name| word(name))
+                .find_map(|c| match c.as_str() {
+                    "flac" => Some("flac"),
+                    "mp3" => Some("mp3"),
+                    "wav" | "aiff" => Some("pcm"),
+                    _ => None,
+                })
+        })
+        .or_else(|| word("mimeType").as_deref().and_then(codec_of_type))
+        // Named nowhere, but called lossless in the add-on's words: FLAC, as BitChord reads it.
+        .or_else(|| said_freely.lossless.then_some("flac"));
+    let manifest = ["manifest", "mediaType", "format"]
+        .iter()
+        .filter_map(|name| word(name))
+        .find_map(|w| delivery(&w))
         .unwrap_or(Delivery::None);
-    let container = word("container").and_then(|c| {
-        Some(match c.as_str() {
-            "flac" | "mp3" | "mp4" | "fmp4" | "ogg" | "webm" | "wav" => c,
-            "m4a" => "mp4".to_string(),
-            _ => return None,
-        })
-    });
-    let bit_depth = within(value.get("bitDepth"), 1.0..=64.0).map(|b| b as u32);
-    let sample_rate = within(value.get("sampleRate"), 1.0..=1_000_000.0).map(|r| r as u32);
+    let container = ["container", "containerFormat"]
+        .iter()
+        .filter_map(|name| word(name))
+        .find_map(|c| {
+            Some(match c.as_str() {
+                "flac" | "mp3" | "mp4" | "fmp4" | "ogg" | "webm" | "wav" => c,
+                "m4a" => "mp4".to_string(),
+                _ => return None,
+            })
+        });
+    let bit_depth = within(value.get("bitDepth"), 1.0..=64.0)
+        .map(|b| b as u32)
+        .or(said_freely.bit_depth);
+    // A rate under 1,000 is in kHz ("96", "44.1").
+    let sample_rate = number(value.get("sampleRate"))
+        .map(|r| if r < 1_000.0 { r * 1_000.0 } else { r })
+        .map(f64::round)
+        .filter(|r| (1.0..=1_000_000.0).contains(r))
+        .map(|r| r as u32)
+        .or(said_freely.sample_rate);
     // A bitrate under 10,000 is in kbps.
     let bitrate = number(value.get("bitrate"))
         .map(|b| if b < 10_000.0 { b * 1000.0 } else { b })
@@ -374,10 +589,17 @@ pub fn stream(value: &Value) -> Result<Streamed, AddonError> {
                 "low" => Some(Tier::Low),
                 _ => None,
             }
+        })
+        .or_else(|| {
+            said_freely
+                .kbps
+                .map(|kbps| if kbps >= 256.0 { Tier::High } else { Tier::Low })
         });
     let (tier, stated) = if lossless {
-        let above_cd =
-            bit_depth.is_some_and(|b| b >= 24) || sample_rate.is_some_and(|r| r > 48_000);
+        let above_cd = bit_depth.is_some_and(|b| b >= 24)
+            || sample_rate.is_some_and(|r| r > 48_000)
+            // Called hi-res, with no numbers to say otherwise.
+            || (said_freely.hi_res && bit_depth.is_none() && sample_rate.is_none());
         (
             if above_cd {
                 Tier::Hires
@@ -463,7 +685,7 @@ pub fn error(
                 .starts_with("bitchord")
         })
     {
-        return AddonError::host(Code::Refused, "this add-on only works in BitChord");
+        return AddonError::host(Code::Refused, ONLY_BITCHORD);
     }
     let code = match status {
         404 => Code::NotFound,
@@ -509,6 +731,9 @@ mod tests {
         assert!(no(Some(json!("false"))));
         assert!(no(Some(json!("null"))));
         assert!(no(Some(json!(""))));
+        // As BitChord reads the flag: "no" and "off" are a no, "on" and 1 a yes.
+        assert!(no(Some(json!("no"))) && no(Some(json!("Off"))));
+        assert!(!no(Some(json!("on"))) && !no(Some(json!(1))) && !no(Some(json!("TRUE"))));
     }
 
     #[test]
@@ -546,7 +771,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             (only.code, only.in_words().as_str()),
-            (Code::Refused, "this add-on only works in BitChord")
+            (Code::Refused, ONLY_BITCHORD)
         );
         assert!(
             manifest(&json!({ "id": "a.b", "resources": ["stream"], "bitchordAuth": "false" }))
@@ -877,5 +1102,268 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 50, "only {checked} examples were found");
+    }
+
+    #[test]
+    fn an_add_on_made_for_bitchord_is_read_as_bitchord_reads_it() {
+        let with = |name: &str, value: Value| {
+            let mut m = json!({ "id": "a.b", "resources": ["search", "stream"] });
+            m[name] = value;
+            manifest(&m)
+        };
+        // BitChord's own app verification: asked for by a yes in any spelling, and only by a yes.
+        for yes in [json!(true), json!("yes"), json!("ON"), json!(1), json!("1")] {
+            let refused = with("bitchordAuth", yes.clone()).unwrap_err();
+            assert_eq!(
+                (refused.code, refused.in_words().as_str()),
+                (Code::Refused, ONLY_BITCHORD),
+                "{yes}"
+            );
+        }
+        for no in [
+            json!(false),
+            json!("no"),
+            json!("off"),
+            json!("False"),
+            json!(0),
+            json!({}),
+            json!("maybe"),
+            json!(null),
+        ] {
+            assert!(with("bitchordAuth", no.clone()).is_ok(), "{no}");
+        }
+
+        // No list of what it offers: it searches and plays. The words in any case; any id made one the contract takes.
+        for bare in [
+            json!({ "id": "x" }),
+            json!({ "id": "x", "resources": [] }),
+            json!({ "id": "x", "resources": null }),
+        ] {
+            assert!(is_manifest(&bare), "{bare}");
+            assert_eq!(
+                manifest(&bare).unwrap().resources,
+                ["search", "stream"],
+                "{bare}"
+            );
+        }
+        assert!(!is_manifest(&json!({ "id": "x", "resources": "search" })));
+        assert!(!is_manifest(&json!({ "resources": ["search"] })));
+        let cased = manifest(&json!({ "id": "My Addon_v2!", "resources": ["Search", " STREAM "] }))
+            .unwrap();
+        assert_eq!(
+            (cased.id.as_str(), cased.name.as_str()),
+            ("my-addon-v2", "my-addon-v2")
+        );
+        assert_eq!(cased.resources, ["search", "stream"]);
+        assert_eq!(
+            manifest(&json!({ "id": "---" })).unwrap_err().code,
+            Code::InvalidResponse
+        );
+        assert_eq!(contract_id(&"x".repeat(80)).map(|id| id.len()), Some(64));
+
+        // The settings it declares: the first quality is asked for (whatever the setting's type), and every other
+        // default is sent back, once, but never over the request's own words.
+        let set = manifest(&json!({ "id": "x", "settings": [
+            { "key": "quality", "options": [{ "value": "HI_RES" }, { "value": "LOSSLESS" }] },
+            { "key": "region", "default": "US" },
+            { "key": "atmos", "default": false },
+            { "key": "limit", "default": 5 },
+            { "key": "q", "default": "nothing" },
+            { "key": "count", "default": 25 },
+            { "key": "bad key", "default": "x" },
+            { "key": "obj", "default": {} },
+            { "key": "none" },
+            { "key": "region", "default": "DE" }
+        ] }))
+        .unwrap();
+        assert_eq!(set.quality.as_deref(), Some("HI_RES"));
+        let sent: Vec<(&str, &str)> = set
+            .sent
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        assert_eq!(
+            sent,
+            [("region", "US"), ("atmos", "false"), ("count", "25")]
+        );
+        assert!(manifest(&json!({ "id": "x" })).unwrap().sent.is_empty());
+    }
+
+    #[test]
+    fn a_stream_s_quality_is_read_from_the_add_on_s_own_words() {
+        let url = "https://media.example.org/a";
+        let read = |mut answer: Value| {
+            answer["url"] = json!(url);
+            stream(&answer).unwrap()
+        };
+        let told = |answer: Value| {
+            let s = read(answer);
+            (s.info.tier, s.info.codec, s.info.manifest, s.stated)
+        };
+        // What an add-on for Tidal answers: hi-res FLAC over DASH, said only in its own words.
+        assert_eq!(
+            told(
+                json!({ "format": "dash", "quality": "Tidal · Hi-Res FLAC (DASH)", "streamQuality": "[Tidal] HI_RES_LOSSLESS" })
+            ),
+            (Tier::Hires, Some("flac".to_string()), Delivery::Dash, true)
+        );
+        let cd = read(json!({ "audioQuality": "LOSSLESS", "quality": "16-bit / 44.1 kHz FLAC" }));
+        assert_eq!(
+            (
+                cd.info.tier,
+                cd.info.bit_depth,
+                cd.info.sample_rate,
+                cd.info.codec.as_deref()
+            ),
+            (Tier::Lossless, Some(16), Some(44_100), Some("flac"))
+        );
+        let high = read(json!({ "streamQuality": "24-bit 96kHz" }));
+        assert_eq!(
+            (high.info.tier, high.info.bit_depth, high.info.sample_rate),
+            (Tier::Hires, Some(24), Some(96_000))
+        );
+        // Its fields win over its words; a bitrate in kbps is lossy whatever else is said; a lossy codec too.
+        let fields = read(
+            json!({ "codec": "flac", "bitDepth": 16, "sampleRate": 44100, "quality": "Hi-Res 24-bit" }),
+        );
+        assert_eq!(
+            (fields.info.tier, fields.info.bit_depth),
+            (Tier::Lossless, Some(16))
+        );
+        assert_eq!(
+            told(json!({ "quality": "MP3 320 kbps (from FLAC)" })).0,
+            Tier::High
+        );
+        assert_eq!(
+            told(json!({ "quality": "AAC 128kbps" })),
+            (Tier::Low, None, Delivery::None, true)
+        );
+        assert_eq!(
+            told(json!({ "codec": "aac", "streamQuality": "LOSSLESS" })),
+            (Tier::Low, Some("aac".to_string()), Delivery::None, false)
+        );
+        // Words that only look like it name nothing.
+        assert_eq!(
+            told(json!({ "quality": "Flacid Thrash Edition" })),
+            (Tier::Low, None, Delivery::None, false)
+        );
+        assert_eq!(told(json!({ "quality": "Chires" })).0, Tier::Low);
+
+        // The codec, wherever it is named; a rate in kHz.
+        assert_eq!(
+            read(json!({ "fileCodec": "FLAC" })).info.codec.as_deref(),
+            Some("flac")
+        );
+        assert_eq!(
+            read(json!({ "containerFormat": "wav" }))
+                .info
+                .codec
+                .as_deref(),
+            Some("pcm")
+        );
+        assert_eq!(
+            read(json!({ "mimeType": "audio/flac; rate=44100" }))
+                .info
+                .codec
+                .as_deref(),
+            Some("flac")
+        );
+        assert_eq!(read(json!({ "mimeType": "audio/mp4" })).info.codec, None);
+        let khz = read(json!({ "codec": "flac", "sampleRate": 96, "bitDepth": 24 }));
+        assert_eq!(
+            (khz.info.sample_rate, khz.info.tier),
+            (Some(96_000), Tier::Hires)
+        );
+        assert_eq!(
+            read(json!({ "codec": "flac", "sampleRate": "44.1" }))
+                .info
+                .sample_rate,
+            Some(44_100)
+        );
+
+        // How it is delivered, in each spelling.
+        for (name, word, delivered) in [
+            ("mediaType", "application/vnd.apple.mpegurl", Delivery::Hls),
+            ("manifest", "mpd", Delivery::Dash),
+            ("manifest", "M3U8", Delivery::Hls),
+            ("format", "application/dash+xml", Delivery::Dash),
+            ("mediaType", "file", Delivery::None),
+            ("format", "flac", Delivery::None),
+        ] {
+            assert_eq!(
+                read(json!({ name: word })).info.manifest,
+                delivered,
+                "{name} {word}"
+            );
+        }
+        // `manifest` wins over the older spellings.
+        assert_eq!(
+            read(json!({ "manifest": "none", "format": "dash" }))
+                .info
+                .manifest,
+            Delivery::None
+        );
+
+        // Not protected said in any way plays; protected, or a word Stash does not know, does not. A video that
+        // goes with the sound is passed over.
+        for clear in [
+            json!(false),
+            json!("false"),
+            json!("none"),
+            json!("None"),
+            json!("no"),
+            json!(0),
+            json!(null),
+            json!(""),
+        ] {
+            assert!(
+                stream(&json!({ "url": url, "encrypted": clear.clone() })).is_ok(),
+                "{clear}"
+            );
+        }
+        for locked in [
+            json!(true),
+            json!("cenc"),
+            json!("yes"),
+            json!(1),
+            json!({ "scheme": "cenc" }),
+        ] {
+            let refused = stream(&json!({ "url": url, "encrypted": locked.clone() })).unwrap_err();
+            assert_eq!(refused.code, Code::QualityUnavailable, "{locked}");
+        }
+        assert!(
+            stream(&json!({ "url": url, "video": { "url": "https://media.example.org/v" } }))
+                .is_ok()
+        );
+
+        // An error in a 200: "it is not there" in the add-on's own words, or "not yet" when it says when.
+        let missing = stream(&json!({ "error": "Add your debrid key in the add-on's settings" }))
+            .unwrap_err();
+        assert_eq!(missing.code, Code::NotFound);
+        assert_eq!(
+            missing.in_words(),
+            "the add-on does not have it (it says: “Add your debrid key in the add-on's settings”)"
+        );
+        assert_eq!(
+            stream(&json!({ "error": { "message": "No match" } }))
+                .unwrap_err()
+                .in_words(),
+            "the add-on does not have it (it says: “No match”)"
+        );
+        assert_eq!(
+            stream(&json!({ "error": true })).unwrap_err().in_words(),
+            "the add-on does not have it"
+        );
+        for later in [
+            json!({ "error": "preparing", "retryAfter": 20 }),
+            json!({ "error": { "message": "busy", "retryAfter": "20" } }),
+        ] {
+            let not_yet = stream(&later).unwrap_err();
+            assert_eq!(
+                (not_yet.code, not_yet.retry_after, not_yet.is_miss()),
+                (Code::Unavailable, Some(20), false),
+                "{later}"
+            );
+        }
     }
 }

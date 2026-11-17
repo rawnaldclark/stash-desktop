@@ -16,6 +16,8 @@ const URL_CAP: usize = 16_384;
 /// The largest answer read from an add-on's API (not its media).
 const BODY_CAP: u64 = 2 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(15);
+/// How long an Eclipse add-on's stream is waited for.
+const ECLIPSE_STREAM_TIMEOUT: Duration = Duration::from_secs(45);
 /// How long finding the add-on's server by its name, and then connecting to it, may take (together, less than
 /// [`TIMEOUT`]).
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -98,6 +100,10 @@ pub struct Manifest {
     /// An Eclipse add-on that says its songs are not to be saved (`allowDownloads` set to nothing).
     #[serde(default)]
     pub no_downloads: bool,
+    /// The defaults of the settings an Eclipse add-on declares, sent back with every request as Eclipse and
+    /// BitChord send them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sent: Vec<(String, String)>,
     /// Where the add-on's link is, noted by the host when it was added: as near as the add-on may send Stash (see
     /// [`crate::reach`]). None for one added before this was noted.
     #[serde(default)]
@@ -293,6 +299,10 @@ impl AddonError {
             Code::InvalidResponse | Code::BadRequest if !self.message.is_empty() => {
                 format!("{what} ({})", self.message)
             }
+            // An add-on's own words for why it does not have a song (often what the listener has to set right).
+            Code::NotFound if !self.message.is_empty() && self.message != what => {
+                format!("{what} (it says: “{}”)", self.message)
+            }
             _ => what.to_string(),
         }
     }
@@ -399,6 +409,7 @@ impl Addon {
                 "resolve_by_isrc",
                 "quality",
                 "no_downloads",
+                "sent",
                 "reach",
             ] {
                 fields.remove(note);
@@ -412,6 +423,7 @@ impl Addon {
                 // The host's own notes are not an add-on's to set.
                 (manifest.dialect, manifest.resolve_by_isrc, manifest.quality) =
                     (Dialect::V1, false, None);
+                manifest.sent.clear();
                 manifest
             }
             Some(Some(0)) => {
@@ -748,8 +760,12 @@ impl Addon {
             .map_err(|e| AddonError::invalid(e.to_string()))?;
         let q: String = query.chars().take(200).collect();
         if self.manifest.dialect == Dialect::Eclipse {
-            // An Eclipse add-on is sent only what Eclipse sends.
+            // An Eclipse add-on is sent only what Eclipse sends: the search, and its own settings.
             url.query_pairs_mut().append_pair("q", &q);
+            self.eclipse_settings(&mut url);
+            if let Some(quality) = &self.manifest.quality {
+                url.query_pairs_mut().append_pair("quality", quality);
+            }
             let mut tracks = crate::eclipse::search(&self.eclipse_get(url.as_str())?)?;
             tracks.truncate(limit.clamp(1, 200) as usize);
             return Ok(tracks);
@@ -904,6 +920,7 @@ impl Addon {
                 query.append_pair("durationMs", &ms.to_string());
             }
         }
+        self.eclipse_settings(&mut url);
         let answer = match self.eclipse_get(url.as_str()) {
             Ok(answer) => answer,
             // Not having the song is an answer, not a failure.
@@ -942,6 +959,7 @@ impl Addon {
             .pop_if_empty()
             .push(id);
         if self.manifest.dialect == Dialect::Eclipse {
+            self.eclipse_settings(&mut url);
             url.query_pairs_mut()
                 .append_pair("quality", &crate::eclipse::quality(&self.manifest, want));
             return self.eclipse_stream(url.as_str(), want);
@@ -956,14 +974,26 @@ impl Addon {
         Ok(info)
     }
 
+    /// Adds what an Eclipse add-on is sent with every request besides the request's own words: the defaults of the
+    /// settings it declares (Eclipse and BitChord send them; an add-on may count on them).
+    fn eclipse_settings(&self, url: &mut Url) {
+        let mut query = url.query_pairs_mut();
+        for (name, value) in &self.manifest.sent {
+            query.append_pair(name, value);
+        }
+    }
+
     fn eclipse_stream(&self, url: &str, want: &StreamRequest) -> Result<StreamInfo> {
-        let mut fetched = fetch(&self.agent, url)?;
+        // An add-on that fetches the file from elsewhere first can take half a minute on a song nobody asked it for
+        // before (BitChord waits 45 s for the same reason).
+        let fetch = |url: &str| fetch_within(&self.agent, url, Some(ECLIPSE_STREAM_TIMEOUT));
+        let mut fetched = fetch(url)?;
         // "Still preparing this song": a 503 that asks for a short wait is waited out once.
         if fetched.status == 503
             && let Some(wait) = fetched.retry_after.filter(|s| (1..=30).contains(s))
         {
             std::thread::sleep(Duration::from_secs(wait.min(5)));
-            fetched = fetch(&self.agent, url)?;
+            fetched = fetch(url)?;
         }
         if !(200..300).contains(&fetched.status) {
             return Err(crate::eclipse::error(
@@ -1014,20 +1044,27 @@ fn checked_item(item: Track, wanted: &Wanted, min_tier: Option<Tier>) -> Result<
 
 /// The link as a URL, and the address everything else of the add-on is under.
 fn base_of(link: &str) -> Result<(Url, String)> {
-    let url = checked_url(link, "the add-on link")?;
+    let mut url = checked_url(link.trim(), "the add-on link")?;
+    // The address of its manifest ("…/manifest.json", or another name ending in .json), or the address the manifest
+    // is under ("https://host/key"), as Eclipse and BitChord take either.
+    let names_a_file = url
+        .path_segments()
+        .and_then(|mut parts| parts.next_back())
+        .is_some_and(|last| last.to_ascii_lowercase().ends_with(".json"));
+    if !names_a_file {
+        url.path_segments_mut()
+            .map_err(|_| AddonError::host(Code::BadRequest, "that is not an add-on's link"))?
+            .pop_if_empty()
+            .push("manifest.json");
+    }
     let base = url
         .as_str()
-        .split('?')
+        .split(['?', '#'])
         .next()
-        .and_then(|u| u.strip_suffix("/manifest.json"))
-        .map(str::to_string);
-    match base {
-        Some(base) => Ok((url, base)),
-        None => Err(AddonError::host(
-            Code::BadRequest,
-            "an add-on link ends in /manifest.json",
-        )),
-    }
+        .and_then(|u| u.rsplit_once('/'))
+        .map(|(base, _)| base.to_string())
+        .ok_or_else(|| AddonError::host(Code::BadRequest, "that is not an add-on's link"))?;
+    Ok((url, base))
 }
 
 /// One way an add-on as its link gives it now differs from the add-on as it was added (see [`Addon::changes_from`]).
@@ -1292,7 +1329,17 @@ struct Fetched {
 }
 
 fn fetch(agent: &ureq::Agent, url: &str) -> Result<Fetched> {
-    let mut response = agent.get(url).call().map_err(unanswered)?;
+    fetch_within(agent, url, None)
+}
+
+/// [`fetch`], waiting as long as `wait` for the whole answer when it is given (else the agent's own time).
+fn fetch_within(agent: &ureq::Agent, url: &str, wait: Option<Duration>) -> Result<Fetched> {
+    let request = agent.get(url);
+    let request = match wait {
+        Some(wait) => request.config().timeout_global(Some(wait)).build(),
+        None => request,
+    };
+    let mut response = request.call().map_err(unanswered)?;
     let header = |name: &str| {
         response
             .headers()
@@ -1698,5 +1745,41 @@ mod tests {
             "{}",
             refused.in_words()
         );
+    }
+
+    #[test]
+    fn an_add_on_s_link_is_its_manifest_s_address_or_the_address_it_is_under() {
+        let read = |link: &str| base_of(link).map(|(url, base)| (url.to_string(), base));
+        let both = |url: &str, base: &str| Ok((url.to_string(), base.to_string()));
+        let under = both(
+            "https://a.example/key/manifest.json",
+            "https://a.example/key",
+        );
+        assert_eq!(read("https://a.example/key/manifest.json"), under);
+        assert_eq!(read("https://a.example/key"), under);
+        assert_eq!(read("https://a.example/key/"), under);
+        assert_eq!(read("  https://a.example/key \n"), under);
+        assert_eq!(
+            read("https://a.example"),
+            both("https://a.example/manifest.json", "https://a.example")
+        );
+        // A manifest under another name, and a link with words after it.
+        assert_eq!(
+            read("https://a.example/key/Addon.JSON?x=1"),
+            both(
+                "https://a.example/key/Addon.JSON?x=1",
+                "https://a.example/key"
+            )
+        );
+        assert_eq!(
+            read("https://a.example/key?token=1"),
+            both(
+                "https://a.example/key/manifest.json?token=1",
+                "https://a.example/key"
+            )
+        );
+        assert!(read("ftp://a.example/key").is_err());
+        assert!(read("http://a.example/key").is_err());
+        assert!(read("not a link").is_err());
     }
 }
