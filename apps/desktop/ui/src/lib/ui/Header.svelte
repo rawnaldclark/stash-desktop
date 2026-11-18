@@ -1,4 +1,4 @@
-<!-- Header: back/forward, the search box, Settings. -->
+<!-- Header: back/forward, the search box (Settings is in the navigation, as on Android). -->
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
@@ -51,5 +51,4 @@
 		/>
 	</form>
 	{#if ui.offline}<button type="button" class="hd-dev hd-off" aria-label="Offline: only what is on this computer plays. Go back online" title="Offline: only what is on this computer plays. Click to go back online" onclick={() => void goOffline(false)}><Icon name="download" /><span class="hd-dt">Offline</span></button>{/if}
-	<a class="hd-dev" href="/settings" aria-label="Settings" title="Settings"><Icon name="settings" /><span class="hd-dt">Settings</span></a>
 </header>

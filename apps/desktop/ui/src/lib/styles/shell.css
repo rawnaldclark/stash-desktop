@@ -44,10 +44,16 @@
 /* the wordmark alone, its left edge on the nav icons' */
 .sb-brand { display: flex; align-items: center; justify-content: space-between; height: 40px; padding-left: 12px; padding-right: 2px; flex: none; }
 .sb-nav { display: grid; gap: 2px; margin-top: 12px; flex: none; }
-.nav-i { display: flex; align-items: center; gap: 12px; height: 40px; padding: 0 12px; border-radius: 8px; color: var(--wp-text-2); font: 600 14px/1 var(--font-body); transition: background-color 150ms var(--ease-standard), color 150ms; }
+/* the navigation, after Stash for Android's tab bar (Namida's): Iconsax outlines, and the place you are in wears a pill
+   that grows from 40 % of its width from the centre over 1 s on the emphasized curve (most of it in the first 300 ms) */
+.nav-i { position: relative; isolation: isolate; display: flex; align-items: center; gap: 12px; height: 40px; padding: 0 12px; border-radius: 8px; color: var(--wp-text-2); font: 600 14px/1 var(--font-body); transition: background-color 150ms var(--ease-standard), color 150ms; }
+.nav-i::before { content: ''; position: absolute; inset: 0; z-index: -1; border-radius: 8px; background: var(--acc-wash); opacity: 0; transform: scaleX(.4); transition: transform 1000ms cubic-bezier(.2, 0, 0, 1), opacity 180ms; }
+.nav-i .ni { width: 22px; height: 22px; flex: none; }
 @media (hover: hover) and (pointer: fine) { .nav-i:hover { background: var(--wp-hover); color: var(--wp-text); } }
-.nav-i.on { background: var(--acc-wash); color: var(--wp-text); }
-.nav-i.on .ic { color: var(--acc-text); }
+.nav-i.on { color: var(--wp-text); }
+.nav-i.on::before { opacity: 1; transform: none; }
+.nav-i.on .ni { color: var(--acc-text); }
+@media (prefers-reduced-motion: reduce) { .nav-i::before, .nav-i .ni, .nav-i span { transition: none !important; } }
 .caps { font: 600 11px/1.4 var(--font-body); letter-spacing: .08em; text-transform: uppercase; color: var(--wp-text-2); }
 .sb-sec { display: flex; align-items: center; justify-content: space-between; margin-top: 20px; padding: 0 4px 8px; flex: none; }
 .sb-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; align-content: start; }
@@ -83,8 +89,17 @@ body.carrying, body.carrying * { cursor: grabbing !important; user-select: none;
 	.sb-brand { justify-content: center; padding-left: 0; }
 	/* the rail keeps the wordmark, 62 px wide, 5 px clear of the 72 px rail each side */
 	.sb-brand .wm { width: 62px !important; height: auto !important; }
-	.nav-i span, .sb-t { display: none !important; }
-	.nav-i { justify-content: center; width: 48px; padding: 0; }
+	/* the rail: Namida's bar on its side, the label shown under the icon of the place you are in only */
+	.sb-t { display: none !important; }
+	.nav-i { display: block; width: 64px; height: 60px; padding: 0; border-radius: 12px; }
+	.nav-i::before { inset: 4px 4px auto; height: 32px; border-radius: 16px; }
+	.nav-i .ni { position: absolute; left: 50%; top: 19px; margin-left: -11px; transition: top 1000ms cubic-bezier(.2, 0, 0, 1); }
+	.nav-i.on .ni { top: 9px; }
+	.nav-i span { position: absolute; left: 0; right: 0; top: 41px; text-align: center; font: 600 11px/1.2 var(--font-body); opacity: 0; transition: opacity 1000ms cubic-bezier(.2, 0, 0, 1); }
+	.nav-i.on span { opacity: 1; }
+	.nav-i:hover { background: none; }
+	.nav-i:hover::before { opacity: .55; transform: none; }
+	.nav-i.on:hover::before { opacity: 1; }
 	.sb-sec { align-self: stretch; margin: 12px 12px 8px; padding: 0; border-top: 1px solid var(--wp-line); height: 0; }
 	.sb-sec .caps { display: none; }
 	.sb-list { justify-items: center; }
@@ -102,8 +117,16 @@ body.carrying, body.carrying * { cursor: grabbing !important; user-select: none;
 .wp-g.rail .side { align-items: center; padding: 16px 0; }
 .wp-g.rail .sb-brand { justify-content: center; padding-left: 0; }
 .wp-g.rail .sb-brand .wm { width: 62px !important; height: auto !important; }
-.wp-g.rail .nav-i span, .wp-g.rail .sb-t { display: none !important; }
-.wp-g.rail .nav-i { justify-content: center; width: 48px; padding: 0; }
+.wp-g.rail .sb-t { display: none !important; }
+.wp-g.rail .nav-i { display: block; width: 64px; height: 60px; padding: 0; border-radius: 12px; }
+.wp-g.rail .nav-i::before { inset: 4px 4px auto; height: 32px; border-radius: 16px; }
+.wp-g.rail .nav-i .ni { position: absolute; left: 50%; top: 19px; margin-left: -11px; transition: top 1000ms cubic-bezier(.2, 0, 0, 1); }
+.wp-g.rail .nav-i.on .ni { top: 9px; }
+.wp-g.rail .nav-i span { position: absolute; left: 0; right: 0; top: 41px; text-align: center; font: 600 11px/1.2 var(--font-body); opacity: 0; transition: opacity 1000ms cubic-bezier(.2, 0, 0, 1); }
+.wp-g.rail .nav-i.on span { opacity: 1; }
+.wp-g.rail .nav-i:hover { background: none; }
+.wp-g.rail .nav-i:hover::before { opacity: .55; transform: none; }
+.wp-g.rail .nav-i.on:hover::before { opacity: 1; }
 .wp-g.rail .sb-sec { align-self: stretch; margin: 12px 12px 8px; padding: 0; border-top: 1px solid var(--wp-line); height: 0; }
 .wp-g.rail .sb-sec .caps { display: none; }
 .wp-g.rail .sb-list { justify-items: center; }

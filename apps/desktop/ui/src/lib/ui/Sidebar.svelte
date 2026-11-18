@@ -5,6 +5,7 @@
 	import { page } from '$app/state';
 	import Logo from '../brand/Logo.svelte';
 	import Icon from './Icon.svelte';
+	import NavIcon, { type NavIconName } from './NavIcon.svelte';
 	import Tile from './Tile.svelte';
 	import { library } from '../app';
 	import type { Playlist } from '../api';
@@ -12,12 +13,13 @@
 	import { atEvent, folderMenu, moveTo, newMenu, playlistMenu, playlistsWord, under } from '../desktop/playlist-folders';
 	import { L, ui } from './state.svelte';
 	import { songs } from './format';
-	import type { IconName } from './icons';
 
-	const nav: [string, string, IconName][] = [
+	// As Stash for Android's tab bar has them (Sync is the phone's own).
+	const nav: [string, string, NavIconName][] = [
 		['/', 'Home', 'home'],
+		['/library', 'Library', 'library'],
 		['/search', 'Search', 'search'],
-		['/library', 'Library', 'library_music']
+		['/settings', 'Settings', 'settings']
 	];
 	const here = (href: string) => (href === '/' ? page.url.pathname === '/' : page.url.pathname.startsWith(href));
 	const folderIds = $derived(new Set(L.folders.map((f) => f.id)));
@@ -44,7 +46,7 @@
 	</div>
 	<nav class="sb-nav" aria-label="Main">
 		{#each nav as [href, name, icon] (href)}
-			<a class="nav-i" class:on={here(href)} {href} title={name} aria-current={here(href) ? 'page' : undefined}><Icon name={icon} /><span>{name}</span></a>
+			<a class="nav-i" class:on={here(href)} {href} title={name} aria-current={here(href) ? 'page' : undefined}><NavIcon name={icon} /><span>{name}</span></a>
 		{/each}
 	</nav>
 	<div class="sb-sec" data-drop-folder=""><span class="caps">Your library</span><button type="button" class="sb-new" aria-label="New playlist or folder" title="New playlist or folder" aria-haspopup="menu" onclick={(e) => newMenu(under(e.currentTarget))}><Icon name="add" /></button></div>
