@@ -86,19 +86,13 @@ describe('origin (an add-on’s stream)', () => {
 });
 
 describe('outputSentence', () => {
-	it('says what the sound card is open at', () => {
-		expect(outputSentence(sig({ mode: 'exclusive' }))).toBe('Right now the sound card is open at 44.1 kHz, for Stash alone. The track is going out as it is (44.1 kHz in).');
-		expect(outputSentence(sig({ resampled: true, output: { sample_rate: 48000, format: 'float' } }))).toBe(
-			'Right now the sound card is open at 48 kHz, shared with other programs. The track is being changed on the way (44.1 kHz in).'
-		);
+	it('says what the sound card gets', () => {
+		expect(outputSentence(sig({ mode: 'exclusive' }))).toBe('Now: 44.1 kHz · unchanged');
+		expect(outputSentence(sig({ resampled: true, output: { sample_rate: 48000, format: 'float' } }))).toBe('Now: 44.1 kHz in, 48 kHz out · resampled');
 		expect(outputSentence(null)).toBeNull();
 	});
 	it('names the equalizer when it is the only change', () => {
-		expect(outputSentence(sig({ mode: 'exclusive', equalized: true }))).toBe(
-			'Right now the sound card is open at 44.1 kHz, for Stash alone. The track is being changed on the way by your equalizer (44.1 kHz in).'
-		);
-		expect(outputSentence(sig({ scaled: true, equalized: true }))).toBe(
-			'Right now the sound card is open at 44.1 kHz, shared with other programs. The track is being changed on the way (44.1 kHz in).'
-		);
+		expect(outputSentence(sig({ mode: 'exclusive', equalized: true }))).toBe('Now: 44.1 kHz · your equalizer');
+		expect(outputSentence(sig({ scaled: true, equalized: true }))).toBe('Now: 44.1 kHz · changed by volume or format');
 	});
 });

@@ -94,12 +94,12 @@ export function origin(addonName: string | null, tier: Tier | null, signal: Sign
 	return { text: `${addonName} · ${said}`, disagrees: false };
 }
 
-/** What the sound card is being sent right now, in a sentence (Settings › Sound): when the equalizer is the only change, it says
- * so. Null when nothing is open. */
+/** What the sound card gets right now, in a few words (Settings › Sound › Advanced): the rate in and out, and whether
+ * it is changed on the way. Null when nothing is open. */
 export function outputSentence(signal: Signal | null | undefined): string | null {
 	if (!signal || !signal.output.sample_rate) return null;
-	const how = signal.mode === 'exclusive' ? 'for Stash alone' : signal.mode === 'shared' ? 'shared with other programs' : '';
-	const others = signal.resampled || signal.converted || signal.scaled;
-	const change = others ? 'being changed on the way' : signal.equalized ? 'being changed on the way by your equalizer' : 'going out as it is';
-	return `Right now the sound card is open at ${kHz(signal.output.sample_rate)}${how ? `, ${how}` : ''}. The track is ${change} (${kHz(signal.decoded.sample_rate)} in).`;
+	const out = kHz(signal.output.sample_rate);
+	const rate = signal.resampled && signal.decoded.sample_rate ? `${kHz(signal.decoded.sample_rate)} in, ${out} out` : out;
+	const what = signal.resampled ? 'resampled' : signal.converted || signal.scaled ? 'changed by volume or format' : signal.equalized ? 'your equalizer' : 'unchanged';
+	return `Now: ${rate} · ${what}`;
 }
