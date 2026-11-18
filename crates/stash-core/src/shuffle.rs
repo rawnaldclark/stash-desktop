@@ -42,7 +42,7 @@ impl Chance {
     }
 
     /// `list` in an order by chance (Fisher–Yates).
-    fn mix<T>(&mut self, list: &mut [T]) {
+    pub fn mix<T>(&mut self, list: &mut [T]) {
         for i in (1..list.len()).rev() {
             let j = (self.next() % (i as u64 + 1)) as usize;
             list.swap(i, j);

@@ -11,6 +11,11 @@
 	import TubeShelves from '../lib/desktop/TubeShelves.svelte';
 	import { songs } from '../lib/ui/format';
 	import { jumpBackIn } from '../lib/home/jump';
+	import { M } from '../lib/desktop/mixes.svelte';
+	import { tubeItem } from '../lib/app';
+
+	/** Stash's mixes with songs, Home's first shelf (Android's Discover). */
+	const mixes = $derived(M.list.filter((m) => m.songs.length).map((m) => ({ ...m, items: m.songs.map(tubeItem) })));
 
 	const recent = $derived.by(() => {
 		const seen = new Set<string>();
@@ -48,6 +53,19 @@
 	const tube = $derived(T.on && !ui.offline && T.home?.length ? T.home : null);
 </script>
 
+{#snippet made()}
+	{#if mixes.length && !ui.offline}
+		<h2 class="vh2">Made for you</h2>
+		<div class="shelf-w" use:shelf>
+			<div class="shelf">
+				{#each mixes as m (m.id)}
+					<Card title={m.title} sub={m.description} items={m.items} href="/mix/{m.id}" />
+				{/each}
+			</div>
+		</div>
+	{/if}
+{/snippet}
+
 {#snippet fresh()}
 	{#if L.releases.length}
 		<h2 class="vh2">New releases</h2>
@@ -76,15 +94,16 @@
 		<p class="empty-line">Add a music folder or import a library to begin.</p>
 		<a class="btn" href="/settings#library">Open Settings</a>
 	</section>
-	{#if tube || L.releases.length}<div class="view view-in">{@render fresh()}{@render youtube()}</div>{/if}
+	{#if tube || L.releases.length || mixes.length}<div class="view view-in">{@render made()}{@render fresh()}{@render youtube()}</div>{/if}
 {:else if quiet}
 	<section class="empty" aria-label="Get started">
 		<p class="empty-line">Play a song and it shows up here.</p>
 		<a class="btn" href="/library?tab=songs">Open your library</a>
 	</section>
-	{#if tube}<div class="view view-in">{@render youtube()}</div>{/if}
+	{#if tube || mixes.length}<div class="view view-in">{@render made()}{@render youtube()}</div>{/if}
 {:else}
 	<div class="view view-in">
+		{@render made()}
 		{#if recent.length}
 			<h2 class="vh2">Recently played</h2>
 			<div class="shelf-w" use:shelf>

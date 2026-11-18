@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 23;
+pub const SCHEMA_VERSION: i64 = 24;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
@@ -343,6 +343,37 @@ const V23: &str = "
     CREATE INDEX releases_new ON releases(new_at_ms DESC);
 ";
 
+/// Version 24: Stash's mixes (`discover.rs`): what each mix looked for, by the song's words (`key`), and the YouTube
+/// Music song it was found as (`song_id` and the rest; none when it was not found), and each mix's songs of the day (a
+/// JSON list of song ids, in order).
+const V24: &str = "
+    CREATE TABLE discover_finds(
+        mix          TEXT NOT NULL,
+        key          TEXT NOT NULL,
+        title        TEXT NOT NULL,
+        artist       TEXT NOT NULL,
+        seed         TEXT NOT NULL,
+        found_at_ms  INTEGER NOT NULL,
+        song_id      TEXT,
+        song_title   TEXT,
+        song_artist  TEXT,
+        album        TEXT,
+        duration_ms  INTEGER,
+        art_url      TEXT,
+        explicit     INTEGER NOT NULL DEFAULT 0,
+        artist_id    TEXT,
+        album_id     TEXT,
+        PRIMARY KEY (mix, key)
+    ) WITHOUT ROWID;
+    CREATE INDEX discover_finds_new ON discover_finds(mix, found_at_ms DESC);
+    CREATE TABLE discover_mixes(
+        mix       TEXT PRIMARY KEY,
+        songs     TEXT NOT NULL,
+        day       INTEGER NOT NULL,
+        drawn_ms  INTEGER NOT NULL
+    ) WITHOUT ROWID;
+";
+
 /// Version 20: what Last.fm said is like a song or an artist (radio and autoplay, `similar.rs`), by the question asked
 /// (`similar::Ask::key`): the artists and songs it named as JSON, or NULL for "it does not know that one", and when
 /// (Unix seconds), so each question is asked once in two weeks.
@@ -609,6 +640,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V23)?;
         tx.pragma_update(None, "user_version", 23)?;
+        tx.commit()?;
+    }
+    if found < 24 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V24)?;
+        tx.pragma_update(None, "user_version", 24)?;
         tx.commit()?;
     }
     Ok(())

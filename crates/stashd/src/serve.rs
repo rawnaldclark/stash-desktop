@@ -1543,6 +1543,11 @@ impl Core {
                 let (state, stop) = (&state, &stop);
                 scope.spawn(move || crate::artists_following::run(state, stop));
             }
+            // Stash's mixes (Daily Discover, Recommended by Last.fm), made once a day.
+            {
+                let (state, stop) = (&state, &stop);
+                scope.spawn(move || crate::discover::run(state, stop));
+            }
             // The shortcuts as the listener left them (the shell holds them once its window is up).
             if state.shortcuts.shell.is_some() {
                 let state = &state;
@@ -3063,6 +3068,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
     }
     // Before one artist's page (/api/artists/{id}), which "followed" is not.
     if let Some(response) = crate::artists_following::route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::discover::route(state, request, &path)? {
         return Ok((response, false));
     }
     if let Some(response) = crate::youtube_pages::route(state, request, &path, &param)? {

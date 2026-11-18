@@ -4194,6 +4194,7 @@ name = "stashd"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "dirs",
  "lofty",

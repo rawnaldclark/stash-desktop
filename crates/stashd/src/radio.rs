@@ -385,6 +385,17 @@ impl Radio {
         if !self.current(token) {
             return Err(STOPPED);
         }
+        self.look_up(state, ask, off)
+    }
+
+    /// What Last.fm says to `ask`, for anyone (the mixes too): kept from before when it is fresh, else asked, within
+    /// the day's questions and while similar music is on. Why not, when there is no answer.
+    pub(crate) fn look_up(
+        &self,
+        state: &State,
+        ask: &Ask,
+        off: bool,
+    ) -> std::result::Result<Answer, &'static str> {
         if !askable(ask) {
             return Err(SAYS_TOO_LITTLE);
         }

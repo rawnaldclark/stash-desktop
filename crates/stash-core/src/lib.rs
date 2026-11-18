@@ -9,6 +9,7 @@ pub mod blocks;
 pub mod covers;
 pub mod credits;
 pub mod db;
+pub mod discover;
 pub mod downloads;
 pub mod eclipse;
 pub mod eq;

@@ -5,6 +5,7 @@
  * library, the queue and the sound; this module asks it, maps what it says to what the UI shows, and tells it what the listener did.
  * Nothing here plays audio or stores anything.
  */
+import { loadMixes } from './desktop/mixes.svelte';
 import { get, writable, type Readable } from 'svelte/store';
 import * as core from './core';
 import { Refused, said } from './core';
@@ -549,6 +550,8 @@ async function loadHistory(): Promise<void> {
 	// A play may change what a smart playlist holds (most played, played lately).
 	if (get(playlists).some((p) => p.rules)) await core.playlists().then((rows) => syncPlaylists(rows));
 }
+/** Stash's mixes too (Home's first shelf), when the core has them; none is fine. */
+const loadMixesQuietly = () => loadMixes().catch(() => {});
 async function loadFollowing(): Promise<void> {
 	const [artists, records] = await Promise.all([core.followedArtists(), core.releases()]);
 	followed.set(artists);
@@ -620,7 +623,7 @@ function caughtUp(now: number | undefined): void {
 	if (now === edits || rereading) return;
 	edits = now;
 	rereading = true;
-	void Promise.all([core.counts().then(setCounts), loadLikes(), loadFolders(), core.playlists().then((rows) => syncPlaylists(rows)), loadFollowing()])
+	void Promise.all([core.counts().then(setCounts), loadLikes(), loadFolders(), core.playlists().then((rows) => syncPlaylists(rows)), loadFollowing(), loadMixesQuietly()])
 		.catch(() => {})
 		.finally(() => (rereading = false));
 }
@@ -632,7 +635,8 @@ async function loadLibrary(): Promise<void> {
 		loadFolders(),
 		core.playlists().then((rows) => syncPlaylists(rows, rows.map((r) => r.id))),
 		loadHistory(),
-		loadFollowing().catch(() => {})
+		loadFollowing().catch(() => {}),
+		loadMixesQuietly()
 	]);
 }
 

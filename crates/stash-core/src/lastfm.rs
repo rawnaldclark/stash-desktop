@@ -104,6 +104,65 @@ pub fn begin(agent: &Agent, keys: &Keys) -> Result<String, String> {
         .ok_or_else(|| NOT_LASTFM.to_string())
 }
 
+/// The listener's most played songs (`songs`) or artists on Last.fm over the last month (`user.getTopTracks`,
+/// `user.getTopArtists`), most played first, `limit` at most: (artist, title), with no title for an artist.
+pub fn user_top(
+    agent: &Agent,
+    keys: &Keys,
+    user: &str,
+    songs: bool,
+    limit: usize,
+) -> Result<Vec<(String, Option<String>)>, String> {
+    let method = if songs {
+        "user.getTopTracks"
+    } else {
+        "user.getTopArtists"
+    };
+    let params = vec![
+        ("user".to_string(), user.to_string()),
+        ("period".to_string(), "1month".to_string()),
+        ("limit".to_string(), limit.to_string()),
+    ];
+    let json = read(ask(agent, body(keys, method, params))).map_err(why)?;
+    let (holder, list) = if songs {
+        ("toptracks", "track")
+    } else {
+        ("topartists", "artist")
+    };
+    let entries: Vec<Value> = match json.get(holder).and_then(|h| h.get(list)) {
+        Some(Value::Array(all)) => all.clone(),
+        Some(one) if one.is_object() => vec![one.clone()],
+        _ => Vec::new(),
+    };
+    let short = |s: &str, n: usize| s.trim().chars().take(n).collect::<String>();
+    Ok(entries
+        .iter()
+        .filter_map(|e| {
+            let name = e
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|n| !n.is_empty())?;
+            if !songs {
+                return Some((short(name, 200), None));
+            }
+            let artist = e.get("artist").and_then(|a| {
+                if a.is_object() {
+                    a.get("name")
+                } else {
+                    Some(a)
+                }
+            });
+            let artist = artist
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|a| !a.is_empty())?;
+            Some((short(artist, 200), Some(short(name, 300))))
+        })
+        .take(limit)
+        .collect())
+}
+
 /// Last.fm's page where the listener allows Stash, for the sign-in `token` began.
 pub fn sign_in_page(keys: &Keys, token: &str) -> String {
     let query = url::form_urlencoded::Serializer::new(String::new())

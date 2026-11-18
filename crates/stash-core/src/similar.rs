@@ -22,6 +22,8 @@ use crate::identity::clean_text;
 pub const ARTIST_LIMIT: u32 = 100;
 /// The most similar songs asked for (track.getsimilar), as the phones ask.
 pub const SONG_LIMIT: u32 = 30;
+/// An artist's top songs asked for (artist.gettoptracks), as the phones ask for Daily Discover.
+pub const TOP_SONGS_LIMIT: u32 = 3;
 /// How long a kept answer is fresh, in seconds: 14 days, as long as the proxy itself keeps one.
 pub const FRESH_S: i64 = 14 * 86_400;
 
@@ -51,6 +53,8 @@ pub enum Ask {
     Artist { artist: String },
     /// track.getsimilar.
     Song { artist: String, title: String },
+    /// artist.gettoptracks: an artist's most played songs (Daily Discover's, `discover.rs`).
+    TopSongs { artist: String },
 }
 
 impl Ask {
@@ -59,7 +63,9 @@ impl Ask {
     pub fn params(&self) -> Vec<(&'static str, String)> {
         let mut params = vec![("method", self.method().to_string())];
         match self {
-            Ask::Artist { artist } => params.push(("artist", artist.clone())),
+            Ask::Artist { artist } | Ask::TopSongs { artist } => {
+                params.push(("artist", artist.clone()))
+            }
             Ask::Song { artist, title } => {
                 params.push(("artist", artist.clone()));
                 params.push(("track", title.clone()));
@@ -91,7 +97,9 @@ impl Ask {
             form_urlencoded::byte_serialize(text.trim().as_bytes()).collect()
         }
         match self {
-            Ask::Artist { artist } => format!("https://www.last.fm/music/{}", part(artist)),
+            Ask::Artist { artist } | Ask::TopSongs { artist } => {
+                format!("https://www.last.fm/music/{}", part(artist))
+            }
             Ask::Song { artist, title } => {
                 format!(
                     "https://www.last.fm/music/{}/_/{}",
@@ -106,7 +114,7 @@ impl Ask {
     /// ([`lookable`]).
     pub fn askable(&self) -> bool {
         match self {
-            Ask::Artist { artist } => named(artist),
+            Ask::Artist { artist } | Ask::TopSongs { artist } => named(artist),
             Ask::Song { artist, title } => lookable(title, artist),
         }
     }
@@ -115,6 +123,7 @@ impl Ask {
         match self {
             Ask::Artist { .. } => "artist.getsimilar",
             Ask::Song { .. } => "track.getsimilar",
+            Ask::TopSongs { .. } => "artist.gettoptracks",
         }
     }
 
@@ -122,6 +131,7 @@ impl Ask {
         match self {
             Ask::Artist { .. } => ARTIST_LIMIT,
             Ask::Song { .. } => SONG_LIMIT,
+            Ask::TopSongs { .. } => TOP_SONGS_LIMIT,
         }
     }
 }
@@ -317,6 +327,7 @@ pub fn read(
     let (holder, list) = match ask {
         Ask::Song { .. } => ("similartracks", "track"),
         Ask::Artist { .. } => ("similarartists", "artist"),
+        Ask::TopSongs { .. } => ("toptracks", "track"),
     };
     let Some(holder) = json.get(holder) else {
         return Err(Trouble::Away(UNREADABLE.into()));
@@ -345,7 +356,7 @@ fn like(ask: &Ask, entry: &Value) -> Option<Like> {
             title: None,
             score,
         }),
-        Ask::Song { .. } => {
+        Ask::Song { .. } | Ask::TopSongs { .. } => {
             // track.getsimilar names the artist as {"name": …}; a plain name is taken too.
             let artist = entry.get("artist").and_then(|a| {
                 if a.is_object() {
