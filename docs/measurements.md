@@ -1803,3 +1803,11 @@ What you play can now go to Last.fm too, beside ListenBrainz (Settings › Scrob
 
 - With a real application key: Last.fm took Stash's signed `auth.getToken` and gave a sign-in page; asked before the listener allowed it, `finish` said it was still waiting (error 14). Neither the key nor the secret was in the log.
 - To be measured: signing in with a real Last.fm account, a play sent and seen on the profile, the song playing now, and a play older than two weeks let go.
+
+## 55. Playback speed and Tuning
+
+As Android has them, in one panel from the speed button (the player bar and Now playing): speeds 0.25x to 2x in quarter steps or any from 0.1x to 4x (the pitch kept), and Tuning, the A songs are heard at: 440 as recorded, 432, 444, or any from 392 to 494 Hz (the speed kept). Tuning is also in Settings › Sound and holds between runs; the speed starts at 1x each time, as on Android. Both are mpv's own `speed` and `pitch` (scaletempo2 and a resampler inside), not the filter list, so the equalizer is left alone.
+
+Measured through the bundled libmpv on a 4 s, 440 Hz tone written to a file: as is, 4.00 s at ~439 Hz; tuning 432, 4.00 s at ~432 Hz; speed 1.5x, 2.67 s at ~440 Hz; both, 2.67 s at ~432 Hz.
+
+Live on the test library: a song moved 1.01 s per second as is, 1.50 at 1.5x, 1.47 at 1.5x with A432; 999 Hz asked was kept as 494; after a restart the speed was 1 and the tuning still 432. Changing either rebuilds nothing, but samples are changed: with either on, the output is not bit-perfect.

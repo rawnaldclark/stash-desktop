@@ -30,6 +30,22 @@ pub use eq_run::{CorrectionShown, EqState};
 const TRIES: u32 = 3;
 const RETRY_AFTER: Duration = Duration::from_secs(5);
 
+/// The slowest and fastest songs play (Android's limits).
+pub const MIN_SPEED: f64 = 0.1;
+pub const MAX_SPEED: f64 = 4.0;
+/// Tuning: the A of a recording, and how far from it songs can be heard (Android's limits, about two semitones).
+pub const STANDARD_HZ: f64 = 440.0;
+pub const MIN_HZ: f64 = 392.0;
+pub const MAX_HZ: f64 = 494.0;
+
+/// A tuning within its limits, to a tenth of a hertz (anything that is not a number is the standard).
+pub fn tuning_hz(hz: f64) -> f64 {
+    if !hz.is_finite() {
+        return STANDARD_HZ;
+    }
+    (hz.clamp(MIN_HZ, MAX_HZ) * 10.0).round() / 10.0
+}
+
 /// A track as an add-on knows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AddonTrack {
@@ -252,6 +268,10 @@ pub struct PlayerState {
     pub exclusive: bool,
     /// How loudness is evened out between songs from the gain in their tags: "off", "track" or "album".
     pub replaygain: &'static str,
+    /// How fast songs play (1 as recorded); the pitch is not changed by it.
+    pub speed: f64,
+    /// Tuning: the A songs are heard at, in Hz (440 as recorded); the speed is not changed by it.
+    pub tuning: f64,
     /// The equalizer of the output in use.
     pub eq: EqState,
     pub signal: Option<Signal>,
@@ -1913,6 +1933,28 @@ impl Player {
         Ok(())
     }
 
+    /// How fast songs play, `MIN_SPEED` to `MAX_SPEED` (1 as recorded); the pitch stays where it is. Heard at once.
+    pub fn set_speed(&self, speed: f64) -> Result<()> {
+        let speed = if speed.is_finite() {
+            speed.clamp(MIN_SPEED, MAX_SPEED)
+        } else {
+            1.0
+        };
+        self.ctx.engine.mpv().set("speed", &format!("{speed:.3}"))?;
+        Ok(())
+    }
+
+    /// Tuning: the A that songs are heard at, in Hz (`STANDARD_HZ` as recorded, 432 a little lower), within
+    /// `MIN_HZ`..`MAX_HZ` (about two semitones either way) to a tenth. The speed stays where it is. Heard at once.
+    pub fn set_tuning(&self, hz: f64) -> Result<()> {
+        let hz = tuning_hz(hz);
+        self.ctx
+            .engine
+            .mpv()
+            .set("pitch", &format!("{:.6}", hz / STANDARD_HZ))?;
+        Ok(())
+    }
+
     /// What each output keeps, when the player starts: the equalizer of the output expected goes in.
     pub fn set_equalizers(&self, book: eq::Book) {
         let chosen = self.ctx.chosen();
@@ -2126,6 +2168,16 @@ impl Player {
             .get("volume")
             .and_then(|v| v.parse::<f64>().ok())
             .unwrap_or(100.0);
+        let speed = mpv
+            .get("speed")
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|s| s.is_finite())
+            .unwrap_or(1.0);
+        let tuning = mpv
+            .get("pitch")
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|p| tuning_hz(p * STANDARD_HZ))
+            .unwrap_or(STANDARD_HZ);
         let replaygain = match mpv.get("replaygain").as_deref() {
             Some("track") => "track",
             Some("album") => "album",
@@ -2230,6 +2282,8 @@ impl Player {
             volume: volume.round().clamp(0.0, 100.0) as u32,
             exclusive: self.ctx.engine.exclusive(),
             replaygain,
+            speed: (speed * 1000.0).round() / 1000.0,
+            tuning,
             eq,
             signal,
             error,
@@ -2248,5 +2302,20 @@ impl Drop for Player {
         if let Some(events) = self.events.take() {
             let _ = events.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tuning_tests {
+    use super::*;
+
+    #[test]
+    fn a_tuning_is_kept_within_two_semitones_to_a_tenth() {
+        assert_eq!(tuning_hz(432.0), 432.0);
+        assert_eq!(tuning_hz(431.54), 431.5);
+        assert_eq!(tuning_hz(999.0), MAX_HZ);
+        assert_eq!(tuning_hz(100.0), MIN_HZ);
+        assert_eq!(tuning_hz(f64::NAN), STANDARD_HZ);
+        assert_eq!(tuning_hz(f64::INFINITY), STANDARD_HZ);
     }
 }

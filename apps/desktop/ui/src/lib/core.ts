@@ -641,6 +641,10 @@ export type CorePlayer = {
 	exclusive: boolean;
 	/** How loudness is evened out between songs (ReplayGain). */
 	replaygain: Replaygain;
+	/** How fast songs play (1 as recorded); the pitch stays. */
+	speed?: number;
+	/** Tuning: the A songs are heard at, in Hz (440 as recorded); the speed stays. */
+	tuning?: number;
 	/** The equalizer of the output in use. */
 	eq: CoreEq;
 	shuffle: boolean;
@@ -834,6 +838,10 @@ export const setExclusive = (exclusive: boolean) => told('/api/player/exclusive'
 /** Off; every song equally loud ("track"); or the album's own differences kept ("album"). */
 export type Replaygain = 'off' | 'track' | 'album';
 export const setReplaygain = (mode: Replaygain) => told('/api/player/replaygain', { mode });
+/** How fast songs play, 0.1 to 4 (1 as recorded); until Stash closes. */
+export const setSpeed = (speed: number) => told('/api/player/speed', { speed });
+/** Tuning, 392 to 494 Hz (440 as recorded); it holds until changed. */
+export const setTuning = (hz: number) => told('/api/player/tuning', { hz });
 /** Changes the equalizer of the output in use. A tone other than "as-is" turns it on, unless `on` says otherwise. */
 export const setEq = (patch: EqPatch) => told('/api/player/eq', patch);
 /** The system's own dialog, for an equalizer file (Equalizer APO's format); null when none was chosen. */

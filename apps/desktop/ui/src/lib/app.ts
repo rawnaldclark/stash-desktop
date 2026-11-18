@@ -320,6 +320,8 @@ function take(a: core.CorePlayer): void {
 		servedBy: a.served_by,
 		exclusive: a.exclusive,
 		replaygain: a.replaygain ?? 'off',
+		speed: a.speed ?? 1,
+		tuning: a.tuning ?? 440,
 		eq: same(state.eq, a.eq) ? state.eq : a.eq,
 		station: same(state.station, a.station ?? null) ? state.station : (a.station ?? null)
 	});
@@ -455,6 +457,8 @@ const player: PlayerAPI = {
 	},
 	setExclusive: (on) => void command(() => core.setExclusive(on)),
 	setReplaygain: (mode) => void command(() => core.setReplaygain(mode)),
+	setSpeed: (speed) => void command(() => core.setSpeed(speed)),
+	setTuning: (hz) => void command(() => core.setTuning(hz)),
 	refresh: () => void poll(),
 	setEq: (patch) => void command(() => core.setEq(patch)),
 	async eqFromFile() {

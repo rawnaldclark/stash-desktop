@@ -1324,6 +1324,10 @@ impl Core {
             if let Some(mode) = kept("replaygain") {
                 let _ = playing.set_replaygain(&mode);
             }
+            // Tuning holds between runs (the speed starts at 1 each time, as on Android).
+            if let Some(hz) = kept("tuning").and_then(|v| v.parse::<f64>().ok()) {
+                let _ = playing.set_tuning(hz);
+            }
             // Each output's equalizer, before the output is chosen again (which puts that output's in place).
             crate::equalizer::bring_back(playing, kept(crate::equalizer::SETTING));
             // The output chosen last time, when it is connected; else the system's own choice, and the choice
@@ -2096,6 +2100,26 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
                 .lock()
                 .unwrap()
                 .set_setting("replaygain", mode)?;
+        }
+        // How fast songs play, the pitch kept: {"speed": 0.1 to 4}; it lasts until Stash closes.
+        "/api/player/speed" => {
+            let Some(speed) = body.get("speed").and_then(Value::as_f64) else {
+                return Ok(Some(refuse(400, "speed is a number")));
+            };
+            playing.set_speed(speed)?;
+        }
+        // Tuning, the speed kept: {"hz": 392 to 494}, 440 as recorded; it holds until changed.
+        "/api/player/tuning" => {
+            let Some(hz) = body.get("hz").and_then(Value::as_f64) else {
+                return Ok(Some(refuse(400, "hz is a number")));
+            };
+            let hz = stash_core::player::tuning_hz(hz);
+            playing.set_tuning(hz)?;
+            state
+                .library
+                .lock()
+                .unwrap()
+                .set_setting("tuning", &hz.to_string())?;
         }
         _ => return Ok(None),
     }

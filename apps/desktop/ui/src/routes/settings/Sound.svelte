@@ -1,6 +1,7 @@
 <!-- Settings › Sound: the output and even volume, the equalizer of the output in use (a correction from a file, and two
      tones; each output keeps its own), and exclusive mode under Advanced. -->
 <script lang="ts">
+	import { TUNINGS } from '../../lib/ui/speed';
 	import { onMount } from 'svelte';
 	import { player } from '../../lib/app';
 	import * as core from '../../lib/core';
@@ -109,6 +110,18 @@
 			<div class="seg" role="group" aria-labelledby="rg-l">
 				{#each RG as [mode, label] (mode)}
 					<button type="button" class="seg-i" aria-pressed={S.v.replaygain === mode} onclick={() => player.setReplaygain(mode)}>{label}</button>
+				{/each}
+			</div>
+		</div>
+		<!-- Tuning (Android's Settings › Audio): the A songs are heard at; any other value is set from the speed button. -->
+		<div class="set-row">
+			<div class="set-lab">
+				<span class="set-name" id="tune-l">Tuning</span>
+				<span class="set-sub">{S.v.tuning === 440 ? 'As recorded (A = 440 Hz).' : S.v.tuning < 440 ? `A = ${S.v.tuning} Hz: a little lower in pitch. Same speed.` : `A = ${S.v.tuning} Hz: a little higher in pitch. Same speed.`}</span>
+			</div>
+			<div class="seg" role="group" aria-labelledby="tune-l">
+				{#each TUNINGS as hz (hz)}
+					<button type="button" class="seg-i" aria-pressed={S.v.tuning === hz} onclick={() => player.setTuning(hz)}>{hz === 440 ? 'Standard' : hz}</button>
 				{/each}
 			</div>
 		</div>

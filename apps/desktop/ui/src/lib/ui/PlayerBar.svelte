@@ -4,6 +4,7 @@
 	import Icon from './Icon.svelte';
 	import LikeButton from './LikeButton.svelte';
 	import SaveButton from './SaveButton.svelte';
+	import SpeedButton from './SpeedButton.svelte';
 	import ProgressBar from './ProgressBar.svelte';
 	import SignalBadge from './SignalBadge.svelte';
 	import Transport from './Transport.svelte';
@@ -38,6 +39,7 @@
 		<div class="bar-r">
 			<button type="button" class="bar-ib b-lyr" class:open={ui.panelOpen && ui.panelTab === 'lyrics'} aria-pressed={ui.panelOpen && ui.panelTab === 'lyrics'} aria-label="Lyrics" title="Lyrics" onclick={() => ui.toggleTab('lyrics')}><Icon name="lyrics" /></button>
 			<button type="button" class="bar-ib b-que" class:open={ui.panelOpen && ui.panelTab === 'next'} aria-pressed={ui.panelOpen && ui.panelTab === 'next'} aria-label="Up next" title="Up next" onclick={() => ui.toggleTab('next')}><Icon name="queue_music" /></button>
+			<SpeedButton />
 			<Volume />
 			{#if canMini}<button type="button" class="bar-ib b-mini" aria-label="Mini player" title="Mini player" onclick={() => void showView('mini').catch(() => {})}><Icon name="picture_in_picture_alt" /></button>{/if}
 			<a class="bar-ib b-full" href="/now" aria-label="Open Now playing" title="Now playing"><Icon name="open_in_full" /></a>

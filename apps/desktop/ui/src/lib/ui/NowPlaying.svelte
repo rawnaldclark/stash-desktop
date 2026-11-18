@@ -7,6 +7,7 @@
 	import Icon from './Icon.svelte';
 	import LikeButton from './LikeButton.svelte';
 	import SaveButton from './SaveButton.svelte';
+	import SpeedButton from './SpeedButton.svelte';
 	import ProgressBar from './ProgressBar.svelte';
 	import SignalBadge from './SignalBadge.svelte';
 	import Transport from './Transport.svelte';
@@ -57,6 +58,7 @@
 			<div class="fs-act">
 				<LikeButton item={s.current} class="fs-ib fs-like" />
 				<SaveButton item={s.current} class="fs-ib" />
+				<SpeedButton class="fs-ib" />
 				<button type="button" class="fs-ib fs-q" aria-label="Up next" title="Up next" onclick={() => ui.toggleNext()}><Icon name="queue_music" /></button>
 				<Volume cls="fs-ib" class="fs-vol" />
 			</div>

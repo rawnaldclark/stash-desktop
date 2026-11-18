@@ -69,6 +69,10 @@ export interface PlayerState {
 	exclusive: boolean;
 	/** How loudness is evened out between songs (Settings › Sound). */
 	replaygain: Replaygain;
+	/** How fast songs play (1 as recorded); the pitch stays. */
+	speed: number;
+	/** Tuning: the A songs are heard at, in Hz (440 as recorded); the speed stays. */
+	tuning: number;
 	/** The equalizer of the output in use (Settings › Sound). */
 	eq: CoreEq;
 	/** The station growing the queue (a radio, or autoplay), when one is. */
@@ -102,6 +106,10 @@ export interface PlayerAPI {
 	/** Takes the sound card for Stash alone, or gives it back. */
 	setExclusive(on: boolean): void;
 	setReplaygain(mode: Replaygain): void;
+	/** How fast songs play, the pitch kept (0.1 to 4). */
+	setSpeed(speed: number): void;
+	/** Tuning in Hz, the speed kept (392 to 494; 440 as recorded). */
+	setTuning(hz: number): void;
 	/** Reads the player's state again now (after something changed it outside these commands). */
 	refresh(): void;
 	/** Changes the equalizer of the output in use: one request for each tap. */
@@ -279,6 +287,8 @@ export const INITIAL_PLAYER_STATE: PlayerState = {
 	servedBy: null,
 	exclusive: false,
 	replaygain: 'off',
+	speed: 1,
+	tuning: 440,
 	eq: NO_EQ,
 	station: null
 };
