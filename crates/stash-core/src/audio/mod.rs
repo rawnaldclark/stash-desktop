@@ -7,6 +7,7 @@
 pub mod mpv;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use mpv::{EndReason, Event, Mpv};
 
@@ -92,6 +93,9 @@ pub fn find_library() -> Option<PathBuf> {
 
 pub struct Engine {
     mpv: Mpv,
+    /// The listener asked for the sound card alone (exclusive mode). It is held only while something plays: paused,
+    /// the card is given back, so other programs are heard (see [`Engine::set_paused`]).
+    exclusive: AtomicBool,
 }
 
 impl Engine {
@@ -136,6 +140,7 @@ impl Engine {
             .collect();
         Ok(Self {
             mpv: Mpv::new(library, &borrowed, log_level)?,
+            exclusive: AtomicBool::new(matches!(output, Output::Device { exclusive: true })),
         })
     }
 
@@ -149,8 +154,47 @@ impl Engine {
         self.mpv.command(&["loadfile", locator, "append-play"])
     }
 
+    /// Pauses, or plays on. In exclusive mode a pause gives the sound card back (the output is opened again shared,
+    /// paused), so other programs are heard while Stash is quiet; playing on takes it again.
     pub fn set_paused(&self, paused: bool) -> Result<()> {
-        self.mpv.set("pause", if paused { "yes" } else { "no" })
+        if paused {
+            self.mpv.set("pause", "yes")?;
+            self.hold_card(false);
+            Ok(())
+        } else {
+            self.hold_card(true);
+            self.mpv.set("pause", "no")
+        }
+    }
+
+    /// Exclusive mode, asked for or not: held at once when something plays, otherwise when something next plays.
+    pub fn set_exclusive(&self, exclusive: bool) -> Result<()> {
+        self.exclusive.store(exclusive, Ordering::SeqCst);
+        let paused = self.mpv.get("pause").as_deref() == Some("yes");
+        let held = exclusive && !paused;
+        self.mpv
+            .set("audio-exclusive", if held { "yes" } else { "no" })?;
+        Ok(())
+    }
+
+    /// Whether the listener asked for the sound card alone (it is held only while something plays).
+    pub fn exclusive(&self) -> bool {
+        self.exclusive.load(Ordering::SeqCst)
+    }
+
+    /// In exclusive mode, takes the sound card (`hold`) or gives it back, opening the output again when that changes.
+    fn hold_card(&self, hold: bool) {
+        if !self.exclusive() {
+            return;
+        }
+        let want = if hold { "yes" } else { "no" };
+        if self.mpv.get("audio-exclusive").as_deref() == Some(want) {
+            return;
+        }
+        if self.mpv.set("audio-exclusive", want).is_ok() {
+            // With nothing playing there is no output to open again: it opens as asked with the next track.
+            let _ = self.mpv.command(&["ao-reload"]);
+        }
     }
 
     /// Jumps to `seconds` from the start of the current track, to the sample (not to the nearest packet).

@@ -1765,3 +1765,7 @@ Measured live with SoundCloud (the scratch library's, no sign-in): Tame Impala f
 ## 49. History holds every song played
 
 A play that counted was kept only for a song of the library (`plays`), so a YouTube Music search result or an extension's album played from its page never reached the history (scrobbling sent it all along). Schema 22 adds `heard`: each such play as the source that played it calls the song, and as it was shown (title, artist, album, length, cover), the newest 2,000 kept. `GET /api/history/heard`; the window's history merges both, newest first, and a heard song plays again from its source. Played songs are not made library songs: the library stays what the listener kept. Live: "Nightvision" from a YouTube search, played past half, is in the history.
+
+## 50. Exclusive mode lets go of the card while paused
+
+With "the sound card for Stash alone" on, the engine kept the card while paused, so other programs stayed silent with Stash quiet. Now a pause gives it back (the output is opened again shared, still paused) and playing on takes it again; stopped, the engine closes the output as before. The setting stays what the listener asked (`exclusive` in the player state is what was asked, not what is open now). Live, on a USB card at volume 0: playing, opened exclusive (s16, 48 kHz); paused, shared; playing again, exclusive.

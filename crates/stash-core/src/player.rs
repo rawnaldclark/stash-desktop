@@ -1881,7 +1881,7 @@ impl Player {
     /// middle of a track.
     pub fn set_exclusive(&self, exclusive: bool) -> Result<()> {
         let mpv = self.ctx.engine.mpv();
-        mpv.set("audio-exclusive", if exclusive { "yes" } else { "no" })?;
+        self.ctx.engine.set_exclusive(exclusive)?;
         self.commit_eq();
         // With nothing playing there is no output to open again: the setting holds for the next track.
         let _ = mpv.command(&["ao-reload"]);
@@ -2215,7 +2215,7 @@ impl Player {
             tier,
             served_by,
             volume: volume.round().clamp(0.0, 100.0) as u32,
-            exclusive: mpv.get("audio-exclusive").as_deref() == Some("yes"),
+            exclusive: self.ctx.engine.exclusive(),
             replaygain,
             eq,
             signal,
