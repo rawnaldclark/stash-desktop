@@ -1801,4 +1801,5 @@ What you play can now go to Last.fm too, beside ListenBrainz (Settings › Scrob
 
 ### Live
 
+- With a real application key: Last.fm took Stash's signed `auth.getToken` and gave a sign-in page; asked before the listener allowed it, `finish` said it was still waiting (error 14). Neither the key nor the secret was in the log.
 - To be measured: signing in with a real Last.fm account, a play sent and seen on the profile, the song playing now, and a play older than two weeks let go.

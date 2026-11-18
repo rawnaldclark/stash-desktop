@@ -1,8 +1,8 @@
 //! Scrobbling: the plays that count go to the listener's services (ListenBrainz, or a server that speaks its
-//! language), and each is told the song playing now. Plays wait in the library (`stash_core::scrobble`) until a service
-//! takes them, so with no connection they go out when there is one. A service that is down or busy is left a while
-//! (longer each time, up to half an hour, or as long as it asked); one that refused the token is not asked again until
-//! the token is given again.
+//! language, and Last.fm), and each is told the song playing now. Plays wait in the library (`stash_core::scrobble`)
+//! until a service takes them, so with no connection they go out when there is one. A service that is down or busy is
+//! left a while (longer each time, up to half an hour, or as long as it asked); one that refused the token is not asked
+//! again until the token is given again (for Last.fm: until the listener signs in again).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde_json::{Value, json};
+use stash_core::lastfm::{self, Allowed, Keys, Play};
 use stash_core::library::Library;
 use stash_core::listenbrainz::{self, Sent};
 use stash_core::player::{OnPlay, QueueItem};
@@ -26,11 +27,32 @@ const LONGEST_REST: Duration = Duration::from_secs(30 * 60);
 const LOOK_EVERY: Duration = Duration::from_secs(60);
 /// The longest token taken.
 const TOKEN_CAP: usize = 500;
+/// How long a Last.fm sign-in that was begun may be finished.
+const SIGN_IN_FOR: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Default)]
 pub(crate) struct Scrobbling {
     bell: Mutex<Bell>,
     rung: Condvar,
+    /// The Last.fm sign-in begun and not yet finished (one at a time): Last.fm's token for it, and when it began.
+    signing_in: Mutex<Option<(String, Instant)>>,
+}
+
+/// How a service is spoken to, by its kind.
+#[derive(Clone, Copy)]
+enum Way<'a> {
+    ListenBrainz,
+    LastFm(&'a Keys),
+}
+
+impl Way<'_> {
+    /// The most plays sent at once.
+    fn at_once(self) -> usize {
+        match self {
+            Way::ListenBrainz => listenbrainz::AT_ONCE,
+            Way::LastFm(_) => lastfm::AT_ONCE,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -144,6 +166,8 @@ fn song_of(library: &Mutex<Library>, item: &QueueItem) -> Value {
 /// Sends what waits, and tells the song playing now, until the core stops.
 pub(crate) fn run(state: &State, stop: &AtomicBool) {
     let agent = listenbrainz::agent();
+    // A build without Last.fm's keys sends nothing to Last.fm: plays kept for it wait.
+    let keys = Keys::found();
     let scrobbling = &state.scrobbling;
     // Plays left waiting last time are looked at once the core is up.
     let mut looked: Option<Instant> = None;
@@ -179,7 +203,7 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
             if scrobbling.resting(target.id) {
                 continue;
             }
-            let Some((_, url, token)) = state
+            let Some((kind, url, token)) = state
                 .library
                 .lock()
                 .unwrap()
@@ -189,12 +213,23 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
             else {
                 continue;
             };
+            let way = if kind == lastfm::KIND {
+                match &keys {
+                    Some(keys) => Way::LastFm(keys),
+                    None => continue,
+                }
+            } else {
+                Way::ListenBrainz
+            };
             if let Some(song) = &playing {
                 // Told once, as it happens: a service that misses it has the play itself later.
-                let _ = listenbrainz::now_playing(&agent, &url, &token, song);
+                let _ = match way {
+                    Way::ListenBrainz => listenbrainz::now_playing(&agent, &url, &token, song),
+                    Way::LastFm(keys) => lastfm::now_playing(&agent, keys, &token, song),
+                };
             }
             if target.waiting > 0 {
-                send_waiting(state, stop, &agent, target.id, &url, &token);
+                send_waiting(state, stop, &agent, way, target.id, &url, &token);
             }
         }
     }
@@ -205,6 +240,7 @@ fn send_waiting(
     state: &State,
     stop: &AtomicBool,
     agent: &listenbrainz::Agent,
+    way: Way<'_>,
     target: i64,
     url: &str,
     token: &str,
@@ -219,7 +255,7 @@ fn send_waiting(
     };
     // Stopping, or going offline, ends it between batches: what is left waits.
     while !stop.load(Ordering::Relaxed) && !crate::serve::offline(state) {
-        let batch = match library().waiting_scrobbles(target, listenbrainz::AT_ONCE) {
+        let batch = match library().waiting_scrobbles(target, way.at_once()) {
             Ok(batch) if batch.is_empty() => return,
             Ok(batch) => batch,
             Err(e) => return stuck(e),
@@ -236,21 +272,66 @@ fn send_waiting(
         if good.is_empty() {
             continue;
         }
-        match send(agent, url, token, &good) {
-            Sent::Taken => {
-                if let Err(e) = library().scrobbles_sent(target, &ids(&good), now_ms()) {
-                    return stuck(e);
-                }
-                state.scrobbling.rested(target);
-            }
-            Sent::Wrong(why) => {
-                if !sort_out(state, stop, agent, target, url, token, good, why) {
+        match send(agent, way, url, token, &good) {
+            Ok(each) => {
+                if took(state, target, &good, each).is_none() {
                     return;
                 }
             }
-            other => return failed(state, target, token, other),
+            Err(Sent::Wrong(why)) => {
+                if !sort_out(state, stop, agent, way, target, url, token, good, why) {
+                    return;
+                }
+            }
+            Err(other) => return failed(state, target, token, other),
         }
     }
+}
+
+/// The service answered for each play sent (`each`, in the order sent): those it kept wait no more, those it will never
+/// keep are let go, and those it will not keep today wait while it rests. How many it answered for (kept or let go), or
+/// none when it is to be left a while.
+fn took(state: &State, target: i64, plays: &[Waiting], each: Vec<Play>) -> Option<usize> {
+    let mut kept = Vec::new();
+    let mut ignored = Vec::new();
+    let mut not_today = false;
+    for (one, play) in plays.iter().zip(each) {
+        match play {
+            Play::Kept => kept.push(one.id),
+            Play::Ignored(why) => ignored.push((one.id, why)),
+            Play::NotToday => not_today = true,
+        }
+    }
+    let sent = if kept.is_empty() {
+        Ok(())
+    } else {
+        state
+            .library
+            .lock()
+            .unwrap()
+            .scrobbles_sent(target, &kept, now_ms())
+    };
+    if let Err(e) = sent {
+        eprintln!("scrobbling stopped for a while: {e:#}");
+        state.scrobbling.rest(target, None);
+        return None;
+    }
+    let answered = kept.len() + ignored.len();
+    for (id, why) in ignored {
+        let_go(state, target, id, &why);
+    }
+    if not_today {
+        let _ = state.library.lock().unwrap().scrobble_trouble(
+            target,
+            "it took as many plays as it takes in a day: the rest wait",
+            None,
+            now_ms(),
+        );
+        state.scrobbling.rest(target, Some(lastfm::NOT_TODAY));
+        return None;
+    }
+    state.scrobbling.rested(target);
+    Some(answered)
 }
 
 /// The service said a batch is wrong: each play is sent alone, and those it calls wrong are let go. But only when it
@@ -261,6 +342,7 @@ fn sort_out(
     state: &State,
     stop: &AtomicBool,
     agent: &listenbrainz::Agent,
+    way: Way<'_>,
     target: i64,
     url: &str,
     token: &str,
@@ -281,23 +363,15 @@ fn sort_out(
             if taken == 0 && wrong.len() >= NONE_TAKEN {
                 break;
             }
-            match send(agent, url, token, std::slice::from_ref(one)) {
-                Sent::Taken => {
-                    if let Err(e) =
-                        state
-                            .library
-                            .lock()
-                            .unwrap()
-                            .scrobbles_sent(target, &[one.id], now_ms())
-                    {
-                        eprintln!("scrobbling stopped for a while: {e:#}");
-                        state.scrobbling.rest(target, None);
-                        return false;
-                    }
-                    taken += 1;
-                }
-                Sent::Wrong(why) => wrong.push((one.id, why)),
-                other => {
+            let alone = std::slice::from_ref(one);
+            match send(agent, way, url, token, alone) {
+                // Kept, or let go by the service's own word on it (Last.fm's): either way it answered.
+                Ok(each) => match took(state, target, alone, each) {
+                    Some(answered) => taken += answered,
+                    None => return false,
+                },
+                Err(Sent::Wrong(why)) => wrong.push((one.id, why)),
+                Err(other) => {
                     failed(state, target, token, other);
                     return false;
                 }
@@ -321,9 +395,24 @@ fn sort_out(
     true
 }
 
-fn send(agent: &listenbrainz::Agent, url: &str, token: &str, plays: &[Waiting]) -> Sent {
+/// Sends plays to the service: what it did with each (in the order sent), or why it took none now. ListenBrainz takes
+/// a batch whole or not at all; Last.fm answers for each play.
+fn send(
+    agent: &listenbrainz::Agent,
+    way: Way<'_>,
+    url: &str,
+    token: &str,
+    plays: &[Waiting],
+) -> std::result::Result<Vec<Play>, Sent> {
     let plays: Vec<(i64, &Value)> = plays.iter().map(|w| (w.listened_at, &w.song)).collect();
-    listenbrainz::send(agent, url, token, &plays)
+    match way {
+        Way::ListenBrainz => match listenbrainz::send(agent, url, token, &plays) {
+            Sent::Taken => Ok(vec![Play::Kept; plays.len()]),
+            other => Err(other),
+        },
+        // Last.fm is asked at its own address, whatever the service's says.
+        Way::LastFm(keys) => lastfm::send(agent, keys, token, &plays),
+    }
 }
 
 /// The service will never take this play: it waits no more, and the listener is told why.
@@ -360,7 +449,76 @@ fn listed(state: &State) -> Result<Value> {
     Ok(json!({ "targets": state.library.lock().unwrap().scrobble_targets()? }))
 }
 
-/// /api/scrobbling: the services, one added (its token checked first), turned on or off, removed, or asked again.
+/// Signing in to Last.fm. `start`: Last.fm is asked for a sign-in, and its page, where the listener allows Stash, is
+/// opened in the browser (in a page served to a browser, the page opens it: `{url, opened}`). `finish`: Last.fm is
+/// asked whether the listener allowed it: `{waiting: true}` while not yet, else the service is kept (as the name
+/// Last.fm knows the listener by) and the services are answered. A sign-in not finished in 10 minutes is over.
+fn sign_in(state: &State, step: &str) -> Result<Reply> {
+    let Some(keys) = Keys::found() else {
+        return Ok(refuse(404, "This build of Stash has no Last.fm"));
+    };
+    if crate::serve::offline(state) {
+        return Ok(refuse(
+            409,
+            "Stash is offline: Last.fm is asked when you connect",
+        ));
+    }
+    let agent = listenbrainz::agent();
+    let held = &state.scrobbling.signing_in;
+    if step == "start" {
+        let token = match lastfm::begin(&agent, &keys) {
+            Ok(token) => token,
+            Err(why) => return Ok(refuse(502, &format!("Last.fm did not answer: {why}"))),
+        };
+        let page = lastfm::sign_in_page(&keys, &token);
+        *held.lock().unwrap() = Some((token, Instant::now()));
+        // In the window, the shell opens it in the browser; in a page served to a browser, the page does.
+        let opened = state.opener.as_ref().is_some_and(|open| open(&page));
+        return Ok(reply_json(200, json!({ "url": page, "opened": opened })));
+    }
+    let token = held
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|(_, at)| at.elapsed() < SIGN_IN_FOR)
+        .map(|(token, _)| token.clone());
+    let Some(token) = token else {
+        return Ok(refuse(409, "Sign in again"));
+    };
+    // The sign-in is over: one begun again meanwhile is left alone.
+    let forget = || {
+        let mut held = held.lock().unwrap();
+        if held.as_ref().is_some_and(|(t, _)| *t == token) {
+            *held = None;
+        }
+    };
+    Ok(match lastfm::allowed(&agent, &keys, &token) {
+        Allowed::NotYet => reply_json(200, json!({ "waiting": true })),
+        Allowed::Over => {
+            forget();
+            refuse(409, "Sign in again")
+        }
+        Allowed::Failed(why) => refuse(502, &format!("Last.fm did not answer: {why}")),
+        Allowed::Yes { session, user } => {
+            forget();
+            let user = (!user.is_empty()).then_some(user.as_str());
+            let id = state.library.lock().unwrap().add_scrobble_target(
+                lastfm::KIND,
+                lastfm::ADDRESS,
+                &session,
+                user,
+                now_ms(),
+            )?;
+            state.scrobbling.ring(Some(id));
+            let mut answer = listed(state)?;
+            answer["id"] = json!(id);
+            reply_json(200, answer)
+        }
+    })
+}
+
+/// /api/scrobbling: the services, one added (its token checked first, or Last.fm signed in to), turned on or off,
+/// removed, or asked again.
 pub(crate) fn route(state: &State, request: &mut Request, path: &str) -> Result<Option<Reply>> {
     if !path.starts_with("/api/scrobbling") {
         return Ok(None);
@@ -369,8 +527,18 @@ pub(crate) fn route(state: &State, request: &mut Request, path: &str) -> Result<
     if method == Method::Get && path == "/api/scrobbling" {
         return Ok(Some(reply_json(200, listed(state)?)));
     }
+    // Whether this build has Last.fm (its keys are never given).
+    if method == Method::Get && path == "/api/scrobbling/lastfm" {
+        return Ok(Some(reply_json(
+            200,
+            json!({ "available": Keys::found().is_some() }),
+        )));
+    }
     if method != Method::Post {
         return Ok(None);
+    }
+    if let Some(step @ ("start" | "finish")) = path.strip_prefix("/api/scrobbling/lastfm/") {
+        return Ok(Some(sign_in(state, step)?));
     }
     if path == "/api/scrobbling" {
         let body = body_json(request)?;

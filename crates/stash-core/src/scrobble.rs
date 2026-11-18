@@ -1,9 +1,10 @@
 //! Scrobbling: each play that counts goes to the services that keep the listener's listening history (ListenBrainz,
-//! or a server that speaks its language). A play waits in the library until the service has taken it, so plays made
-//! with no connection go out when there is one.
+//! or a server that speaks its language, and Last.fm). A play waits in the library until the service has taken it, so
+//! plays made with no connection go out when there is one.
 //!
-//! This keeps where plays go and what waits for each; `listenbrainz.rs` speaks to the services; the core's server
-//! sends. A service's token is kept here as an add-on's link is, and is never given to the window.
+//! This keeps where plays go and what waits for each; `listenbrainz.rs` and `lastfm.rs` speak to the services; the
+//! core's server sends. A service's token (Last.fm's session) is kept here as an add-on's link is, and is never given
+//! to the window.
 
 use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
@@ -19,7 +20,7 @@ pub const MOST_WAITING: i64 = 50_000;
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Target {
     pub id: i64,
-    /// How it is spoken to ("listenbrainz").
+    /// How it is spoken to ("listenbrainz", "lastfm").
     pub kind: String,
     /// Its address.
     pub url: String,

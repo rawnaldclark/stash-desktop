@@ -15,6 +15,7 @@ pub mod eq;
 pub mod folders;
 pub mod identity;
 pub mod import;
+pub mod lastfm;
 pub mod library;
 pub mod listenbrainz;
 pub mod lists;

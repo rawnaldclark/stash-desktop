@@ -4128,6 +4128,7 @@ dependencies = [
  "flate2",
  "libloading 0.9.1",
  "lofty",
+ "md-5",
  "regex",
  "rusqlite",
  "serde",
