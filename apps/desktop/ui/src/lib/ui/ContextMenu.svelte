@@ -260,6 +260,13 @@
 					close();
 				})}
 			{/if}
+			{#if !m.downloads && m.playlistId === undefined && targets.some((t) => t.refs?.[LIB_REF] !== undefined)}
+				{@render entry('delete', isGroup ? `Remove ${targets.length} from your library` : 'Remove from your library', () => {
+					if (picked) P.clear();
+					void library.removeSongs(targets).then((said) => ui.toast(said), () => {});
+					close();
+				})}
+			{/if}
 			{#if picked}
 				{#if allBlocked}
 					{@render entry('block', 'Play these songs again', () => dontPlayPicked(false))}

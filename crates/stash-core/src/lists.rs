@@ -1273,6 +1273,135 @@ impl Library {
         })
     }
 
+    /// Of the songs `ids`, the ones that can leave the library, and why the others cannot: a song in a playlist stays
+    /// (taking it out would change the playlist), and so does a file in the listener's music folders (a scan would
+    /// bring it back). A song saved to this computer can leave (its file goes with it).
+    pub fn removable(&self, ids: &[i64]) -> Result<Removable> {
+        let mut out = Removable::default();
+        let mut read = self.conn.prepare_cached(
+            "SELECT t.origin,
+                    EXISTS (SELECT 1 FROM playlist_items i WHERE i.track_id = t.id),
+                    EXISTS (SELECT 1 FROM downloads d WHERE d.track_id = t.id)
+             FROM tracks t WHERE t.id = ?1",
+        )?;
+        for &id in ids {
+            let Some((origin, listed, saved)) = read
+                .query_row([id], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, bool>(1)?,
+                        r.get::<_, bool>(2)?,
+                    ))
+                })
+                .optional()?
+            else {
+                continue;
+            };
+            if listed {
+                out.in_playlists += 1;
+            } else if origin == "file" && !saved {
+                out.in_folders += 1;
+            } else {
+                out.ids.push(id);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Takes songs out of the library for good: the songs `ids` that [`Library::removable`] allows (call
+    /// [`Library::forget_downloads`] first for a saved one, so it is no longer a file). What was played of each stays
+    /// in the history as heard (by the source that knows it), its like goes with it, and an album or artist left with
+    /// no song goes too. Answers how many left.
+    pub fn remove_songs(&mut self, ids: &[i64]) -> Result<usize> {
+        let ids = self.removable(ids)?.ids;
+        let tx = self.conn.transaction()?;
+        let mut removed = 0;
+        {
+            let mut song = tx.prepare(
+                "SELECT t.title, a.name, al.title, t.duration_ms, t.art_url, t.origin,
+                        (SELECT r.source || char(10) || r.ref FROM track_refs r WHERE r.track_id = t.id
+                         ORDER BY r.source = 'library', r.source LIMIT 1)
+                 FROM tracks t JOIN artists a ON a.id = t.artist_id LEFT JOIN albums al ON al.id = t.album_id
+                 WHERE t.id = ?1",
+            )?;
+            let mut plays = tx.prepare("SELECT played_at_ms FROM plays WHERE track_id = ?1")?;
+            let mut heard = tx.prepare(
+                "INSERT OR IGNORE INTO heard(source, ref, title, artist, album, duration_ms, art_url, played_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?;
+            for &id in &ids {
+                type Song = (
+                    String,
+                    String,
+                    Option<String>,
+                    Option<i64>,
+                    Option<String>,
+                    String,
+                    Option<String>,
+                );
+                let Some((title, artist, album, duration_ms, art, origin, from)): Option<Song> =
+                    song.query_row([id], |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                            r.get(6)?,
+                        ))
+                    })
+                    .optional()?
+                else {
+                    continue;
+                };
+                // Still a file (it was not taken off the list of saved songs first): it stays.
+                if origin == "file" {
+                    continue;
+                }
+                if let Some((source, theirs)) = from.as_deref().and_then(|f| f.split_once('\n')) {
+                    let times = plays
+                        .query_map([id], |r| r.get::<_, i64>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    for at in times {
+                        heard.execute(params![
+                            source,
+                            theirs,
+                            title,
+                            artist,
+                            album,
+                            duration_ms,
+                            art,
+                            at
+                        ])?;
+                    }
+                }
+                for sql in [
+                    "DELETE FROM plays WHERE track_id = ?1",
+                    "DELETE FROM download_declined WHERE track_id = ?1",
+                    "DELETE FROM tracks_fts WHERE rowid = ?1",
+                    "DELETE FROM tracks WHERE id = ?1",
+                ] {
+                    tx.execute(sql, [id])?;
+                }
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            tx.execute(
+                "DELETE FROM albums WHERE NOT EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = albums.id)",
+                [],
+            )?;
+            tx.execute(
+                "DELETE FROM artists WHERE NOT EXISTS (SELECT 1 FROM tracks t WHERE t.artist_id = artists.id)
+                   AND NOT EXISTS (SELECT 1 FROM albums al WHERE al.artist_id = artists.id)",
+                [],
+            )?;
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+
     /// A play that counted of a song the library does not have (`heard.source` played it): kept with how it was shown,
     /// the newest [`HEARD_KEPT`] of them. False when that play is already kept.
     pub fn record_heard(&mut self, heard: &Heard) -> Result<bool> {
@@ -1510,6 +1639,16 @@ impl Library {
     }
 }
 
+/// Of some songs, the ones that can leave the library ([`Library::removable`]), and how many cannot.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Removable {
+    pub ids: Vec<i64>,
+    /// In a playlist: taking them out would change it.
+    pub in_playlists: usize,
+    /// Files in the listener's music folders.
+    pub in_folders: usize,
+}
+
 /// How many plays of songs the library does not have are kept.
 pub const HEARD_KEPT: usize = 2_000;
 
@@ -1530,6 +1669,55 @@ pub struct Heard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_song_leaves_the_library_and_its_plays_stay_heard() {
+        let mut library = Library::open_in_memory().unwrap();
+        let song = |title: &str, album: &str| Song {
+            title: title.into(),
+            artist: "Someone".into(),
+            album: Some(album.into()),
+            duration_ms: Some(200_000),
+            refs: vec![("youtube".into(), format!("yt-{title}"))],
+            ..Default::default()
+        };
+        let a = library.adopt(&song("A", "First")).unwrap();
+        let b = library.adopt(&song("B", "Second")).unwrap();
+        let c = library.adopt(&song("C", "Second")).unwrap();
+        library.record_play(a, 1_000).unwrap();
+        // C is in a playlist: it stays.
+        let list = library.create_playlist("Mine", 5).unwrap();
+        library.add_to_playlist(list, &[c], 6).unwrap();
+        let can = library.removable(&[a, b, c, 999]).unwrap();
+        assert_eq!(
+            (can.ids.clone(), can.in_playlists, can.in_folders),
+            (vec![a, b], 1, 0)
+        );
+        assert_eq!(library.remove_songs(&[a, b, c]).unwrap(), 2);
+        assert!(library.describe(a).unwrap().is_none());
+        assert!(library.describe(c).unwrap().is_some());
+        // A's play is in the history still, as heard from YouTube Music.
+        let heard = library.heard_at(0, 10).unwrap();
+        assert_eq!(heard.len(), 1);
+        assert_eq!(
+            (
+                heard[0].source.as_str(),
+                heard[0].track.as_str(),
+                heard[0].played_at_ms
+            ),
+            ("youtube", "yt-A", 1_000)
+        );
+        // "First" had only A: it is gone; "Second" keeps C.
+        let albums: Vec<String> = library
+            .conn
+            .prepare("SELECT title FROM albums ORDER BY title")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(albums, vec!["Second".to_string()]);
+    }
 
     #[test]
     fn plays_of_songs_the_library_does_not_have_are_kept_newest_first() {

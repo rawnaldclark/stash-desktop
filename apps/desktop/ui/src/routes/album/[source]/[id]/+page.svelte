@@ -99,6 +99,27 @@
 			keeping = false;
 		}
 	}
+	// Out of the library again (its songs in a playlist stay); Undo puts it back.
+	async function dropAlbum() {
+		if (!album || keeping) return;
+		keeping = true;
+		const [title, list] = [album.title, items];
+		try {
+			const said = await library.removeSongs(list);
+			kept = await library.countKept(sid, list).catch(() => 0);
+			ui.toast(said.startsWith('Removed') ? `Removed “${title}” from your library${said.includes(' · ') ? said.slice(said.indexOf(' · ')) : ''}` : said, {
+				label: 'Undo',
+				run: () =>
+					void library.keepSongs(list).then(() => {
+						if (list === items) kept = list.length;
+					})
+			});
+		} catch {
+			/* said by the shell (the core's own words) */
+		} finally {
+			keeping = false;
+		}
+	}
 	// A YouTube Music playlist is followed: a playlist of yours whose songs are that list's, kept up to date.
 	const following = $derived(sid === YOUTUBE && isPlaylist ? L.playlists.find((p) => p.followsTube === id) : undefined);
 	let followingNow = $state(false);
@@ -162,7 +183,7 @@
 			{/if}
 			{#if foreign}
 				{#if allKept}
-					<button type="button" class="act-ib act-on" aria-label="{album.title} is in your library" title="In your library" onclick={() => ui.toast(`“${album?.title}” is in your library`)}><Icon name="library_add_check" /></button>
+					<button type="button" class="act-ib act-on" aria-label="Remove {album.title} from your library" title="In your library: remove it" disabled={keeping} onclick={() => void dropAlbum()}><Icon name="library_add_check" /></button>
 				{:else}
 					<button type="button" class="act-ib" aria-label="Add {album.title} to your library" title="Add to your library" disabled={!items.length || keeping || kept === null} onclick={() => void keepAlbum()}><Icon name="library_add" /></button>
 				{/if}

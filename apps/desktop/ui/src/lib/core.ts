@@ -198,6 +198,8 @@ export const likeTrack = (id: number, liked: boolean) => post<Changed>('/api/tra
 export const keepFound = (addon: string, track: KeptTrack) => post<Changed>('/api/tracks/keep', { addon, track });
 /** Which of a source's songs (by what it calls them) the library has: each one's row, or null. */
 export const knownRows = (addon: string, ids: string[]) => post<{ rows: (number | null)[] }>('/api/tracks/known', { addon, ids });
+/** Takes songs out of the library (a saved one's file goes too). A song in a playlist, and a file of the music folders, stay: the answer counts them. */
+export const removeSongs = (ids: number[]) => post<Changed & { removed: number; in_playlists: number; in_folders: number }>('/api/library/remove', { ids });
 export const createPlaylist = (name: string) => post<Changed>('/api/playlists', { name });
 /** Follows the YouTube Music playlist `id` ("VL…"), or reads it again: the answer's `id` is the playlist that follows it. */
 export const followTube = (id: string) => post<Changed & { changed?: boolean }>('/api/youtube/follow', { id });

@@ -743,6 +743,37 @@ pub(crate) fn route(
     path: &str,
     param: &dyn Fn(&str) -> Option<String>,
 ) -> anyhow::Result<Option<Reply>> {
+    // Songs out of the library for good: a saved one's file goes first (as when it is taken off the saved songs).
+    // A song in a playlist, and a file of the music folders, stay: the answer says how many.
+    if path == "/api/library/remove" && *request.method() == Method::Post {
+        let ids = ids_of(&body_json(request)?);
+        let can = state.library.lock().unwrap().removable(&ids)?;
+        let files = state.library.lock().unwrap().forget_downloads(&can.ids)?;
+        let root = folder(&state.library.lock().unwrap());
+        for file in &files {
+            let file = Path::new(file);
+            remove_saved(
+                file,
+                file.parent()
+                    .filter(|_| !file.starts_with(&root))
+                    .unwrap_or(&root),
+            );
+        }
+        let removed = state.library.lock().unwrap().remove_songs(&can.ids)?;
+        let library = state.library.lock().unwrap();
+        let mut answer = json!({
+            "removed": removed,
+            "in_playlists": can.in_playlists,
+            "in_folders": can.in_folders,
+            "playlists": library.playlists()?,
+            "folders": library.playlist_folders()?,
+            "counts": library.counts()?,
+        });
+        drop(library);
+        state.edited();
+        answer["edits"] = json!(state.edits.load(Ordering::Relaxed));
+        return Ok(Some(reply_json(200, answer)));
+    }
     if !path.starts_with("/api/downloads") {
         return Ok(None);
     }

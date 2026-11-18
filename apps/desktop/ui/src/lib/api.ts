@@ -191,6 +191,8 @@ export interface LibraryAPI {
 	addToPlaylist(id: string, items: LibraryItem[]): Promise<void>;
 	/** Puts songs found elsewhere (an album of YouTube Music's, of an extension's) in the library: they are its songs from then on. */
 	keepSongs(items: LibraryItem[]): Promise<void>;
+	/** Takes songs out of the library (those in a playlist, and files of the music folders, stay). Answers the words to say. */
+	removeSongs(items: LibraryItem[]): Promise<string>;
 	/** How many of `items` (all from `sourceId`) the library has. */
 	countKept(sourceId: string, items: LibraryItem[]): Promise<number>;
 	removeFromPlaylist(id: string, index: number): Promise<void>;

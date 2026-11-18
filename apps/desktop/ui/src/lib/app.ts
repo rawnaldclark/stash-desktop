@@ -757,6 +757,36 @@ const library: LibraryAPI = {
 			}
 			if (last) await took(last);
 		}),
+	removeSongs: (items) =>
+		change(async () => {
+			// The library's rows: a song's own, or (a song shown as a source's) the row that source's name for it has.
+			const ids = new Set<number>();
+			const bySource = new Map<string, string[]>();
+			for (const it of items) {
+				const id = libIdOf(it);
+				if (id !== null) {
+					ids.add(id);
+					continue;
+				}
+				const a = addonRefOf(it);
+				if (a) bySource.set(a.addon, [...(bySource.get(a.addon) ?? []), a.track.id]);
+			}
+			for (const [source, refs] of bySource) {
+				const { rows } = await core.knownRows(source, refs);
+				for (const r of rows) if (r !== null) ids.add(r);
+			}
+			if (!ids.size) return 'Not in your library';
+			const c = await core.removeSongs([...ids]);
+			await took(c);
+			await Promise.all([loadLibrary(), loadLikes(), loadHistory()]).catch(() => {});
+			relisted();
+			const stayed = [
+				c.in_playlists ? `${c.in_playlists === 1 ? 'one is' : `${c.in_playlists} are`} in a playlist` : '',
+				c.in_folders ? `${c.in_folders === 1 ? 'one is' : `${c.in_folders} are`} in your music folders` : ''
+			].filter(Boolean);
+			const gone = c.removed === 0 ? 'Nothing removed' : c.removed === 1 ? 'Removed from your library' : `Removed ${c.removed} songs from your library`;
+			return stayed.length ? `${gone} · ${stayed.join(', ')}` : gone;
+		}),
 	async countKept(sourceId, items) {
 		const ids = items.map((i) => i.refs[sourceId]).filter((x): x is string => typeof x === 'string');
 		if (!ids.length) return 0;
