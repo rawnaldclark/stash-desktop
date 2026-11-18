@@ -51,6 +51,7 @@
 		if (!now) return '';
 		if (now.state === 'taking') return `Taking ${songs(now.total)} from ${now.phone ?? 'your phone'}: ${now.done} done`;
 		if (now.state === 'preparing') return `${now.phone ?? 'Your phone'} is getting songs ready…`;
+		if (now.state === 'stopped') return `Lost contact with ${now.phone ?? 'your phone'}. Unplug it, plug it back in and choose File transfer.`;
 		const phone = now.phones[0];
 		if (!phone) return 'No phone found. Plug it in, then choose File transfer in its USB notification.';
 		if (phone.has_songs === null) return `${phone.name} is plugged in. Looking for songs…`;

@@ -66,8 +66,10 @@
 				};
 			case 'stopped':
 				return {
-					title: `${from} was unplugged`,
-					lines: [`${now.done} of ${now.total} songs came in. Plug it back in and choose File transfer: the rest come in by themselves.`],
+					title: `Lost contact with ${from}`,
+					lines: [
+						`${now.total ? `${now.done} of ${now.total} songs came in. ` : ''}Unplug the phone, plug it back in and choose File transfer: the rest come in by themselves.`
+					],
 					bar: undefined
 				};
 			case 'done': {

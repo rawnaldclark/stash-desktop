@@ -264,6 +264,31 @@ fn take_one(
 }
 
 /// Takes a phone's transfer, if it has a whole one (its list is there) not taken before.
+/// A failed song counts as done, for the count shown.
+fn continue_failed(now: &mut Now, file: &stash_core::phone::PhoneFile) {
+    now.done += 1;
+    now.bytes_done += file.size;
+    set(now.clone());
+}
+
+/// What Windows says when the phone is no longer there to answer: unreachable, not connected, not ready, the device
+/// closed, a general failure of the link.
+fn lost(why: &str) -> bool {
+    [
+        "0x80070141",
+        "0x8007048f",
+        "0x80070015",
+        "0x802a0002",
+        "0x8007001f",
+        "0x80070079",
+    ]
+    .iter()
+    .any(|code| why.contains(code))
+}
+
+/// This many songs failing one after another: the phone is taken as gone.
+const LOST_AFTER: usize = 3;
+
 fn take(
     state: &State,
     phone: &stash_core::phone::Phone,
@@ -278,8 +303,26 @@ fn take(
     else {
         return;
     };
-    let Ok(bytes) = transfer.bytes(list_file, LIST_CAP) else {
-        return;
+    let bytes = match transfer.bytes(list_file, LIST_CAP) {
+        Ok(bytes) => bytes,
+        Err(why) => {
+            // Listed but not answering (its USB connection dropped): said once, as a transfer cut short.
+            if lost(&why) {
+                let mut now = NOW.lock().unwrap();
+                let said = now.as_ref().is_some_and(|n| {
+                    n.state == "stopped" && n.phone.as_deref() == Some(phone.name.as_str())
+                });
+                if !said {
+                    *now = Some(Now {
+                        state: "stopped",
+                        phone: Some(phone.name.clone()),
+                        at_ms: now_ms(),
+                        ..Default::default()
+                    });
+                }
+            }
+            return;
+        }
     };
     let Ok(list) = serde_json::from_slice::<List>(&bytes) else {
         return;
@@ -329,6 +372,7 @@ fn take(
         here.len(),
         now.done
     );
+    let mut in_a_row = 0;
     for sent in here {
         if stop.load(Ordering::Relaxed) {
             return;
@@ -347,23 +391,31 @@ fn take(
                 let _ = transfer.remove_file(file);
             }
             Err(why) => {
-                // Unplugged (or File transfer turned off): stop, and say so; plugged in again, the rest is taken.
-                let gone = !stash_core::phone::phones()
-                    .map(|p| p.iter().any(|p| p.id == phone.id))
-                    .unwrap_or(true);
+                // The phone gone (unplugged, File transfer turned off, its USB connection dropped: Windows can list
+                // a phone for a while after it stops answering): stop, and say so; plugged in again, the rest is
+                // taken. Songs failing one after another are taken as the phone gone too.
+                in_a_row += 1;
+                let gone = lost(&why)
+                    || in_a_row >= LOST_AFTER
+                    || !stash_core::phone::phones()
+                        .map(|p| p.iter().any(|p| p.id == phone.id))
+                        .unwrap_or(true);
                 if gone {
                     now.state = "stopped";
                     now.song = None;
                     now.at_ms = now_ms();
-                    eprintln!("phone: unplugged after {} songs", now.done);
+                    eprintln!("phone: lost the phone after {} songs: {why}", now.done);
                     set(now);
                     state.edited();
                     return;
                 }
                 now.failed += 1;
                 eprintln!("phone: a song was not taken: {why}");
+                continue_failed(&mut now, file);
+                continue;
             }
         }
+        in_a_row = 0;
         now.done += 1;
         now.bytes_done += file.size;
         set(now.clone());
