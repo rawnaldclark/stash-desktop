@@ -69,6 +69,36 @@
 		player.enqueue(items);
 		ui.toast(`Added ${songs(items.length)} to Up next`);
 	};
+	// An album found elsewhere (YouTube Music's, an extension's) is put in the library: its songs become yours, and the
+	// album is listed with your albums. `kept`: how many of its songs the library has (null while that is asked).
+	let kept = $state<number | null>(null);
+	let keeping = $state(false);
+	const foreign = $derived(sid !== LIBRARY_SOURCE && !isPlaylist);
+	$effect(() => {
+		const [s, list] = [sid, items];
+		kept = null;
+		if (s === LIBRARY_SOURCE || !list.length) return;
+		void library.countKept(s, list).then(
+			(n) => {
+				if (s === sid && list === items) kept = n;
+			},
+			() => {}
+		);
+	});
+	const allKept = $derived(kept !== null && kept >= items.length && items.length > 0);
+	async function keepAlbum() {
+		if (!album || !items.length || allKept || keeping) return;
+		keeping = true;
+		try {
+			await library.keepSongs(items);
+			kept = items.length;
+			ui.toast(`Added “${album.title}” to your library`);
+		} catch {
+			/* said by the shell (the core's own words) */
+		} finally {
+			keeping = false;
+		}
+	}
 	// The album becomes a playlist with its name (saved once; a second tap says so).
 	async function save() {
 		if (!album || !items.length) return;
@@ -108,6 +138,13 @@
 			<button type="button" class="act-play" aria-label="Play {album.title}" disabled={!items.length} onclick={() => play()}><Icon name="play_arrow" /></button>
 			<button type="button" class="act-ib" aria-label="Shuffle {album.title}" title="Shuffle" disabled={!items.length} onclick={() => { player.setShuffle(true); play(); }}><Icon name="shuffle" /></button>
 			<button type="button" class="act-ib" aria-label="Add {album.title} to Up next" title="Add to Up next" disabled={!items.length} onclick={upNext}><Icon name="queue_play_next" /></button>
+			{#if foreign}
+				{#if allKept}
+					<button type="button" class="act-ib act-on" aria-label="{album.title} is in your library" title="In your library" onclick={() => ui.toast(`“${album?.title}” is in your library`)}><Icon name="library_add_check" /></button>
+				{:else}
+					<button type="button" class="act-ib" aria-label="Add {album.title} to your library" title="Add to your library" disabled={!items.length || keeping || kept === null} onclick={() => void keepAlbum()}><Icon name="library_add" /></button>
+				{/if}
+			{/if}
 			<button type="button" class="act-ib" aria-label="Save {album.title} as a playlist" title="Save as a playlist" disabled={!items.length} onclick={() => void save()}><Icon name="playlist_add" /></button>
 		</div>
 		{#if items.length}
@@ -122,3 +159,7 @@
 		{/if}
 	{/if}
 </div>
+
+<style>
+	.act-on { color: var(--acc); }
+</style>

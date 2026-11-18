@@ -2651,7 +2651,11 @@ fn lists_route(state: &State, request: &mut Request, path: &str) -> Result<Optio
         .and_then(|(id, verb)| Some((id.parse::<i64>().ok()?, verb)));
     if !matches!(
         path,
-        "/api/tracks/like" | "/api/tracks/keep" | "/api/playlists" | "/api/playlists/preview"
+        "/api/tracks/like"
+            | "/api/tracks/keep"
+            | "/api/tracks/known"
+            | "/api/playlists"
+            | "/api/playlists/preview"
     ) && playlist_verb.is_none()
     {
         return Ok(None);
@@ -2673,6 +2677,30 @@ fn lists_route(state: &State, request: &mut Request, path: &str) -> Result<Optio
             200,
             json!({ "count": count, "rows": rows }),
         )));
+    }
+    // Which of a source's songs (by what it calls them) the library has: their rows, or null. Nothing changes.
+    if path == "/api/tracks/known" {
+        let source = body
+            .get("addon")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let theirs: Vec<String> = body
+            .get("ids")
+            .and_then(Value::as_array)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(Value::as_str)
+                    .take(PAGE_CAP)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let rows = state
+            .library
+            .lock()
+            .unwrap()
+            .rows_of_refs(source, &theirs)?;
+        return Ok(Some(reply_json(200, json!({ "rows": rows }))));
     }
     let number = |name: &str| body.get(name).and_then(Value::as_u64).map(|n| n as usize);
     let mut library = state.library.lock().unwrap();

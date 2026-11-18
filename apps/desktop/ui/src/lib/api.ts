@@ -184,6 +184,10 @@ export interface LibraryAPI {
 	renamePlaylist(id: string, name: string): Promise<void>;
 	deletePlaylist(id: string): Promise<void>;
 	addToPlaylist(id: string, items: LibraryItem[]): Promise<void>;
+	/** Puts songs found elsewhere (an album of YouTube Music's, of an extension's) in the library: they are its songs from then on. */
+	keepSongs(items: LibraryItem[]): Promise<void>;
+	/** How many of `items` (all from `sourceId`) the library has. */
+	countKept(sourceId: string, items: LibraryItem[]): Promise<number>;
 	removeFromPlaylist(id: string, index: number): Promise<void>;
 	/** Moves the song at `from` to position `to` (both in range; otherwise ignored). */
 	moveInPlaylist(id: string, from: number, to: number): Promise<void>;

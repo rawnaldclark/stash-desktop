@@ -823,6 +823,23 @@ impl Library {
         Ok(Some(Described::of(wanted, refs)))
     }
 
+    /// The library's row for each of `source`'s songs `theirs` (what that source calls them), in their order: `None`
+    /// for one the library does not have.
+    pub fn rows_of_refs(&self, source: &str, theirs: &[String]) -> Result<Vec<Option<i64>>> {
+        use rusqlite::OptionalExtension;
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT track_id FROM track_refs WHERE source = ?1 AND ref = ?2 LIMIT 1",
+        )?;
+        theirs
+            .iter()
+            .map(|one| {
+                Ok(stmt
+                    .query_row(params![source, one], |r| r.get(0))
+                    .optional()?)
+            })
+            .collect()
+    }
+
     /// Keeps what `source` calls the song `id` (in place of what it called it before).
     pub fn set_ref(&mut self, id: i64, source: &str, theirs: &str) -> Result<()> {
         self.conn.execute(

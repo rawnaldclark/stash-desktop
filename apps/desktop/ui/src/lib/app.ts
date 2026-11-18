@@ -722,6 +722,23 @@ const library: LibraryAPI = {
 	setPlaylistRules: (id, rules) => change(async () => took(await core.setPlaylistRules(pid(id), rules), [pid(id)])),
 	renamePlaylist: (id, name) => quiet(change(async () => took(await core.renamePlaylist(pid(id), name.trim())))),
 	deletePlaylist: (id) => change(async () => took(await core.deletePlaylist(pid(id)))),
+	keepSongs: (items) =>
+		change(async () => {
+			// Each song the library does not have yet is kept; the last answer carries the library as it now is.
+			let last: core.Changed | null = null;
+			for (const it of items) {
+				if (libIdOf(it) !== null) continue;
+				const a = addonRefOf(it);
+				if (a) last = await core.keepFound(a.addon, a.track);
+			}
+			if (last) await took(last);
+		}),
+	async countKept(sourceId, items) {
+		const ids = items.map((i) => i.refs[sourceId]).filter((x): x is string => typeof x === 'string');
+		if (!ids.length) return 0;
+		const { rows } = await core.knownRows(sourceId, ids);
+		return rows.filter((r) => r !== null).length;
+	},
 	addToPlaylist: (id, items) =>
 		change(async () => {
 			const ids: number[] = [];

@@ -1364,6 +1364,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_sources_songs_are_found_by_what_it_calls_them() {
+        let mut library = Library::open_in_memory().unwrap();
+        let kept = library
+            .adopt(&crate::import::Song {
+                title: "One More Time".into(),
+                artist: "Daft Punk".into(),
+                refs: vec![("youtube".into(), "FGBhQbmPwH8".into())],
+                ..Default::default()
+            })
+            .unwrap();
+        let asked = ["FGBhQbmPwH8".to_string(), "not-kept".to_string()];
+        assert_eq!(
+            library.rows_of_refs("youtube", &asked).unwrap(),
+            vec![Some(kept), None]
+        );
+        // What another source calls a song is its own.
+        assert_eq!(
+            library.rows_of_refs("mornye.abc", &asked).unwrap(),
+            vec![None, None]
+        );
+    }
+
+    #[test]
     fn a_songs_unsure_tries_are_kept_and_strike_only_after_another_song_was_saved() {
         let mut library = Library::open_in_memory().unwrap();
         let song = |title: &str| crate::import::Song {

@@ -190,6 +190,8 @@ export type Changed = { playlists: PlaylistRow[]; counts: Counts; folders?: Fold
 export const likeTrack = (id: number, liked: boolean) => post<Changed>('/api/tracks/like', { id, liked });
 /** Makes a track an add-on found a song of the library; the answer's `id` is its row. */
 export const keepFound = (addon: string, track: KeptTrack) => post<Changed>('/api/tracks/keep', { addon, track });
+/** Which of a source's songs (by what it calls them) the library has: each one's row, or null. */
+export const knownRows = (addon: string, ids: string[]) => post<{ rows: (number | null)[] }>('/api/tracks/known', { addon, ids });
 export const createPlaylist = (name: string) => post<Changed>('/api/playlists', { name });
 /** What a playlist file brought in: the new playlist, and what came of its entries (files the library had, files it
  * added, songs found by their words, and entries left out). */
