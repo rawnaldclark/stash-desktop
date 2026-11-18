@@ -1,4 +1,5 @@
 <script lang="ts">
+	import PhoneTransfer from '../lib/desktop/PhoneTransfer.svelte';
 	import '../lib/styles/tokens.css';
 	import '../lib/styles/base.css';
 	import '../lib/styles/shell.css';
@@ -223,6 +224,7 @@
 	{#if ui.choices}<ChoiceMenu />{/if}
 	<PickBar />
 	<Toast />
+	<PhoneTransfer />
 	{#if ui.palette}<CommandPalette />{/if}
 	{#if ui.smart}<SmartEditor />{/if}
 </div>

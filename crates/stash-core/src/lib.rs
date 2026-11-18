@@ -22,6 +22,7 @@ pub mod listenbrainz;
 pub mod lists;
 pub mod lyrics;
 pub mod matching;
+pub mod phone;
 pub mod played;
 pub mod player;
 pub mod playlist_file;

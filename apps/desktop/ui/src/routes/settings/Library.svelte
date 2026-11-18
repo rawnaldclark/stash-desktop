@@ -3,6 +3,7 @@
 <script lang="ts">
 	import { goOffline, library } from '../../lib/app';
 	import * as core from '../../lib/core';
+	import FromPhone from '../../lib/desktop/FromPhone.svelte';
 	import { folders, lastPart, many, trouble, type Notice } from '../../lib/desktop/folders.svelte';
 	import { importPlaylistFile } from '../../lib/desktop/playlist-files';
 	import { ui } from '../../lib/ui/state.svelte';
@@ -147,6 +148,7 @@
 			<button type="button" class="btn ghost" aria-label="Export a library file" onclick={saveFile}>Export</button>
 		</div>
 	</div>
+	<FromPhone />
 	<div class="set-row">
 		<div class="set-lab">
 			<span class="set-name">Import a playlist</span>

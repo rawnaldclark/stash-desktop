@@ -1548,6 +1548,11 @@ impl Core {
                 let (state, stop) = (&state, &stop);
                 scope.spawn(move || crate::discover::run(state, stop));
             }
+            // A phone plugged in with songs sent from Stash for Android: taken into the library.
+            {
+                let (state, stop) = (&state, &stop);
+                scope.spawn(move || crate::phone_transfer::run(state, stop));
+            }
             // The shortcuts as the listener left them (the shell holds them once its window is up).
             if state.shortcuts.shell.is_some() {
                 let state = &state;
@@ -3071,6 +3076,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::discover::route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::phone_transfer::route(state, request, &path)? {
         return Ok((response, false));
     }
     if let Some(response) = crate::youtube_pages::route(state, request, &path, &param)? {

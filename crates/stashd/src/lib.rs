@@ -11,6 +11,7 @@ mod folders;
 mod following;
 mod kept;
 mod mornye;
+mod phone_transfer;
 mod pieces;
 mod playlist_files;
 mod radio;

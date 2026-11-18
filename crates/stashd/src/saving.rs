@@ -641,7 +641,7 @@ fn trouble_of(failure: Failure) -> Trouble {
 }
 
 /// Deletes a saved file, and its album and artist folders when they are left empty (never `root` itself).
-fn remove_saved(file: &Path, root: &Path) {
+pub(crate) fn remove_saved(file: &Path, root: &Path) {
     let _ = std::fs::remove_file(file);
     let mut folder = file.parent();
     while let Some(dir) = folder {

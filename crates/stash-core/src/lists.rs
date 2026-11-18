@@ -610,6 +610,18 @@ impl Library {
         )?)
     }
 
+    /// A file for song `id` is coming in from somewhere other than an add-on (a phone's transfer): its download is
+    /// "saving", for [`Self::download_saved`] to finish. False when the song is a file already.
+    pub fn download_arriving(&mut self, id: i64, now_ms: i64) -> Result<bool> {
+        let n = self.conn.execute(
+            "INSERT INTO downloads(track_id, state, asked_at)
+             SELECT id, 'saving', ?2 FROM tracks WHERE id = ?1 AND origin <> 'file'
+             ON CONFLICT(track_id) DO UPDATE SET state = 'saving', error = NULL WHERE downloads.state <> 'saved'",
+            params![id, now_ms],
+        )?;
+        Ok(n > 0)
+    }
+
     pub fn download_failed(&mut self, id: i64, why: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE downloads SET state = 'failed', error = ?2 WHERE track_id = ?1 AND state = 'saving'",
@@ -2184,6 +2196,63 @@ mod tests {
             library.rows_of_refs("mornye.abc", &asked).unwrap(),
             vec![None, None]
         );
+    }
+
+    #[test]
+    fn a_file_from_a_phone_arrives_for_any_song_not_saved_already() {
+        let mut library = Library::open_in_memory().unwrap();
+        let song = |title: &str| crate::import::Song {
+            title: title.into(),
+            artist: "Someone".into(),
+            ..Default::default()
+        };
+        let ids = library
+            .adopt_songs(&[song("Alpha"), song("Bravo"), song("Charlie")])
+            .unwrap();
+        let state = |library: &Library, id: i64| -> Option<String> {
+            library
+                .conn
+                .query_row(
+                    "SELECT state FROM downloads WHERE track_id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .ok()
+        };
+        // Not on the list, on it, failed before: each is saving now.
+        library.ask_downloads(&ids[1..2], 1).unwrap();
+        library
+            .conn
+            .execute(
+                "INSERT INTO downloads(track_id, state, asked_at) VALUES (?1, 'failed', 1)",
+                [ids[2]],
+            )
+            .unwrap();
+        for &id in &ids {
+            assert!(library.download_arriving(id, 5).unwrap());
+            assert_eq!(state(&library, id).as_deref(), Some("saving"));
+        }
+        // Saved already: left as it is.
+        library
+            .conn
+            .execute(
+                "UPDATE downloads SET state = 'saved' WHERE track_id = ?1",
+                [ids[0]],
+            )
+            .unwrap();
+        assert!(!library.download_arriving(ids[0], 6).unwrap());
+        assert_eq!(state(&library, ids[0]).as_deref(), Some("saved"));
+        // A song from the music folders is a file already: no download.
+        library
+            .conn
+            .execute("UPDATE tracks SET origin = 'file' WHERE id = ?1", [ids[1]])
+            .unwrap();
+        library
+            .conn
+            .execute("DELETE FROM downloads WHERE track_id = ?1", [ids[1]])
+            .unwrap();
+        assert!(!library.download_arriving(ids[1], 7).unwrap());
+        assert_eq!(state(&library, ids[1]), None);
     }
 
     #[test]
