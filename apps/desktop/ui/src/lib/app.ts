@@ -82,6 +82,7 @@ export function itemOfRow(r: core.TrackRow): LibraryItem {
 	if (r.album_id !== null && r.album_id !== undefined) item.albumRefs = { [LIBRARY_SOURCE]: String(r.album_id) };
 	if (r.artist_id !== null && r.artist_id !== undefined) item.artistRefs = { [LIBRARY_SOURCE]: String(r.artist_id) };
 	if (r.here === false) item.here = false;
+	if (r.origin === 'file') item.saved = true;
 	if (r.blocked) item.blocked = r.blocked;
 	fromRow.set(r, item);
 	remember(r.id, item, r.bit_depth ?? null);

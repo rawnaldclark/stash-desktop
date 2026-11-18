@@ -100,7 +100,7 @@
 			<span class="tr-n">{#if current}<i class="eq" class:still={!playing} aria-hidden="true"><b></b><b></b><b></b></i>{:else}{num}{/if}</span>
 		{/if}
 		{#if cover}<Cover artwork={item.artwork} seed={item.title} min={80} class="cv trk-cv" />{/if}
-		<span class="tr-t"><b>{item.title}</b><i>{#if tag}<span class="fmt tr-tag">{tag}</span>{/if}<Credit credit={item.artist} to={artistTo} cls="nl" /></i></span>
+		<span class="tr-t"><b>{item.title}</b><i>{#if item.saved}<Icon name="check_circle" class="kept-mk" label="On this computer" />{/if}{#if tag}<span class="fmt tr-tag">{tag}</span>{/if}<Credit credit={item.artist} to={artistTo} cls="nl" /></i></span>
 		{#if album}<span class="tr-al">{#if albumTo && item.album}<a class="nl" href={albumHref(albumTo)}>{item.album}</a>{:else}{item.album ?? ''}{/if}</span>{/if}
 		<span class="tr-d">{item.durationMs ? mmss(item.durationMs) : ''}</span>
 	</div>

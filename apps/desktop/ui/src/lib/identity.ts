@@ -22,6 +22,8 @@ export type LibraryItem = Descriptor & {
 	artistRefs?: Record<string, string>;
 	/** False for a song that does not play with no connection (it plays from an add-on): offline, it is drawn dimmed. */
 	here?: boolean;
+	/** A file on this computer: saved (downloaded), or one of the listener's own music folders. */
+	saved?: boolean;
 	/** The listener chose not to play it: this song ("song"), or every song of its artist ("artist"). */
 	blocked?: 'song' | 'artist';
 };

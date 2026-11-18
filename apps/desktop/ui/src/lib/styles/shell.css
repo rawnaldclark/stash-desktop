@@ -87,8 +87,8 @@ body.carrying, body.carrying * { cursor: grabbing !important; user-select: none;
 @container wp (max-width: 1099.98px) {
 	.side { align-items: center; padding: 16px 0; }
 	.sb-brand { justify-content: center; padding-left: 0; }
-	/* the rail keeps the wordmark, 62 px wide, 5 px clear of the 72 px rail each side */
-	.sb-brand .wm { width: 62px !important; height: auto !important; }
+	/* folded, the rail has no wordmark (too small to read there); under 1100 px it has no button either, so the row goes */
+	.sb-brand { display: none; }
 	/* the rail: Namida's bar on its side, the label shown under the icon of the place you are in only */
 	.sb-t { display: none !important; }
 	.nav-i { display: block; width: 64px; height: 60px; padding: 0; border-radius: 12px; }
@@ -116,7 +116,8 @@ body.carrying, body.carrying * { cursor: grabbing !important; user-select: none;
 .wp-g.rail.pn-none:not(.np) { grid-template-columns: 72px minmax(0, 1fr) 0px; }
 .wp-g.rail .side { align-items: center; padding: 16px 0; }
 .wp-g.rail .sb-brand { justify-content: center; padding-left: 0; }
-.wp-g.rail .sb-brand .wm { width: 62px !important; height: auto !important; }
+.wp-g.rail .sb-brand { display: flex; }
+.wp-g.rail .sb-brand .wm { display: none !important; }
 .wp-g.rail .sb-t { display: none !important; }
 .wp-g.rail .nav-i { display: block; width: 64px; height: 60px; padding: 0; border-radius: 12px; }
 .wp-g.rail .nav-i::before { inset: 4px 4px auto; height: 32px; border-radius: 16px; }
