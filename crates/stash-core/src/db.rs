@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 22;
+pub const SCHEMA_VERSION: i64 = 23;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
@@ -316,6 +316,33 @@ const V19: &str = "
     ALTER TABLE downloads ADD COLUMN tried_at INTEGER;
 ";
 
+/// Version 23: artists the listener follows (a source's artist page: "youtube", "UC…"), and the records found on their
+/// pages (`releases`). A record found after the artist was followed is new (`new_at_ms`, when it was found); one that
+/// was out before is kept with none, so it is not new when it is seen again.
+const V23: &str = "
+    CREATE TABLE followed_artists(
+        source          TEXT NOT NULL,
+        ref             TEXT NOT NULL,
+        name            TEXT NOT NULL,
+        art_url         TEXT,
+        followed_at_ms  INTEGER NOT NULL,
+        checked_ms      INTEGER,
+        PRIMARY KEY (source, ref)
+    ) WITHOUT ROWID;
+    CREATE TABLE releases(
+        source      TEXT NOT NULL,
+        ref         TEXT NOT NULL,
+        artist_ref  TEXT NOT NULL,
+        title       TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        year        INTEGER,
+        art_url     TEXT,
+        new_at_ms   INTEGER,
+        PRIMARY KEY (source, ref)
+    ) WITHOUT ROWID;
+    CREATE INDEX releases_new ON releases(new_at_ms DESC);
+";
+
 /// Version 20: what Last.fm said is like a song or an artist (radio and autoplay, `similar.rs`), by the question asked
 /// (`similar::Ask::key`): the artists and songs it named as JSON, or NULL for "it does not know that one", and when
 /// (Unix seconds), so each question is asked once in two weeks.
@@ -576,6 +603,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V22)?;
         tx.pragma_update(None, "user_version", 22)?;
+        tx.commit()?;
+    }
+    if found < 23 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V23)?;
+        tx.pragma_update(None, "user_version", 23)?;
         tx.commit()?;
     }
     Ok(())

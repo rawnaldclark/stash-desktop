@@ -44,11 +44,13 @@ async function answer<T>(path: string, response: Response): Promise<T> {
 	throw new Refused(body?.error?.message || `${path}: ${response.status}`, response.status);
 }
 
-async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
+/** A GET of the core's (the window key added, a refusal thrown as `Refused`). */
+export async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
 	return answer<T>(path, await fetch(at(path), { signal }));
 }
 
-async function post<T>(path: string, body: unknown): Promise<T> {
+/** A POST of JSON to the core's (the window key added, a refusal thrown as `Refused`). */
+export async function post<T>(path: string, body: unknown): Promise<T> {
 	const sent = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
 	return answer<T>(path, await fetch(at(path), sent));
 }
@@ -203,6 +205,30 @@ export const removeSongs = (ids: number[]) => post<Changed & { removed: number; 
 export const createPlaylist = (name: string) => post<Changed>('/api/playlists', { name });
 /** Follows the YouTube Music playlist `id` ("VL…"), or reads it again: the answer's `id` is the playlist that follows it. */
 export const followTube = (id: string) => post<Changed & { changed?: boolean }>('/api/youtube/follow', { id });
+/** An artist the listener follows: the source whose page it is ("youtube") and its name for them ("UC…"), and when
+ * their page was last read (null: not yet). */
+export type FollowedArtist = { source: string; id: string; name: string; art: string | null; followed_at_ms: number; checked_ms: number | null };
+/** A record by a followed artist that came out since they were followed, and when it was found. */
+export type NewRelease = {
+	source: string;
+	id: string;
+	title: string;
+	kind: 'album' | 'single';
+	year: number | null;
+	art: string | null;
+	artist: string;
+	artist_id: string;
+	new_at_ms: number;
+};
+/** The answer to following an artist, or stopping: the artists followed as they now are. */
+export type FollowedChanged = { followed: FollowedArtist[]; edits?: number };
+/** Follows an artist (`art`: their picture as the source gave it); their page is read at once for this year's records. */
+export const followArtist = (source: string, id: string, name: string, art?: string | null) =>
+	post<FollowedChanged>('/api/artists/follow', { source, id, name, art: art ?? undefined });
+export const unfollowArtist = (source: string, id: string) => post<FollowedChanged>('/api/artists/unfollow', { source, id });
+export const followedArtists = () => rows<FollowedArtist>('/api/artists/followed');
+/** Records by followed artists found in the last two months, the newest first. */
+export const releases = () => rows<NewRelease>('/api/releases');
 /** What a playlist file brought in: the new playlist, and what came of its entries (files the library had, files it
  * added, songs found by their words, and entries left out). */
 export type Brought = { id: number; name: string; songs: number; files: number; added: number; by_words: number; left_out: number };

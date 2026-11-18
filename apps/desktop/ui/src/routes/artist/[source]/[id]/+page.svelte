@@ -3,7 +3,8 @@
 	import { page } from '$app/state';
 	import { browse, player } from '../../../../lib/app';
 	import type { Artist, LibraryItem } from '../../../../lib/api';
-	import { Refused, YOUTUBE } from '../../../../lib/core';
+	import { rawArt, Refused, YOUTUBE } from '../../../../lib/core';
+	import { L } from '../../../../lib/ui/state.svelte';
 	import { albumHref, artistHref, LIB_REF, LIBRARY_SOURCE, toLibraryItem } from '../../../../lib/identity';
 	import type { Track } from '../../../../lib/sources/contract';
 	import BrowseMsg from '../../../../lib/ui/BrowseMsg.svelte';
@@ -83,6 +84,26 @@
 	// What the header counts: all their albums when the catalogue has them.
 	const told = $derived(tube ?? artist);
 	const albumSub = (a: Artist['albums'][number]) => [a.year, a.trackCount !== undefined ? songs(a.trackCount) : ''].filter(Boolean).join(' · ');
+
+	// The artist a follow is for: YouTube Music's own page, or (a library artist) the one it has of that name. Their new
+	// records come to Home.
+	const followable = $derived.by(() => {
+		if (!artist) return null;
+		if (sid === YOUTUBE) return { id, name: artist.name, art: rawArt(artist.artwork?.[0]?.url) };
+		if (tube && tube.sourceId === YOUTUBE) return { id: tube.id, name: artist.name, art: rawArt(tube.artwork?.[0]?.url) };
+		return null;
+	});
+	const followed = $derived(followable ? L.isFollowed(YOUTUBE, followable.id) : false);
+	let following = $state(false);
+	async function follow() {
+		if (!followable || following) return;
+		following = true;
+		try {
+			await L.toggleFollow(YOUTUBE, followable.id, followable.name, followable.art);
+		} finally {
+			following = false;
+		}
+	}
 </script>
 
 <div class="view view-in view-artist">
@@ -100,6 +121,13 @@
 		<div class="alb-act">
 			<button type="button" class="act-play" aria-label="Play {artist.name}" disabled={!items.length} onclick={() => play()}><Icon name="play_arrow" /></button>
 			<button type="button" class="act-ib" aria-label="Shuffle {artist.name}" title="Shuffle" disabled={!items.length} onclick={() => { player.setShuffle(true); play(); }}><Icon name="shuffle" /></button>
+			{#if followable}
+				{#if followed}
+					<button type="button" class="act-ib act-on" aria-label="Stop following {artist.name}" title="Following: stop following" disabled={following} onclick={() => void follow()}><Icon name="how_to_reg" /></button>
+				{:else}
+					<button type="button" class="act-ib" aria-label="Follow {artist.name}" title="Follow: their new releases come to Home" disabled={following} onclick={() => void follow()}><Icon name="person_add" /></button>
+				{/if}
+			{/if}
 			{#if R.ready}
 				{@const name = artist.name}
 				<button type="button" class="act-ib" aria-label="Start {name} radio" title="Radio" onclick={() => void player.startRadio({ artist: name })}><Icon name="radio" /></button>
@@ -194,4 +222,5 @@
 
 <style>
 	.tube-all { margin-top: 24px; }
+	.act-on { color: var(--acc); }
 </style>

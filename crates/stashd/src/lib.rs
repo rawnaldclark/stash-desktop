@@ -1,5 +1,6 @@
 //! The Stash desktop core's local API, as a library: the `stashd` program and the desktop shell both run it.
 
+mod artists_following;
 mod autoplay;
 mod blocking;
 pub mod check_addon;

@@ -5,7 +5,7 @@
 import { fromStore, get } from 'svelte/store';
 import { blockedNow as blockedNowStore, blockedOf, library, likedKept as likedKeptStore, offline as offlineStore, player, sources as sourcesApi } from '../app';
 import { LIB_REF, songIndex } from '../identity';
-import type { Counts, Descriptor, HistoryEntry, LibraryItem, Playlist, PlaylistFolder, SourceStatus } from '../api';
+import type { Counts, Descriptor, FollowedArtist, HistoryEntry, LibraryItem, NewRelease, Playlist, PlaylistFolder, SourceStatus } from '../api';
 import type { IconName } from './icons';
 import type { PlayerState } from '../api';
 
@@ -40,6 +40,8 @@ const likes = fromStore<LibraryItem[]>(library.likes);
 const playlists = fromStore<Playlist[]>(library.playlists);
 const folders = fromStore<PlaylistFolder[]>(library.folders);
 const history = fromStore<HistoryEntry[]>(library.history);
+const followed = fromStore<FollowedArtist[]>(library.followed);
+const releases = fromStore<NewRelease[]>(library.releases);
 const counts = fromStore<Counts | null>(library.counts);
 const loaded = fromStore<boolean>(library.loaded);
 const changed = fromStore<number>(library.changed);
@@ -69,6 +71,30 @@ class Lib {
 	}
 	get history() {
 		return history.current;
+	}
+	/** The artists the listener follows, by name. */
+	get followed() {
+		return followed.current;
+	}
+	/** Records by followed artists that came out lately, the newest first. */
+	get releases() {
+		return releases.current;
+	}
+	/** The followed artists, by source and id ("youtube:UC…"). */
+	followedKeys = $derived(new Set(followed.current.map((a) => `${a.source}:${a.id}`)));
+	isFollowed(sourceId: string, id: string) {
+		return this.followedKeys.has(`${sourceId}:${id}`);
+	}
+	/** Follows the artist, or stops; the toast says which. */
+	async toggleFollow(sourceId: string, id: string, name: string, art?: string | null) {
+		const was = this.isFollowed(sourceId, id);
+		try {
+			if (was) await library.unfollowArtist(sourceId, id);
+			else await library.followArtist(sourceId, id, name, art);
+		} catch {
+			return; // said already
+		}
+		ui.toast(was ? `Stopped following ${name}` : `Following ${name}`);
 	}
 	/** How much the library holds; null until the core has answered. */
 	get counts() {

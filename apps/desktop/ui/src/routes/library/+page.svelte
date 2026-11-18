@@ -8,7 +8,8 @@
 	import { library, player } from '../../lib/app';
 	import DownloadSwitch from '../../lib/desktop/DownloadSwitch.svelte';
 	import type { HistoryEntry, LibraryItem, Playlist } from '../../lib/api';
-	import { measuring } from '../../lib/core';
+	import { artUrl, measuring } from '../../lib/core';
+	import { shelf } from '../../lib/ui/shelf';
 	import Albums from '../../lib/desktop/Albums.svelte';
 	import Artists from '../../lib/desktop/Artists.svelte';
 	import Downloads from '../../lib/desktop/Downloads.svelte';
@@ -17,7 +18,7 @@
 	import Songs from '../../lib/desktop/Songs.svelte';
 	import TubeLibrary from '../../lib/desktop/TubeLibrary.svelte';
 	import { T } from '../../lib/desktop/youtube.svelte';
-	import { fold } from '../../lib/identity';
+	import { artistHref, fold } from '../../lib/identity';
 	import Card from '../../lib/ui/Card.svelte';
 	import { atEvent, deleteFolder, folderHref, folderMenu, playlistMenu, playlistsWord } from '../../lib/desktop/playlist-folders';
 	import Icon from '../../lib/ui/Icon.svelte';
@@ -268,6 +269,18 @@
 	{:else if tab === 'albums'}
 		{#key L.changed}<Albums />{/key}
 	{:else if tab === 'artists'}
+		{#if L.followed.length}
+			<h2 class="vh2">Following</h2>
+			<div class="shelf-w" use:shelf>
+				<div class="shelf shelf-artists">
+					{#each L.followed as a (a.source + a.id)}
+						{@const url = artUrl(a.art)}
+						<Card title={a.name} artwork={url ? [{ url }] : undefined} href={artistHref({ sourceId: a.source, id: a.id })} ini={a.name.slice(0, 2).toUpperCase()} />
+					{/each}
+				</div>
+			</div>
+			<h2 class="vh2">In your library</h2>
+		{/if}
 		{#key L.changed}<Artists />{/key}
 	{:else if tab === 'youtube'}
 		<TubeLibrary />

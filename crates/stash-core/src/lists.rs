@@ -55,8 +55,24 @@ fn named(name: &str) -> Result<String> {
 
 /// `ms` since 1970 as JavaScript's `toISOString()` writes it: "2026-11-15T09:00:00.000Z".
 fn iso_millis(ms: i64) -> String {
-    let (days, rest) = (ms.div_euclid(86_400_000), ms.rem_euclid(86_400_000));
-    // Days to a date: Howard Hinnant's civil-from-days.
+    let rest = ms.rem_euclid(86_400_000);
+    let (year, month, day) = civil_from_days(ms.div_euclid(86_400_000));
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+        rest / 3_600_000,
+        rest / 60_000 % 60,
+        rest / 1_000 % 60,
+        rest % 1_000
+    )
+}
+
+/// The year (UTC) `ms` since 1970 falls in.
+pub fn year_at(ms: i64) -> i32 {
+    civil_from_days(ms.div_euclid(86_400_000)).0 as i32
+}
+
+/// The date of a day counted from 1970-01-01: Howard Hinnant's civil-from-days.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let day_of_era = z.rem_euclid(146_097);
@@ -70,14 +86,7 @@ fn iso_millis(ms: i64) -> String {
     } else {
         shifted_month - 9
     };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
-        rest / 3_600_000,
-        rest / 60_000 % 60,
-        rest / 1_000 % 60,
-        rest % 1_000
-    )
+    (year_of_era + era * 400 + i64::from(month <= 2), month, day)
 }
 
 impl Library {
@@ -1454,6 +1463,195 @@ impl Library {
         Ok(rows)
     }
 
+    /// Follows the artist `artist` of a source's ("youtube", "UC…"), named `name` with the picture `art`. True when it
+    /// was not followed before; an artist followed again keeps the time it was first followed, and takes the new name.
+    pub fn follow_artist(
+        &mut self,
+        source: &str,
+        artist: &str,
+        name: &str,
+        art: Option<&str>,
+        now_ms: i64,
+    ) -> Result<bool> {
+        let name = clean_text(name, 500);
+        let added = self.conn.execute(
+            "INSERT OR IGNORE INTO followed_artists(source, ref, name, art_url, followed_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![source, artist, name, art, now_ms],
+        )?;
+        if added == 0 {
+            self.conn.execute(
+                "UPDATE followed_artists SET name = ?3, art_url = IFNULL(?4, art_url) WHERE source = ?1 AND ref = ?2",
+                params![source, artist, name, art],
+            )?;
+        }
+        Ok(added > 0)
+    }
+
+    /// Stops following the artist `artist` of a source's; their records go with them. False when they were not followed.
+    pub fn unfollow_artist(&mut self, source: &str, artist: &str) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let removed = tx.execute(
+            "DELETE FROM followed_artists WHERE source = ?1 AND ref = ?2",
+            params![source, artist],
+        )?;
+        tx.execute(
+            "DELETE FROM releases WHERE source = ?1 AND artist_ref = ?2",
+            params![source, artist],
+        )?;
+        tx.commit()?;
+        Ok(removed > 0)
+    }
+
+    /// The artists the listener follows, by name.
+    pub fn followed_artists(&self) -> Result<Vec<FollowedArtist>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT source, ref, name, art_url, followed_at_ms, checked_ms FROM followed_artists
+             ORDER BY name COLLATE NOCASE, source, ref",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(FollowedArtist {
+                    source: r.get(0)?,
+                    id: r.get(1)?,
+                    name: r.get(2)?,
+                    art: r.get(3)?,
+                    followed_at_ms: r.get(4)?,
+                    checked_ms: r.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The followed artists whose pages were not read since `older_than_ms` (or never): (source, artist), the longest
+    /// waiting first.
+    pub fn artists_to_check(&self, older_than_ms: i64) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT source, ref FROM followed_artists WHERE IFNULL(checked_ms, 0) < ?1
+             ORDER BY IFNULL(checked_ms, 0), followed_at_ms, ref",
+        )?;
+        let rows = stmt
+            .query_map([older_than_ms], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The records found on the page of the followed artist `artist` (a source's), read at `now_ms`. The first time
+    /// their page is read, what is there was out before they were followed, and is not new, except the records of
+    /// `this_year`: so the listener sees something at once. After that, a record not seen before is new. Answers how
+    /// many are new; nothing is kept for an artist no longer followed.
+    pub fn note_releases(
+        &mut self,
+        source: &str,
+        artist: &str,
+        releases: &[Release],
+        now_ms: i64,
+        this_year: i32,
+    ) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let checked: Option<Option<i64>> = tx
+            .query_row(
+                "SELECT checked_ms FROM followed_artists WHERE source = ?1 AND ref = ?2",
+                params![source, artist],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(checked) = checked else {
+            return Ok(0);
+        };
+        let first = checked.is_none();
+        let mut new = 0;
+        {
+            let mut add = tx.prepare(
+                "INSERT OR IGNORE INTO releases(source, ref, artist_ref, title, kind, year, art_url, new_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?;
+            // A record seen before keeps when it was new; its name and picture are what the page now says.
+            let mut known = tx.prepare(
+                "UPDATE releases SET title = ?3, year = IFNULL(?4, year), art_url = IFNULL(?5, art_url)
+                 WHERE source = ?1 AND ref = ?2",
+            )?;
+            for release in releases {
+                let title = clean_text(&release.title, 500);
+                if release.id.is_empty() || release.id.len() > 200 || title.is_empty() {
+                    continue;
+                }
+                let kind = if release.single { "single" } else { "album" };
+                let new_at = if first {
+                    release
+                        .year
+                        .filter(|year| i64::from(*year) >= i64::from(this_year))
+                        .map(|_| now_ms)
+                } else if release
+                    .year
+                    .is_some_and(|year| i64::from(year) < i64::from(this_year) - 1)
+                {
+                    // Not seen before, but out two years ago or more: the page showed an old record, not a new one.
+                    None
+                } else {
+                    Some(now_ms)
+                };
+                let added = add.execute(params![
+                    source,
+                    release.id,
+                    artist,
+                    title,
+                    kind,
+                    release.year,
+                    release.art,
+                    new_at
+                ])?;
+                if added > 0 {
+                    if new_at.is_some() {
+                        new += 1;
+                    }
+                } else {
+                    known.execute(params![
+                        source,
+                        release.id,
+                        title,
+                        release.year,
+                        release.art
+                    ])?;
+                }
+            }
+        }
+        tx.execute(
+            "UPDATE followed_artists SET checked_ms = ?3 WHERE source = ?1 AND ref = ?2",
+            params![source, artist, now_ms],
+        )?;
+        tx.commit()?;
+        Ok(new)
+    }
+
+    /// Records by followed artists found new since `since_ms`, the newest first: at most `limit`.
+    pub fn new_releases(&self, since_ms: i64, limit: usize) -> Result<Vec<NewRelease>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT r.source, r.ref, r.title, r.kind, r.year, r.art_url, f.name, r.artist_ref, r.new_at_ms
+             FROM releases r JOIN followed_artists f ON f.source = r.source AND f.ref = r.artist_ref
+             WHERE r.new_at_ms >= ?1
+             ORDER BY r.new_at_ms DESC, IFNULL(r.year, 0) DESC, r.title COLLATE NOCASE, r.ref
+             LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![since_ms, limit as i64], |r| {
+                Ok(NewRelease {
+                    source: r.get(0)?,
+                    id: r.get(1)?,
+                    title: r.get(2)?,
+                    kind: r.get(3)?,
+                    year: r.get(4)?,
+                    art: r.get(5)?,
+                    artist: r.get(6)?,
+                    artist_id: r.get(7)?,
+                    new_at_ms: r.get(8)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// A play that counted: the song `id`, started at `started_at_ms`. False when that play is already kept.
     pub fn record_play(&mut self, id: i64, started_at_ms: i64) -> Result<bool> {
         let tx = self.conn.transaction()?;
@@ -1666,6 +1864,43 @@ pub struct Heard {
     pub played_at_ms: i64,
 }
 
+/// An artist the listener follows: the source whose page it is and its name for them, as their page shows them, and
+/// when their page was last read (none yet: not since they were followed).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct FollowedArtist {
+    pub source: String,
+    pub id: String,
+    pub name: String,
+    pub art: Option<String>,
+    pub followed_at_ms: i64,
+    pub checked_ms: Option<i64>,
+}
+
+/// A record on a followed artist's page: an album, or a single or an EP (`single`), as the source calls it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Release {
+    pub id: String,
+    pub title: String,
+    pub single: bool,
+    pub year: Option<u32>,
+    pub art: Option<String>,
+}
+
+/// A record by a followed artist that came out since they were followed: `kind` "album" or "single", and when it was
+/// found.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct NewRelease {
+    pub source: String,
+    pub id: String,
+    pub title: String,
+    pub kind: String,
+    pub year: Option<u32>,
+    pub art: Option<String>,
+    pub artist: String,
+    pub artist_id: String,
+    pub new_at_ms: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1823,6 +2058,109 @@ mod tests {
         // A playlist of the listener's own follows nothing.
         let own = library.create_playlist("Mine", 40).unwrap();
         assert_eq!(library.follows(own).unwrap(), None);
+    }
+
+    #[test]
+    fn a_followed_artists_new_records_are_found_and_go_with_them() {
+        let mut library = Library::open_in_memory().unwrap();
+        let record = |id: &str, single: bool, year: u32| Release {
+            id: id.into(),
+            title: format!("Record {id}"),
+            single,
+            year: Some(year),
+            art: None,
+        };
+        assert!(
+            library
+                .follow_artist("youtube", "UCa", "Someone", Some("https://pic/a"), 10)
+                .unwrap()
+        );
+        // Followed again: still once, the first time kept, the new name taken.
+        assert!(
+            !library
+                .follow_artist("youtube", "UCa", "Someone Else", None, 20)
+                .unwrap()
+        );
+        let followed = library.followed_artists().unwrap();
+        assert_eq!(followed.len(), 1);
+        assert_eq!(
+            (
+                followed[0].name.as_str(),
+                followed[0].art.as_deref(),
+                followed[0].followed_at_ms,
+                followed[0].checked_ms
+            ),
+            ("Someone Else", Some("https://pic/a"), 10, None)
+        );
+        assert_eq!(
+            library.artists_to_check(100).unwrap(),
+            vec![("youtube".to_string(), "UCa".to_string())]
+        );
+        // Their page read the first time: only this year's records are new.
+        let page = [
+            record("MPREb_old", false, 2019),
+            record("MPREb_now", true, 2026),
+            record("", false, 2026),
+        ];
+        assert_eq!(
+            library
+                .note_releases("youtube", "UCa", &page, 1_000, 2026)
+                .unwrap(),
+            1
+        );
+        assert!(library.artists_to_check(1_000).unwrap().is_empty());
+        assert_eq!(library.artists_to_check(1_001).unwrap().len(), 1);
+        // Read again: a record not seen before is new, whatever its year; the ones seen are not new again.
+        let page = [
+            record("MPREb_old", false, 2019),
+            record("MPREb_now", true, 2026),
+            record("MPREb_next", false, 2025),
+        ];
+        assert_eq!(
+            library
+                .note_releases("youtube", "UCa", &page, 2_000, 2026)
+                .unwrap(),
+            1
+        );
+        let new = library.new_releases(0, 10).unwrap();
+        assert_eq!(
+            new.iter()
+                .map(|r| (r.id.as_str(), r.kind.as_str(), r.new_at_ms))
+                .collect::<Vec<_>>(),
+            vec![
+                ("MPREb_next", "album", 2_000),
+                ("MPREb_now", "single", 1_000)
+            ]
+        );
+        assert_eq!(
+            (new[0].artist.as_str(), new[0].artist_id.as_str()),
+            ("Someone Else", "UCa")
+        );
+        assert_eq!(library.new_releases(1_500, 10).unwrap().len(), 1);
+        // Unfollowed: their records go, and a page read late keeps nothing.
+        assert!(library.unfollow_artist("youtube", "UCa").unwrap());
+        assert!(!library.unfollow_artist("youtube", "UCa").unwrap());
+        assert!(library.followed_artists().unwrap().is_empty());
+        assert!(library.new_releases(0, 10).unwrap().is_empty());
+        assert_eq!(
+            library
+                .note_releases("youtube", "UCa", &page, 3_000, 2026)
+                .unwrap(),
+            0
+        );
+        let kept: i64 = library
+            .conn
+            .query_row("SELECT COUNT(*) FROM releases", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 0);
+    }
+
+    #[test]
+    fn the_year_is_read_from_the_clock() {
+        assert_eq!(year_at(0), 1970);
+        // 2026-01-01T00:00:00Z, and the moment before it.
+        assert_eq!(year_at(1_767_225_600_000), 2026);
+        assert_eq!(year_at(1_767_225_599_999), 2025);
     }
 
     #[test]

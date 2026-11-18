@@ -7,9 +7,9 @@ import type { Readable } from 'svelte/store';
 import type { SearchResult } from './sources/search';
 import type { Album, Artist, Artwork, Descriptor, Discography, LyricLine, Lyrics, LyricWord, Track } from './sources/contract';
 import type { LibraryItem } from './identity';
-import { NO_EQ, type AddonChange, type AddonInfo, type CoreEq, type Counts, type EqPatch, type Replaygain, type Signal, type SmartRules, type Station, type Tier } from './core';
+import { NO_EQ, type AddonChange, type AddonInfo, type CoreEq, type Counts, type EqPatch, type FollowedArtist, type NewRelease, type Replaygain, type Signal, type SmartRules, type Station, type Tier } from './core';
 
-export type { Readable, SearchResult, Counts, Album, Artist, Artwork, Descriptor, Lyrics, LyricLine, LyricWord, Track, LibraryItem, Signal, Station, Tier, CoreEq, EqPatch };
+export type { Readable, SearchResult, Counts, Album, Artist, Artwork, Descriptor, Lyrics, LyricLine, LyricWord, Track, LibraryItem, Signal, Station, Tier, CoreEq, EqPatch, FollowedArtist, NewRelease };
 
 /** A queue entry: a library item plus an id for this particular slot (the same song can be queued twice). */
 export type QueueItem = LibraryItem & { qid: string };
@@ -183,6 +183,13 @@ export interface LibraryAPI {
 	createPlaylist(name: string): Promise<Playlist>;
 	/** Follows a YouTube Music playlist (or reads it again): a playlist of yours whose songs are that list's, kept up to date. */
 	followTube(id: string): Promise<Playlist>;
+	/** The artists the listener follows, by name. */
+	followed: Readable<FollowedArtist[]>;
+	/** Records by followed artists that came out lately, the newest first (Home's "New releases"). */
+	releases: Readable<NewRelease[]>;
+	/** Follows an artist of a source's (`art`: their picture as the source gave it): their new records come to Home. */
+	followArtist(sourceId: string, id: string, name: string, art?: string | null): Promise<void>;
+	unfollowArtist(sourceId: string, id: string): Promise<void>;
 	/** A playlist that fills itself by `rules`. */
 	createSmartPlaylist(name: string, rules: SmartRules): Promise<Playlist>;
 	setPlaylistRules(id: string, rules: SmartRules): Promise<void>;

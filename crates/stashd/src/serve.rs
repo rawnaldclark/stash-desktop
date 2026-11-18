@@ -1062,6 +1062,9 @@ pub(crate) struct State {
     /// Goes up with each change to the likes and the playlists, so every window (the mini player too) can tell when
     /// its lists are behind: a change may come from another window, or from a shortcut.
     pub(crate) edits: AtomicU64,
+    /// An artist was just followed: the thread that reads followed artists' pages looks now, not at its next look
+    /// (see [`crate::artists_following`]).
+    pub(crate) artist_followed: AtomicBool,
     /// Radio, and autoplay that knows what is like what (Last.fm, when this build has it).
     pub(crate) radio: crate::radio::Radio,
     /// Opens a link in the browser, when the core runs inside a window.
@@ -1351,6 +1354,7 @@ impl Core {
                 key: None,
                 shortcuts: crate::shortcuts::Shortcuts::default(),
                 edits: AtomicU64::new(0),
+                artist_followed: AtomicBool::new(false),
                 radio: crate::radio::Radio::new(None),
                 offered: Mutex::new(HashMap::new()),
                 opener: None,
@@ -1529,6 +1533,11 @@ impl Core {
             {
                 let (state, stop) = (&state, &stop);
                 scope.spawn(move || crate::following::run(state, stop));
+            }
+            // The pages of the artists the listener follows, read from time to time for their new records.
+            {
+                let (state, stop) = (&state, &stop);
+                scope.spawn(move || crate::artists_following::run(state, stop));
             }
             // The shortcuts as the listener left them (the shell holds them once its window is up).
             if state.shortcuts.shell.is_some() {
@@ -3026,6 +3035,10 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::following::route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    // Before one artist's page (/api/artists/{id}), which "followed" is not.
+    if let Some(response) = crate::artists_following::route(state, request, &path)? {
         return Ok((response, false));
     }
     if let Some(response) = crate::youtube_pages::route(state, request, &path, &param)? {

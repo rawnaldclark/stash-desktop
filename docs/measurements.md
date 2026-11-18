@@ -1779,3 +1779,26 @@ With "the sound card for Stash alone" on, the engine kept the card while paused,
 ## 52. Remove from your library
 
 Nothing took a song out of the library: "Add to your library" had no way back. `POST /api/library/remove {ids}` takes songs out for good, and the window offers it in a song's menu ("Remove from your library", also for picked songs) and on an added album's page (the "In your library" check removes it, with Undo). A song in a playlist stays (taking it out would change the playlist: a followed list's songs, an imported one's), and so does a file of the music folders (a scan would bring it back); the answer counts both and the toast says so. A song saved to this computer loses its file first. Its plays stay in the history as heard (by the source that knows it), its like goes with it, and an album or artist left with no song goes too. Live: an album added, removed, put back with Undo; two songs of a followed playlist refused as "in a playlist".
+
+## 53. Following artists
+
+An artist page of YouTube Music's (and a library artist's page, through the YouTube Music artist of that name) has "Follow". Followed artists are kept in `followed_artists` and the records found on their pages in `releases` (schema 23). `POST /api/artists/follow {source, id, name, art?}` and `POST /api/artists/unfollow {source, id}` answer the artists followed; `GET /api/artists/followed` lists them, `GET /api/releases` their records found in the last 60 days (at most 30), newest first. Only YouTube Music's artists can be followed for now (409 for another source).
+
+A thread reads each followed artist's page again once it is 12 hours old (ten at a look, three seconds apart, every ten minutes, while YouTube Music is on and Stash is online), and an artist just followed is read at once. An album or a single not seen on their page before is new, unless it is two or more years old (the page showed an old record). The first time a page is read, what is on it was out before the artist was followed, so it is not new, except this year's records: Home's "New releases" (after "Recently played") is useful at once. Unfollowing takes their records with them. Library › Artists shows the artists followed first, as a "Following" row. Live: an artist followed from their page was read within seconds; Home showed their single from this year under "New releases", Library › Artists showed them under "Following", and unfollowing cleared both.
+
+## 54. Last.fm scrobbling
+
+What you play can now go to Last.fm too, beside ListenBrainz (Settings › Scrobbling; `crates/stash-core/src/lastfm.rs`, `crates/stashd/src/scrobbling.rs`). It is a second kind of service (`lastfm`, at `https://ws.audioscrobbler.com/2.0/`): plays wait in the library for it as they do for ListenBrainz (no schema change), and the song playing now is told.
+
+- **Signing in.** "Connect Last.fm" asks Last.fm for a sign-in (`auth.getToken`, `POST /api/scrobbling/lastfm/start`) and opens Last.fm's page in the browser, where the listener allows Stash. The window then asks every 2 s for up to 5 minutes (`POST /api/scrobbling/lastfm/finish`, `auth.getSession`), showing "Waiting for you to allow Stash on Last.fm…" with Cancel: `{waiting: true}` until they allow it (Last.fm's error 14), then the service is kept under the name Last.fm knows them by, and the list answered. A sign-in is kept in memory only, one at a time, for 10 minutes; one that ran out (error 15) is "Sign in again". What Last.fm gives Stash is kept as a ListenBrainz token is, and never given to the window.
+- **The application's key and secret** come from the build (`STASH_LASTFM_KEY`, `STASH_LASTFM_SECRET`), or from the environment Stash runs in, never from the source. A build without both has no Last.fm: `GET /api/scrobbling/lastfm` answers `{available: false}` and the window does not offer it. They are never printed, and go only to Last.fm. Every request is signed (md5 of the parameters sorted by name, then the secret) and sent as a form.
+- **Plays go 50 at a time** (`track.scrobble`), each with its artist, title, the time it began, and its album and length when known. Last.fm answers for each play: one it ignores (an artist or song it does not take, a play older than two weeks) is let go with its reason; one past its daily limit waits, and Last.fm is left an hour.
+- **Last.fm's errors** are read as ListenBrainz's answers are: 9 (the sign-in is no longer good) holds sending back until the listener connects again ("Signed out of Last.fm. Connect again."); 11 and 16 (down for now) and 29 (too many requests) leave it a while and try again; 6 (what was sent is wrong) sends the plays one at a time, as a batch called wrong is.
+
+### Checked
+
+- **By the tests:** `lastfm.rs` (a request signed as Last.fm checks it, `format` and `callback` left out; plays sent as one signed form, each by its place; the song playing now without a place; answers read as what to do next; each play read as kept, ignored or not today, from one play's object or a list; the keys need both and say nothing of themselves). Offline: no request is made.
+
+### Live
+
+- To be measured: signing in with a real Last.fm account, a play sent and seen on the profile, the song playing now, and a play older than two weeks let go.

@@ -2,7 +2,9 @@
 	import { untrack } from 'svelte';
 	import { shelf } from '../lib/ui/shelf';
 	import { player } from '../lib/app';
-	import type { LibraryItem } from '../lib/api';
+	import type { LibraryItem, NewRelease } from '../lib/api';
+	import { artUrl } from '../lib/core';
+	import { albumHref } from '../lib/identity';
 	import Card from '../lib/ui/Card.svelte';
 	import { L, ui } from '../lib/ui/state.svelte';
 	import { T } from '../lib/desktop/youtube.svelte';
@@ -27,7 +29,14 @@
 	/** Old favourites you haven't played lately, never what "Recently played" already shows (lib/home/jump.ts). */
 	const albums = $derived(jumpBackIn(L.history, new Set(recent.map((i) => i.key))));
 	/** There are songs, but nothing has been played and no playlist made yet: Home has no shelf to show. */
-	const quiet = $derived(!recent.length && !L.playlists.length && !albums.length);
+	const quiet = $derived(!recent.length && !L.playlists.length && !albums.length && !L.releases.length);
+
+	/** Records by the artists the listener follows that came out lately. */
+	const releaseArt = (art: string | null) => {
+		const url = artUrl(art);
+		return url ? [{ url }] : undefined;
+	};
+	const releaseSub = (r: NewRelease) => [r.kind === 'single' ? 'Single' : 'Album', r.artist].join(' · ');
 
 	const play = (items: LibraryItem[], i = 0, from?: string) => void player.playItems(items, i, { from });
 
@@ -38,6 +47,19 @@
 	});
 	const tube = $derived(T.on && !ui.offline && T.home?.length ? T.home : null);
 </script>
+
+{#snippet fresh()}
+	{#if L.releases.length}
+		<h2 class="vh2">New releases</h2>
+		<div class="shelf-w" use:shelf>
+			<div class="shelf">
+				{#each L.releases as r (r.source + r.id)}
+					<Card title={r.title} sub={releaseSub(r)} artwork={releaseArt(r.art)} href={albumHref({ sourceId: r.source, id: r.id })} />
+				{/each}
+			</div>
+		</div>
+	{/if}
+{/snippet}
 
 {#snippet youtube()}
 	{#if tube}
@@ -54,7 +76,7 @@
 		<p class="empty-line">Add a music folder or import a library to begin.</p>
 		<a class="btn" href="/settings#library">Open Settings</a>
 	</section>
-	{#if tube}<div class="view view-in">{@render youtube()}</div>{/if}
+	{#if tube || L.releases.length}<div class="view view-in">{@render fresh()}{@render youtube()}</div>{/if}
 {:else if quiet}
 	<section class="empty" aria-label="Get started">
 		<p class="empty-line">Play a song and it shows up here.</p>
@@ -73,6 +95,7 @@
 				</div>
 			</div>
 		{/if}
+		{@render fresh()}
 		{#if L.playlists.length}
 			<h2 class="vh2">Your playlists <a class="vh2-more" href="/library?tab=playlists">Show all</a></h2>
 			<div class="shelf-w" use:shelf>

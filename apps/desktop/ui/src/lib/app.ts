@@ -514,6 +514,9 @@ const history = writable<HistoryEntry[]>([]);
 const counts = writable<Counts | null>(null);
 const loaded = writable(false);
 const changed = writable(0);
+/** The artists the listener follows, and their records that came out lately (Home's "New releases"). */
+const followed = writable<core.FollowedArtist[]>([]);
+const releases = writable<core.NewRelease[]>([]);
 /** Every list reads its rows again: their own word on what the listener chose not to play is the newest now. */
 function relisted(): void {
 	blockedNow.set(new Map());
@@ -540,6 +543,16 @@ async function loadHistory(): Promise<void> {
 	history.set(entries.slice(0, HISTORY_MAX));
 	// A play may change what a smart playlist holds (most played, played lately).
 	if (get(playlists).some((p) => p.rules)) await core.playlists().then((rows) => syncPlaylists(rows));
+}
+async function loadFollowing(): Promise<void> {
+	const [artists, records] = await Promise.all([core.followedArtists(), core.releases()]);
+	followed.set(artists);
+	releases.set(records);
+}
+/** Takes in the core's answer to following an artist, or stopping: the artists followed as they now are. */
+function tookFollowed(c: core.FollowedChanged): void {
+	followed.set(c.followed);
+	if (c.edits !== undefined && (edits === null || c.edits > edits)) edits = c.edits;
 }
 let historyTimer: ReturnType<typeof setTimeout> | undefined;
 function historySoon(): void {
@@ -602,7 +615,7 @@ function caughtUp(now: number | undefined): void {
 	if (now === edits || rereading) return;
 	edits = now;
 	rereading = true;
-	void Promise.all([core.counts().then(setCounts), loadLikes(), loadFolders(), core.playlists().then((rows) => syncPlaylists(rows))])
+	void Promise.all([core.counts().then(setCounts), loadLikes(), loadFolders(), core.playlists().then((rows) => syncPlaylists(rows)), loadFollowing()])
 		.catch(() => {})
 		.finally(() => (rereading = false));
 }
@@ -613,7 +626,8 @@ async function loadLibrary(): Promise<void> {
 		loadLikes(),
 		loadFolders(),
 		core.playlists().then((rows) => syncPlaylists(rows, rows.map((r) => r.id))),
-		loadHistory()
+		loadHistory(),
+		loadFollowing().catch(() => {})
 	]);
 }
 
@@ -734,6 +748,18 @@ const library: LibraryAPI = {
 			const made = get(playlists).find((p) => p.id === String(c.id));
 			if (!made) throw new Refused('The playlist was not made', 500);
 			return made;
+		}),
+	followed: ro(followed),
+	releases: ro(releases),
+	followArtist: (sourceId, id, name, art) =>
+		change(async () => {
+			tookFollowed(await core.followArtist(sourceId, id, name, art));
+		}),
+	unfollowArtist: (sourceId, id) =>
+		change(async () => {
+			tookFollowed(await core.unfollowArtist(sourceId, id));
+			// Their records leave Home with them.
+			releases.update((all) => all.filter((r) => !(r.source === sourceId && r.artist_id === id)));
 		}),
 	createSmartPlaylist: (name, rules) =>
 		change(async () => {
