@@ -474,6 +474,36 @@ pub(crate) enum Asked {
 /// When every add-on that could be asked said it does not have the song, and each of them is finding other songs,
 /// the song goes on the list of songs no add-on could find (for the listener to fix); found, it leaves that list.
 /// Trouble with an add-on (it could not be reached, its allowance is spent) never puts a song there.
+/// What an add-on answered when asked whether it has a song: the track, none, or trouble. `None` when it can neither
+/// resolve nor search.
+type Finding = Option<std::result::Result<Option<Track>, AddonError>>;
+
+/// Asks `addon` whether it has the song: by "resolve" (as the song is read, then each other way it may be read, until
+/// it has it), or by a search whose results must be the same song by the contract's rule.
+fn find_in(addon: &Addon, described: &stash_core::library::Described) -> Finding {
+    if addon.offers_resource("resolve") {
+        let mut answer = Ok(None);
+        for reading in std::iter::once(&described.wanted).chain(&described.also) {
+            answer = addon.resolve(reading, None);
+            if !matches!(&answer, Ok(None)) {
+                break;
+            }
+        }
+        Some(answer)
+    } else if addon.offers_resource("search") {
+        Some(
+            addon
+                .search(&matching::query(&described.wanted), 20)
+                .map(|found| described.pick(&found).cloned()),
+        )
+    } else {
+        None
+    }
+}
+
+/// How many add-ons are asked at once, ahead of the walk.
+const ASKED_AHEAD: usize = 6;
+
 pub(crate) fn through_addons<T>(
     registry: &Registry,
     library: &Mutex<Library>,
@@ -522,6 +552,37 @@ pub(crate) fn through_addons<T>(
             nothing_to_ask: true,
             ..gone(none)
         });
+    }
+    // Every add-on that will be asked whether it has the song is asked at once, ahead of the walk: the walk still
+    // goes in the listener's order and takes the first that has it, but an add-on that does not have it costs only
+    // the time its answer takes beside the others, not one after another. The walk does not wait for answers it no
+    // longer needs (their threads end by themselves).
+    let mut ahead: HashMap<String, std::sync::mpsc::Receiver<Finding>> = HashMap::new();
+    if addons.len() > 1 {
+        for loaded in addons.iter().take(ASKED_AHEAD) {
+            let addon_id = loaded.stored.id.as_str();
+            if described.refs.iter().any(|(source, _)| source == addon_id) {
+                continue;
+            }
+            if id
+                .and_then(|id| lacks.remembered(id, addon_id))
+                .is_some_and(|believed| believed || !lacks.finding(addon_id))
+            {
+                continue;
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (loaded, described) = (Arc::clone(loaded), described.clone());
+            let spawned = std::thread::Builder::new()
+                .name("ask-ahead".into())
+                .spawn(move || {
+                    if let Some(addon) = loaded.usable() {
+                        let _ = tx.send(find_in(addon, &described));
+                    }
+                });
+            if spawned.is_ok() {
+                ahead.insert(addon_id.to_string(), rx);
+            }
+        }
     }
     // Trouble with an add-on is not "it does not have the song": it is said, and asking again may help.
     let mut trouble: Option<AddonError> = None;
@@ -604,21 +665,12 @@ pub(crate) fn through_addons<T>(
             || std::iter::once(&described.wanted)
                 .chain(&described.also)
                 .any(|reading| addon.asks_for(reading));
-        let asked = if resolving {
-            // As the song is read, then each other way it may be read (a row from YouTube), until the add-on has it.
-            let mut answer = Ok(None);
-            for reading in std::iter::once(&described.wanted).chain(&described.also) {
-                answer = addon.resolve(reading, None);
-                if !matches!(&answer, Ok(None)) {
-                    break;
-                }
-            }
-            answer
-        } else if addon.offers_resource("search") {
-            addon
-                .search(&matching::query(&described.wanted), 20)
-                .map(|found| described.pick(&found).cloned())
-        } else {
+        // The answer asked ahead, or (none was, or its thread ended without one) asked now.
+        let finding = match ahead.remove(addon_id).and_then(|rx| rx.recv().ok()) {
+            Some(finding) => finding,
+            None => find_in(addon, &described),
+        };
+        let Some(asked) = finding else {
             continue;
         };
         any_asked = true;

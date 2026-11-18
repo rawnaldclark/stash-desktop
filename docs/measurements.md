@@ -1769,3 +1769,9 @@ A play that counted was kept only for a song of the library (`plays`), so a YouT
 ## 50. Exclusive mode lets go of the card while paused
 
 With "the sound card for Stash alone" on, the engine kept the card while paused, so other programs stayed silent with Stash quiet. Now a pause gives it back (the output is opened again shared, still paused) and playing on takes it again; stopped, the engine closes the output as before. The setting stays what the listener asked (`exclusive` in the player state is what was asked, not what is open now). Live, on a USB card at volume 0: playing, opened exclusive (s16, 48 kHz); paused, shared; playing again, exclusive.
+
+## 51. Starting songs sooner
+
+**Asked at once.** A song (a YouTube Music result, or a library song no add-on has a name for yet) was asked of the add-ons one after another, so each one that did not have it added its whole answer time. Now every add-on that will be asked is asked at once (up to six, each on its own thread) as the walk begins; the walk still goes in the listener's order and plays from the first that has it, taking each answer as it reaches that add-on, and does not wait for the answers it no longer needs. Scratch library (JioSaavn, SoundCloud, then YouTube Music by Mornye): songs the first add-on lacks started in 3.8–4.8 s before, 2.8–3.6 s after.
+
+**The next song ready.** An add-on's next song was asked for only in the last 30 s of the one playing, so Next in the middle of a song started from nothing (2.3–2.5 s here). Now it is also asked once the song playing has been heard 5 s (`ask_ahead_after_seconds`): Next then starts at once (0.02 s measured; preparing took 3.2 s). A song skipped within 5 s does not have the one after it fetched.

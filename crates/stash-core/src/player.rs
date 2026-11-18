@@ -130,8 +130,11 @@ pub type OnEqualizers = Arc<dyn Fn(&dyn Fn() -> eq::Book) + Send + Sync>;
 pub struct Settings {
     /// Without one, the queue can hold files only.
     pub resolver: Option<Resolver>,
-    /// An add-on's track is asked for when the track before it has this long left.
+    /// An add-on's track is asked for when the track before it has this long left,
     pub ask_ahead_seconds: f64,
+    /// or once the track before it has played this long, so that skipping to it is at once (a track skipped sooner
+    /// does not have the one after it asked for).
+    pub ask_ahead_after_seconds: f64,
     /// Told when a play counts.
     pub on_play: Option<OnPlay>,
     /// Told when a track begins to be heard (the engine really plays it), with when it began: once for each play.
@@ -150,6 +153,7 @@ impl Default for Settings {
         Self {
             resolver: None,
             ask_ahead_seconds: 30.0,
+            ask_ahead_after_seconds: 5.0,
             on_play: None,
             on_start: None,
             on_failed: None,
@@ -447,6 +451,7 @@ struct Ctx {
     shared: Arc<Mutex<Shared>>,
     resolver: Option<Resolver>,
     ask_ahead_seconds: f64,
+    ask_ahead_after_seconds: f64,
     on_play: Option<OnPlay>,
     on_start: Option<OnPlay>,
     on_failed: Option<OnFailed>,
@@ -958,7 +963,14 @@ impl Ctx {
                 .mpv()
                 .get("time-remaining")
                 .and_then(|v| v.parse::<f64>().ok());
-            if remaining.is_none_or(|r| r > self.ask_ahead_seconds) {
+            let played = self
+                .engine
+                .mpv()
+                .get("time-pos")
+                .and_then(|v| v.parse::<f64>().ok());
+            let near_the_end = remaining.is_some_and(|r| r <= self.ask_ahead_seconds);
+            let heard_enough = played.is_some_and(|p| p >= self.ask_ahead_after_seconds);
+            if !near_the_end && !heard_enough {
                 return;
             }
         }
@@ -995,6 +1007,7 @@ impl Player {
             shared: Arc::new(Mutex::new(Shared::default())),
             resolver: settings.resolver,
             ask_ahead_seconds: settings.ask_ahead_seconds,
+            ask_ahead_after_seconds: settings.ask_ahead_after_seconds,
             on_play: settings.on_play,
             on_start: settings.on_start,
             on_failed: settings.on_failed,
