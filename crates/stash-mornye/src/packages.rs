@@ -1065,6 +1065,135 @@ impl Packages {
         Ok(tracks)
     }
 
+    /// Whether the add-on `key` keeps a catalogue: albums and artists can be asked of it ([`crate::catalogue`]).
+    pub fn has_catalogue(&self, key: &str) -> bool {
+        self.addon(key)
+            .is_some_and(|addon| crate::catalogue::provides_catalogue(&addon.manifest))
+    }
+
+    /// The albums or artists (`kind`) matching `query` in the add-on `key`'s catalogue, at most `limit`, as it
+    /// answered them: [`crate::catalogue::album_of`] and the others read them.
+    pub fn find(
+        &self,
+        key: &str,
+        query: &str,
+        kind: crate::catalogue::Kind,
+        limit: usize,
+    ) -> Result<Vec<Value>, Trouble> {
+        let addon = self
+            .addon(key)
+            .filter(|addon| addon.enabled)
+            .ok_or_else(|| Trouble::Missing(OFF.into()))?;
+        let running = self.shared(key)?;
+        if !running.engine.has("customSearch") {
+            return Err(Trouble::Missing(format!(
+                "{} cannot be searched for {}s",
+                addon.manifest.display_name,
+                kind.word()
+            )));
+        }
+        let setup = running.host.setup();
+        let session = setup.session.as_deref();
+        let manifest = &addon.manifest;
+        let filter = crate::catalogue::filter_for(manifest, kind);
+        let limit = limit.clamp(1, SEARCH_LIMIT);
+        let asked = invoke(
+            &running,
+            session,
+            "customSearch",
+            &[
+                json!(query.trim()),
+                json!({ "limit": limit, "filter": filter }),
+            ],
+            CALL,
+        );
+        let sort = |trouble: Trouble| {
+            sort_trouble(
+                trouble,
+                &manifest.display_name,
+                &setup.network,
+                session,
+                false,
+            )
+        };
+        let result = asked.map_err(sort)?;
+        let mut rows = crate::catalogue::found_rows(&result, kind);
+        if rows.is_empty() && result.get("success") == Some(&Value::Bool(false)) {
+            let said = if result.get("needsVerification") == Some(&Value::Bool(true)) {
+                "VERIFY_REQUIRED".to_string()
+            } else {
+                failure_text(&result, "The add-on could not search")
+            };
+            return Err(sort(Trouble::Failed(said)));
+        }
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    /// The add-on `key`'s page for its album, artist or playlist `id` (`kind`), as it answered it. The songs on it are
+    /// remembered, as a search's are, so they play with what the add-on said of them.
+    pub fn page(
+        &self,
+        key: &str,
+        kind: crate::catalogue::Kind,
+        id: &str,
+    ) -> Result<Value, Trouble> {
+        let addon = self
+            .addon(key)
+            .filter(|addon| addon.enabled)
+            .ok_or_else(|| Trouble::Missing(OFF.into()))?;
+        let running = self.shared(key)?;
+        // An extension without `getPlaylist` is asked `getAlbum` for a playlist (Lokal's bootstrap does the same).
+        let getter = match kind {
+            crate::catalogue::Kind::Playlist if !running.engine.has("getPlaylist") => "getAlbum",
+            other => other.getter(),
+        };
+        if !running.engine.has(getter) {
+            return Err(Trouble::Missing(format!(
+                "{} has no {} pages",
+                addon.manifest.display_name,
+                kind.word()
+            )));
+        }
+        let setup = running.host.setup();
+        let session = setup.session.as_deref();
+        let manifest = &addon.manifest;
+        let result = invoke(&running, session, getter, &[json!(id)], CALL).map_err(|trouble| {
+            sort_trouble(
+                trouble,
+                &manifest.display_name,
+                &setup.network,
+                session,
+                false,
+            )
+        })?;
+        if result.is_null() || result.get("success") == Some(&Value::Bool(false)) {
+            let said = if result.get("needsVerification") == Some(&Value::Bool(true)) {
+                "VERIFY_REQUIRED".to_string()
+            } else {
+                failure_text(&result, &format!("The add-on has no such {}", kind.word()))
+            };
+            return Err(sort_trouble(
+                Trouble::Missing(said),
+                &manifest.display_name,
+                &setup.network,
+                session,
+                false,
+            ));
+        }
+        // Its songs: an album's and a playlist's own, an artist's best known.
+        let songs = match kind {
+            crate::catalogue::Kind::Artist => crate::track::rows(
+                &json!({ "tracks": result.get("top_tracks").cloned().unwrap_or(Value::Null) }),
+            ),
+            _ => crate::track::rows(
+                &json!({ "tracks": result.get("tracks").cloned().unwrap_or(Value::Null) }),
+            ),
+        };
+        self.remember(key, &songs);
+        Ok(result)
+    }
+
     /// The song `id` as a search gave it, when it is remembered.
     pub fn track(&self, key: &str, id: &str) -> Option<MTrack> {
         lock(&self.remembered).get(&format!("{key}:{id}"))

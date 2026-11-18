@@ -18,8 +18,9 @@
 	const sid = $derived(page.params.source ?? '');
 	const id = $derived(page.params.id ?? '');
 	let artist = $state.raw<Artist | null>(null);
-	// A library artist's page in the catalogue (YouTube Music): all their albums and singles, not only the ones you have.
-	let tube = $state.raw<Artist | null>(null);
+	// A library artist's page in the catalogue (YouTube Music, else an extension that keeps one): all their albums and
+	// singles, not only the ones you have.
+	let tube = $state.raw<(Artist & { sourceId: string }) | null>(null);
 	let status = $state<'loading' | 'ok' | 'missing' | 'failed'>('loading');
 	let seq = 0;
 
@@ -134,22 +135,23 @@
 		{/if}
 		{#if tube}
 			{@const tid = tube.id}
+			{@const tsid = tube.sourceId}
 			{#if tube.albums.length}
-				<h2 class="vh2">Albums {#if tube.more?.albums}<a class="vh2-more" href="{artistHref({ sourceId: YOUTUBE, id: tid })}/albums">Show all</a>{/if}</h2>
+				<h2 class="vh2">Albums {#if tube.more?.albums}<a class="vh2-more" href="{artistHref({ sourceId: tsid, id: tid })}/albums">Show all</a>{/if}</h2>
 				<div class="shelf-w" use:shelf>
 					<div class="shelf">
 						{#each tube.albums as al (al.id)}
-							<Card title={al.title} sub={albumSub(al)} artwork={al.artwork} href={albumHref({ sourceId: YOUTUBE, id: al.id })} />
+							<Card title={al.title} sub={albumSub(al)} artwork={al.artwork} href={albumHref({ sourceId: tsid, id: al.id })} />
 						{/each}
 					</div>
 				</div>
 			{/if}
 			{#if tube.singles?.length}
-				<h2 class="vh2">Singles and EPs {#if tube.more?.singles}<a class="vh2-more" href="{artistHref({ sourceId: YOUTUBE, id: tid })}/singles">Show all</a>{/if}</h2>
+				<h2 class="vh2">Singles and EPs {#if tube.more?.singles}<a class="vh2-more" href="{artistHref({ sourceId: tsid, id: tid })}/singles">Show all</a>{/if}</h2>
 				<div class="shelf-w" use:shelf>
 					<div class="shelf">
 						{#each tube.singles as al (al.id)}
-							<Card title={al.title} sub={albumSub(al)} artwork={al.artwork} href={albumHref({ sourceId: YOUTUBE, id: al.id })} />
+							<Card title={al.title} sub={albumSub(al)} artwork={al.artwork} href={albumHref({ sourceId: tsid, id: al.id })} />
 						{/each}
 					</div>
 				</div>
@@ -159,12 +161,12 @@
 				<div class="shelf-w" use:shelf>
 					<div class="shelf shelf-artists">
 						{#each tube.related as r (r.id)}
-							<Card title={r.name} artwork={r.artwork} href={artistHref({ sourceId: YOUTUBE, id: r.id })} ini={r.name.slice(0, 2).toUpperCase()} />
+							<Card title={r.name} artwork={r.artwork} href={artistHref({ sourceId: tsid, id: r.id })} ini={r.name.slice(0, 2).toUpperCase()} />
 						{/each}
 					</div>
 				</div>
 			{/if}
-			<p class="s-hint tube-all"><a class="lnk" href={artistHref({ sourceId: YOUTUBE, id: tid })}>{artist.name} on YouTube Music</a></p>
+			{#if tsid === YOUTUBE}<p class="s-hint tube-all"><a class="lnk" href={artistHref({ sourceId: tsid, id: tid })}>{artist.name} on YouTube Music</a></p>{/if}
 		{/if}
 		{#if artist.related?.length}
 			<h2 class="vh2">Fans also like</h2>

@@ -167,17 +167,17 @@ pub(crate) fn atmos_mode(value: &Value) -> Option<&'static str> {
 }
 
 /// `map[key]`, when it is there and not null.
-fn present<'a>(map: &'a Map<String, Value>, key: &str) -> Option<&'a Value> {
+pub(crate) fn present<'a>(map: &'a Map<String, Value>, key: &str) -> Option<&'a Value> {
     map.get(key).filter(|value| !value.is_null())
 }
 
 /// The first of `keys` that is there (Lokal's `a ?? b ?? …`).
-fn first<'a>(map: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a Value> {
+pub(crate) fn first<'a>(map: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a Value> {
     keys.iter().find_map(|key| present(map, key))
 }
 
 /// A number, or a string holding one.
-fn number(value: &Value) -> Option<f64> {
+pub(crate) fn number(value: &Value) -> Option<f64> {
     match value {
         Value::Number(n) => n.as_f64(),
         Value::String(text) => text.trim().parse::<f64>().ok(),
@@ -187,12 +187,12 @@ fn number(value: &Value) -> Option<f64> {
 }
 
 /// A JSON number as a whole number of 0 or more (track and disc numbers).
-fn whole(value: Option<&Value>) -> Option<u32> {
+pub(crate) fn whole(value: Option<&Value>) -> Option<u32> {
     let n = value?.as_f64()?;
     (n.is_finite() && n >= 0.0 && n <= u32::MAX as f64).then_some(n as u32)
 }
 
-fn artists(map: &Map<String, Value>) -> String {
+pub(crate) fn artists(map: &Map<String, Value>) -> String {
     match map.get("artists") {
         Some(Value::Array(list)) => list
             .iter()
@@ -256,7 +256,7 @@ fn album(map: &Map<String, Value>) -> Option<String> {
 }
 
 /// The first four characters of `release_date`, when they are a number.
-fn year(map: &Map<String, Value>) -> Option<String> {
+pub(crate) fn year(map: &Map<String, Value>) -> Option<String> {
     let date = text_of(present(map, "release_date"));
     let head: String = date.chars().take(4).collect();
     head.trim().parse::<i64>().ok().map(|year| year.to_string())
@@ -366,7 +366,7 @@ fn without_khz(text: &str) -> String {
 }
 
 /// The largest cover the song names (pkgs.dart:481-563).
-fn artwork(map: &Map<String, Value>) -> Option<String> {
+pub(crate) fn artwork(map: &Map<String, Value>) -> Option<String> {
     let album = map.get("album").and_then(Value::as_object);
     let mut candidates: Vec<Option<&Value>> = vec![map.get("images"), map.get("image")];
     if let Some(album) = album {
@@ -402,7 +402,7 @@ fn artwork(map: &Map<String, Value>) -> Option<String> {
 }
 
 /// An image a value names, and how large it is (0 when unknown).
-fn image(value: &Value) -> Option<(String, f64)> {
+pub(crate) fn image(value: &Value) -> Option<(String, f64)> {
     match value {
         Value::String(url) if Url::parse(url).is_ok() => Some((url.clone(), size_in_url(url))),
         Value::Object(map) => {

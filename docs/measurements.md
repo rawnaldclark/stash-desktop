@@ -1747,3 +1747,11 @@ As on the phone and the web, YouTube Music is what is searched and browsed, and 
 | Kesariya | JioSaavn (Mornye) | 10.9 MB M4A | 9 s |
 | Around the World | YouTube Music, one request | 7.1 MB M4A | 169 s |
 | Around the World | YouTube Music, in pieces | 7.1 MB M4A | 8 s (including the sources asked first) |
+
+## 47. A Mornye extension's catalogue: artist and album pages without YouTube Music
+
+With YouTube Music switched off, artist pages came only from the library (the albums you have songs from). The official Mornye extensions that are metadata providers (manifest `type` names `metadata_provider`: Qobuz, Tidal, Deezer, SoundCloud, Amazon, Spotify, Apple Music) follow SpotiFLAC's extension interface and answer `customSearch(query, {filter: album | artist})`, `getArtist`, `getAlbum` and `getPlaylist`; Lokal itself reads its artist pages from Apple Music's catalogue, not from the extensions. Stash now asks them (`stash_mornye::catalogue`, `Packages::{find, page}`; `GET /api/mornye/find|artist|album|playlist`), and such an extension is listed with the resource `catalogue`.
+
+The window's catalogue is YouTube Music when it is on, else the first extension (in the listener's order) that keeps one: search's artists and albums, a library artist's page ("In your library", then all their albums and singles), and the extension's own artist and album pages, whose songs play from it.
+
+Measured live with SoundCloud (the scratch library's, no sign-in): Tame Impala found (artists and albums) in 1.1 s; their page, 14 albums, 15 singles and 29 songs, in 1.2 s; an album page in 0.2 s; a song from an album page playing in 4.5 s. SoundCloud's label releases are its paid tier's ("direct SoundCloud track is not playable"), from its search as from its pages. Qobuz (`artist/get`, up to 100 releases) needs the listener's verification and was not measured here. JioSaavn's `getAlbum` answers JioSaavn's own shape, not SpotiFLAC's (its album pages come back without songs): not read.

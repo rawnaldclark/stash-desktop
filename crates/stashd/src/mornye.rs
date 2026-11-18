@@ -31,6 +31,7 @@ use stash_core::addons::{
 };
 use stash_core::reach::Reach;
 use stash_mornye::Trouble;
+use stash_mornye::catalogue::{self, Kind, MAlbum, MArtist};
 use stash_mornye::host::Transfer;
 use stash_mornye::live::{self, Growing, Playable};
 use stash_mornye::packages::{DownloadRequest, Downloaded, Packages};
@@ -120,6 +121,21 @@ fn kept_name(name: &str) -> &'static str {
     let kept: &'static str = Box::leak(name.to_string().into_boxed_str());
     names.insert(kept);
     kept
+}
+
+/// Whether an extension's qualities name a lossless one.
+fn lossless_of(quality_options: &Value) -> bool {
+    quality_options.as_array().is_some_and(|options| {
+        options.iter().any(|o| {
+            let words = format!(
+                "{} {}",
+                o.get("id").and_then(Value::as_str).unwrap_or_default(),
+                o.get("kind").and_then(Value::as_str).unwrap_or_default()
+            )
+            .to_ascii_lowercase();
+            words.contains("lossless") || words.contains("flac")
+        })
+    })
 }
 
 fn trouble_of(who: &'static str, trouble: Trouble) -> AddonError {
@@ -324,17 +340,9 @@ impl Mornye {
             .into_iter()
             .filter(|a| a.playable && a.access.ready)
             .filter_map(|a| {
-                let lossless = a.quality_options.as_array().is_some_and(|options| {
-                    options.iter().any(|o| {
-                        let words = format!(
-                            "{} {}",
-                            o.get("id").and_then(Value::as_str).unwrap_or_default(),
-                            o.get("kind").and_then(Value::as_str).unwrap_or_default()
-                        )
-                        .to_ascii_lowercase();
-                        words.contains("lossless") || words.contains("flac")
-                    })
-                });
+                let lossless = lossless_of(&a.quality_options);
+                // A metadata provider: its albums, artists and playlists are pages of the window's.
+                let catalogue = self.packages.has_catalogue(&a.key);
                 let manifest = Manifest {
                     stash: 1,
                     id: format!("{PREFIX}{}", a.key),
@@ -347,11 +355,16 @@ impl Mornye {
                         a.description.clone()
                     }),
                     // What it plays is the whole song, opened (an encrypted one is refused): that is what is saved.
-                    resources: vec![
-                        "search".to_string(),
-                        "stream".to_string(),
-                        "download".to_string(),
-                    ],
+                    resources: [
+                        Some("search"),
+                        Some("stream"),
+                        Some("download"),
+                        catalogue.then_some("catalogue"),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .map(str::to_string)
+                    .collect(),
                     dialect: Default::default(),
                     resolve_by_isrc: false,
                     quality: None,
@@ -865,6 +878,140 @@ fn failed(status: u16, e: String) -> Reply {
     refuse(status, &e)
 }
 
+// ---- an extension's catalogue: its albums, artists and playlists, as the window's pages
+
+/// A song of a catalogue page, as a search gives the window one (`serve::found_track`).
+fn page_song(found: MTrack, lossless: bool) -> Option<Value> {
+    track(found, lossless).and_then(|t| crate::serve::found_track(&t))
+}
+
+fn page_album(album: &MAlbum) -> Value {
+    json!({
+        "id": album.id,
+        "title": album.name,
+        "artist": album.artists,
+        "artist_id": album.artist_id,
+        "year": album.year.as_deref().and_then(|y| y.parse::<u32>().ok()),
+        "single": album.single(),
+        "tracks": album.total_tracks,
+        "art": album.artwork,
+    })
+}
+
+fn page_artist(artist: &MArtist) -> Value {
+    json!({ "id": artist.id, "name": artist.name, "art": artist.artwork })
+}
+
+/// `GET /api/mornye/find?key=&q=` (its artists and albums matching `q`), `/api/mornye/artist?key=&id=` (the artist,
+/// their best known songs, all their albums and singles), `/api/mornye/album?key=&id=` and
+/// `/api/mornye/playlist?key=&id=` (with their songs). The songs play from the extension (`mornye.<key>`).
+fn catalogue_page(mornye: &Arc<Mornye>, path: &str, key: &str, id: &str, q: &str) -> Reply {
+    let Some(addon) = mornye
+        .packages
+        .get(key)
+        .filter(|_| mornye.packages.has_catalogue(key))
+    else {
+        return refuse(404, "that extension has no catalogue");
+    };
+    let who = kept_name(&addon.display_name);
+    let lossless = lossless_of(&addon.quality_options);
+    let songs = |tracks: Vec<MTrack>| -> Vec<Value> {
+        tracks
+            .into_iter()
+            .filter_map(|t| page_song(t, lossless))
+            .collect()
+    };
+    let answer: Result<Value, Trouble> = match path {
+        "/api/mornye/find" => find_page(mornye, key, q.trim()),
+        "/api/mornye/artist" => mornye
+            .packages
+            .page(key, Kind::Artist, id)
+            .and_then(|page| {
+                catalogue::artist_of(&page)
+                    .ok_or_else(|| Trouble::Unavailable("That artist is not there".into()))
+            })
+            .map(|artist| {
+                let (singles, albums): (Vec<&MAlbum>, Vec<&MAlbum>) =
+                    artist.albums.iter().partition(|a| a.single());
+                json!({
+                    "id": artist.id,
+                    "name": artist.name,
+                    "art": artist.artwork,
+                    "albums": albums.into_iter().map(page_album).collect::<Vec<_>>(),
+                    "singles": singles.into_iter().map(page_album).collect::<Vec<_>>(),
+                    "songs": songs(artist.top_tracks.clone()),
+                })
+            }),
+        "/api/mornye/album" => mornye
+            .packages
+            .page(key, Kind::Album, id)
+            .and_then(|page| {
+                catalogue::album_of(&page)
+                    .ok_or_else(|| Trouble::Unavailable("That album is not there".into()))
+            })
+            .map(|album| {
+                let mut out = page_album(&album);
+                out["songs"] = json!(songs(album.tracks));
+                out
+            }),
+        _ => mornye
+            .packages
+            .page(key, Kind::Playlist, id)
+            .and_then(|page| {
+                catalogue::playlist_of(&page)
+                    .ok_or_else(|| Trouble::Unavailable("That playlist is not there".into()))
+            })
+            .map(|playlist| {
+                json!({
+                    "id": playlist.id,
+                    "title": playlist.name,
+                    "author": playlist.owner,
+                    "art": playlist.artwork,
+                    "songs": songs(playlist.tracks),
+                })
+            }),
+    };
+    match answer {
+        Ok(value) => reply_json(200, value),
+        Err(trouble) => {
+            let e = trouble_of(who, trouble);
+            let status = match e.code {
+                Code::NotFound => 404,
+                Code::Unauthorized => 401,
+                Code::RateLimited => 429,
+                Code::Refused => 409,
+                _ => 502,
+            };
+            refuse(status, &e.in_words())
+        }
+    }
+}
+
+/// An extension's artists, then its albums, matching `q`: one it cannot find still leaves the other.
+fn find_page(mornye: &Arc<Mornye>, key: &str, q: &str) -> Result<Value, Trouble> {
+    if q.is_empty() {
+        return Ok(json!({ "artists": [], "albums": [] }));
+    }
+    let artists = mornye.packages.find(key, q, Kind::Artist, 8);
+    let albums = mornye.packages.find(key, q, Kind::Album, 12);
+    if let (Err(trouble), Err(_)) = (&artists, &albums) {
+        return Err(trouble.clone());
+    }
+    let artists: Vec<Value> = artists
+        .unwrap_or_default()
+        .iter()
+        .filter_map(catalogue::artist_of)
+        .map(|a| page_artist(&a))
+        .collect();
+    let albums: Vec<Value> = albums
+        .unwrap_or_default()
+        .iter()
+        .filter_map(catalogue::album_of)
+        .map(|a| page_album(&a))
+        .collect();
+    Ok(json!({ "artists": artists, "albums": albums }))
+}
+
 /// The window's routes.
 pub(crate) fn route(state: &State, request: &mut Request, path: &str) -> Result<Option<Reply>> {
     if !path.starts_with("/api/mornye") {
@@ -915,6 +1062,18 @@ pub(crate) fn route(state: &State, request: &mut Request, path: &str) -> Result<
                 Ok(status) => reply_json(200, status),
                 Err(e) => failed(404, e),
             },
+            "/api/mornye/find"
+            | "/api/mornye/artist"
+            | "/api/mornye/album"
+            | "/api/mornye/playlist" => {
+                if offline(state) {
+                    return Ok(Some(refuse(
+                        409,
+                        "Stash is offline: the extension is not asked",
+                    )));
+                }
+                catalogue_page(&mornye, path, &query("key"), &query("id"), &query("q"))
+            }
             _ => return Ok(None),
         };
         return Ok(Some(reply));

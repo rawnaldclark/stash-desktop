@@ -440,6 +440,21 @@ export const tubeArtist = (id: string) => get<TubeArtistPage>(tube('artist', id)
 export const tubePlaylist = (id: string) => get<TubePlaylistPage>(tube('playlist', id));
 export const tubeDiscography = (id: string, kind: 'albums' | 'singles') => get<TubeDiscography>(`${tube('discography', id)}&kind=${kind}`);
 
+// ---- a Mornye extension's catalogue (a metadata provider: Qobuz, Tidal, Deezer, ...): its artists, albums, playlists
+
+/** The window's source id of a Mornye extension (`mornye.<key>`), and back. */
+export const MORNYE = 'mornye.';
+export const mornyeKey = (sourceId: string): string | null => (sourceId.startsWith(MORNYE) ? sourceId.slice(MORNYE.length) : null);
+export type CatAlbum = { id: string; title: string; artist: string; artist_id: string | null; year: number | null; single: boolean; tracks: number | null; art: string | null };
+export type CatArtist = { id: string; name: string; art: string | null };
+export type CatFound = { artists: CatArtist[]; albums: CatAlbum[] };
+export type CatArtistPage = CatArtist & { albums: CatAlbum[]; singles: CatAlbum[]; songs: FoundTrack[] };
+export type CatAlbumPage = CatAlbum & { songs: FoundTrack[] };
+const cat = (what: string, key: string, id: string) => `/api/mornye/${what}?key=${encodeURIComponent(key)}&id=${encodeURIComponent(id)}`;
+export const catFind = (key: string, q: string, signal?: AbortSignal) => get<CatFound>(`/api/mornye/find?key=${encodeURIComponent(key)}&q=${encodeURIComponent(q)}`, signal);
+export const catArtist = (key: string, id: string) => get<CatArtistPage>(cat('artist', key, id));
+export const catAlbum = (key: string, id: string) => get<CatAlbumPage>(cat('album', key, id));
+
 // ---- YouTube Music for a listener who signed in: their account, their library, and the home page
 
 /** A card of the home page or of the library: a song plays; the rest open a page. */

@@ -855,6 +855,14 @@ const search: SearchAPI = {
 		const failed: SearchResult['failed'] = [];
 		// YouTube Music, when it is one of them, is also asked for the albums, artists and playlists the text names. Its
 		// trouble is told with its songs' (the same line to it), so here it only comes back empty.
+		// Without YouTube Music, the first extension that keeps a catalogue is asked for the artists and albums.
+		const catSource = asked.some((a) => a.id === core.YOUTUBE) ? null : catalogueSource();
+		const theirCat: Promise<core.CatFound | null> = catSource
+			? core.catFind(core.mornyeKey(catSource)!, query, opts?.signal).catch((e) => {
+					if (opts?.signal?.aborted) throw e;
+					return null;
+				})
+			: Promise.resolve(null);
 		const more: Promise<core.TubeFound | null> = asked.some((a) => a.id === core.YOUTUBE)
 			? core.tubeSearch(query, opts?.signal).catch((e) => {
 					if (opts?.signal?.aborted) throw e;
@@ -883,6 +891,15 @@ const search: SearchAPI = {
 		// In the add-ons' own order, whichever answered first.
 		failed.sort((x, y) => asked.findIndex((a) => a.id === x.sourceId) - asked.findIndex((a) => a.id === y.sourceId));
 		const tube = await more;
+		const fromCat = await theirCat;
+		if (!tube && fromCat && catSource) {
+			const theirArtists = fromCat.artists.map((a) => catArtistCard(catSource, a));
+			const theirAlbums = fromCat.albums.map((a) => catAlbumCard(catSource, a));
+			let pick = topPick;
+			const named = theirArtists.find((a) => bare(a.name) === typed);
+			if (pick.kind === 'track' && named) pick = { kind: 'artist', artist: named };
+			return { top: mergeTop(bySource), artists: [...artists, ...theirArtists], albums: [...albums, ...theirAlbums], playlists: [], topPick: pick, bySource, failed, pending: [] };
+		}
 		if (!tube) return { top: mergeTop(bySource), ...found, bySource, failed, pending: [] };
 		// The library's own first, then YouTube Music's. The card at the top: the library's artist or album of that name,
 		// else YouTube Music's when what it puts first is the artist or the album whose name was typed.
@@ -920,6 +937,30 @@ const artOf = (art: string | null) => {
 const tubeArtist = (a: core.TubeArtist): SearchArtist => ({ sourceId: core.YOUTUBE, id: a.id, name: a.name, ...(artOf(a.art) ? { artwork: artOf(a.art) } : {}) });
 const tubeAlbumCard = (a: core.TubeAlbum): SearchAlbum => ({ sourceId: core.YOUTUBE, id: a.id, title: a.title, artist: a.artist, ...(a.year ? { year: a.year } : {}), ...(artOf(a.art) ? { artwork: artOf(a.art) } : {}) });
 const tubeArtistAlbum = (a: core.TubeAlbum) => ({ id: a.id, title: a.title, ...(a.year ? { year: a.year } : {}), ...(artOf(a.art) ? { artwork: artOf(a.art) } : {}) });
+const catAlbumCard = (sourceId: string, a: core.CatAlbum): SearchAlbum => ({ sourceId, id: a.id, title: a.title, artist: a.artist, ...(a.year ? { year: a.year } : {}), ...(artOf(a.art) ? { artwork: artOf(a.art) } : {}) });
+const catArtistCard = (sourceId: string, a: core.CatArtist): SearchArtist => ({ sourceId, id: a.id, name: a.name, ...(artOf(a.art) ? { artwork: artOf(a.art) } : {}) });
+const catArtistAlbum = (a: core.CatAlbum) => ({ id: a.id, title: a.title, ...(a.year ? { year: a.year } : {}), ...(a.tracks ? { trackCount: a.tracks } : {}), ...(artOf(a.art) ? { artwork: artOf(a.art) } : {}) });
+/** A song of an extension's page: its album and artist (when the page names them) link to their pages. */
+const catTrack = (s: core.FoundTrack, on?: { albumId?: string; artistId?: string | null }): Track => ({
+	id: s.id,
+	title: s.title,
+	artist: s.artist,
+	...(s.album ? { album: s.album } : {}),
+	...(on?.albumId ? { albumId: on.albumId } : {}),
+	...(on?.artistId ? { artistId: on.artistId } : {}),
+	...(s.duration_ms ? { durationMs: s.duration_ms } : {}),
+	...(s.explicit ? { explicit: true } : {}),
+	...(artOf(s.art) ? { artwork: artOf(s.art) } : {})
+});
+/** The catalogue a search, an artist's page or an album's page is read from: YouTube Music when it is on, else the first
+ *  Mornye extension (in the listener's order) that keeps one. Null offline, or when there is none. */
+function catalogueSource(): string | null {
+	if (get(offline)) return null;
+	const usable = get(addonStore).filter((a) => a.enabled && !a.problem);
+	if (usable.some((a) => a.id === core.YOUTUBE)) return core.YOUTUBE;
+	return usable.find((a) => a.id.startsWith(core.MORNYE) && a.resources.includes('catalogue'))?.id ?? null;
+}
+
 const tubeTrack = (s: core.TubeSong): Track => ({
 	id: s.id,
 	title: s.title,
@@ -959,6 +1000,11 @@ const browse: BrowseAPI = {
 			const p = await core.tubePlaylist(id);
 			return { id, title: p.title, artist: p.author, kind: 'playlist', more: p.more, tracks: p.songs.map(tubeTrack), ...(artOf(p.art) ? { artwork: artOf(p.art) } : {}) };
 		}
+		const key = core.mornyeKey(sourceId);
+		if (key !== null) {
+			const a = await core.catAlbum(key, id);
+			return { id, title: a.title, artist: a.artist, kind: a.single ? 'single' : 'album', tracks: a.songs.map((s) => catTrack(s, { albumId: id, artistId: a.artist_id })), ...(a.year ? { year: a.year } : {}), ...(artOf(a.art) ? { artwork: artOf(a.art) } : {}) };
+		}
 		const a = await core.album(numbered(sourceId, id, 'album'));
 		const out: Album = { id, title: a.album.title, artist: a.album.artist, tracks: a.rows.map(trackOfRow) };
 		if (a.album.year) out.year = a.album.year;
@@ -980,6 +1026,18 @@ const browse: BrowseAPI = {
 				...(artOf(a.art) ? { artwork: artOf(a.art) } : {})
 			};
 		}
+		const key = core.mornyeKey(sourceId);
+		if (key !== null) {
+			const a = await core.catArtist(key, id);
+			return {
+				id,
+				name: a.name,
+				topTracks: a.songs.map((s) => catTrack(s, { artistId: id })),
+				albums: a.albums.map(catArtistAlbum),
+				singles: a.singles.map(catArtistAlbum),
+				...(artOf(a.art) ? { artwork: artOf(a.art) } : {})
+			};
+		}
 		const a = await core.artist(numbered(sourceId, id, 'artist'));
 		const out: Artist = {
 			id,
@@ -993,21 +1051,28 @@ const browse: BrowseAPI = {
 		return out;
 	},
 	async catalogueArtist(name) {
-		// YouTube Music is the catalogue: asked only when it is switched on and Stash is online.
-		if (get(offline) || !get(addonStore).some((a) => a.id === core.YOUTUBE && a.enabled && !a.problem)) return null;
+		// YouTube Music when it is on, else an extension that keeps a catalogue; offline, none.
+		const source = catalogueSource();
 		const bare = (s: string) => fold(s).replace(/^(?:the|a|an)\s+(?=\S)/, '');
 		const wanted = bare(name);
-		if (!wanted) return null;
+		if (!source || !wanted) return null;
 		try {
-			const found = await core.tubeSearch(name);
-			const named = [...(found.top?.kind === 'artist' ? [found.top.artist] : []), ...found.artists].find((a) => bare(a.name) === wanted);
-			return named ? await this.artist(core.YOUTUBE, named.id) : null;
+			let id: string | undefined;
+			if (source === core.YOUTUBE) {
+				const found = await core.tubeSearch(name);
+				id = [...(found.top?.kind === 'artist' ? [found.top.artist] : []), ...found.artists].find((a) => bare(a.name) === wanted)?.id;
+			} else {
+				const found = await core.catFind(core.mornyeKey(source)!, name);
+				id = found.artists.find((a) => bare(a.name) === wanted)?.id;
+			}
+			return id ? { ...(await this.artist(source, id)), sourceId: source } : null;
 		} catch {
 			return null;
 		}
 	},
 	async discography(sourceId, id, kind) {
-		// Only YouTube Music's artists have more than their page shows; a library artist's page lists all of theirs.
+		// Only YouTube Music's artists have more than their page shows; a library artist's page, and an extension's,
+		// lists all of theirs.
 		if (sourceId !== core.YOUTUBE) {
 			const a = await this.artist(sourceId, id);
 			return { id, name: a.name, kind, albums: kind === 'albums' ? a.albums : (a.singles ?? []), whole: true };

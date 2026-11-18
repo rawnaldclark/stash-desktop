@@ -20,6 +20,7 @@ pub const PRELUDE: &str = include_str!("prelude.js");
 pub const COMPAT_VERSION: &str = "5.3.0";
 pub mod auth;
 pub mod bytes;
+pub mod catalogue;
 pub mod crypto;
 pub mod download;
 pub mod ffmpeg;
