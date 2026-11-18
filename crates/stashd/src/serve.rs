@@ -457,7 +457,16 @@ impl Lacks {
     }
 }
 
-/// Asks the listener's add-ons that can (`can`) for the library's song `id`, in the listener's order, and does `act`
+/// A song the add-ons are asked for: the library's (its row), or one found somewhere that the library does not have
+/// (a YouTube Music search result), as it was described. Only a row of the library has its answers kept: the names the
+/// add-ons gave it, their "no"s, and whether it is on the list of songs no add-on could find.
+pub(crate) enum Asked {
+    Row(i64),
+    Found(Box<stash_core::library::Described>),
+}
+
+/// Asks the listener's add-ons that can (`can`) for the song (`asked`: the library's, or one found elsewhere), in the
+/// listener's order, and does `act`
 /// with the first that has it: the add-on's own name for the song is tried first, then the add-on is asked whether
 /// it has the song (or searched, when it can only be searched; a result is taken only when it is the same song by
 /// the contract's rule). Answers what `act` gave and which add-on gave it. `none` says why when no add-on can.
@@ -469,7 +478,7 @@ pub(crate) fn through_addons<T>(
     registry: &Registry,
     library: &Mutex<Library>,
     lacks: &Lacks,
-    id: i64,
+    asked: Asked,
     none: &str,
     can: impl Fn(&Addon) -> bool,
     act: impl Fn(&Addon, &str, &str) -> std::result::Result<T, AddonError>,
@@ -479,15 +488,27 @@ pub(crate) fn through_addons<T>(
         miss: true,
         ..Default::default()
     };
-    let described = library
-        .lock()
-        .unwrap()
-        .describe(id)
-        .map_err(|e| Failure {
-            message: e.to_string(),
-            ..Default::default()
-        })?
-        .ok_or_else(|| gone("it is no longer in the library"))?;
+    let (id, described) = match asked {
+        Asked::Row(id) => (
+            Some(id),
+            library
+                .lock()
+                .unwrap()
+                .describe(id)
+                .map_err(|e| Failure {
+                    message: e.to_string(),
+                    ..Default::default()
+                })?
+                .ok_or_else(|| gone("it is no longer in the library"))?,
+        ),
+        Asked::Found(described) => (None, *described),
+    };
+    // The "no" an add-on said, kept for a song of the library.
+    let missed = |addon_id: &str, believed: bool| {
+        if let Some(id) = id {
+            lacks.missed(id, addon_id, believed);
+        }
+    };
     let addons: Vec<Arc<Loaded>> = registry
         .read()
         .unwrap()
@@ -523,7 +544,9 @@ pub(crate) fn through_addons<T>(
         } else {
             lacks.gave(addon_id);
         }
-        let _ = library.lock().unwrap().found_again(id);
+        if let Some(id) = id {
+            let _ = library.lock().unwrap().found_again(id);
+        }
     };
     for loaded in &addons {
         let Some(addon) = loaded.usable() else {
@@ -548,7 +571,9 @@ pub(crate) fn through_addons<T>(
                 }
                 // The add-on no longer knows that name: it is forgotten, and the add-on is asked for the song.
                 Err(e) if e.code == Code::NotFound => {
-                    let _ = library.lock().unwrap().drop_ref(id, addon_id);
+                    if let Some(id) = id {
+                        let _ = library.lock().unwrap().drop_ref(id, addon_id);
+                    }
                 }
                 Err(e) if e.is_miss() => {
                     had_it = true;
@@ -563,7 +588,7 @@ pub(crate) fn through_addons<T>(
         }
         // A "no" from a little while ago counts only if it was believed when it was said. One that was not is asked
         // again once the add-on is finding other songs: its answer counts then.
-        if let Some(believed) = lacks.remembered(id, addon_id) {
+        if let Some(believed) = id.and_then(|id| lacks.remembered(id, addon_id)) {
             remembered_from.push(addon_id);
             if believed {
                 said_no.push(addon_id);
@@ -609,7 +634,7 @@ pub(crate) fn through_addons<T>(
             Ok(Some(track)) => track,
             // It does not have the song, or what it answered cannot be this song.
             Ok(None) => {
-                lacks.missed(id, addon_id, lacks.finding(addon_id));
+                missed(addon_id, lacks.finding(addon_id));
                 said_no.push(addon_id);
                 continue;
             }
@@ -617,7 +642,7 @@ pub(crate) fn through_addons<T>(
             // search answer is not.
             Err(e) if e.is_miss() || e.code == Code::InvalidResponse => {
                 let no = e.is_miss() || resolving;
-                lacks.missed(id, addon_id, no && lacks.finding(addon_id));
+                missed(addon_id, no && lacks.finding(addon_id));
                 if no {
                     said_no.push(addon_id);
                 }
@@ -635,7 +660,9 @@ pub(crate) fn through_addons<T>(
         }
         match result {
             Ok(done) => {
-                let _ = library.lock().unwrap().set_ref(id, addon_id, &track.id);
+                if let Some(id) = id {
+                    let _ = library.lock().unwrap().set_ref(id, addon_id, &track.id);
+                }
                 found(addon_id, true);
                 return Ok((done, addon_id.to_string()));
             }
@@ -677,7 +704,8 @@ pub(crate) fn through_addons<T>(
                 })
                 .map(|a| a.stored.id.clone())
                 .collect();
-            if !had_it
+            if let Some(id) = id
+                && !had_it
                 && !said_no.is_empty()
                 && askable.iter().all(|a| said_no.contains(&a.as_str()))
                 && said_no.iter().all(|a| lacks.finding(a))
@@ -760,6 +788,43 @@ fn resolver(
             if offline {
                 return Err(gone("Stash is offline"));
             }
+            // A song found on YouTube Music is the catalogue's: it is asked of the listener's add-ons in their order, as
+            // a song of the library is (a lossless source first, when it comes before YouTube Music), and YouTube
+            // Music plays it when none of those has it.
+            if wanted.addon == stash_core::youtube::ID {
+                let described = stash_core::library::Described::of(
+                    stash_core::addons::Wanted {
+                        title: item.title.clone(),
+                        artist: item.artist.clone(),
+                        album: item.album.clone(),
+                        duration_ms: item.duration_ms,
+                        isrc: None,
+                        explicit: None,
+                    },
+                    vec![(wanted.addon.clone(), wanted.track.clone())],
+                );
+                return through_addons(
+                    &registry,
+                    &library,
+                    &lacks,
+                    Asked::Found(Box::new(described)),
+                    "there is no add-on to play it from",
+                    |addon| addon.offers_resource("stream"),
+                    |addon, addon_id, track| {
+                        let stream = stream_from(addon, addon_id, track)?;
+                        hand_over(&relays, port, None, stream, addon.reach())
+                            .map_err(|why| AddonError::host(stash_core::addons::Code::Refused, why))
+                    },
+                )
+                .map(|(located, addon_id)| {
+                    let _ = library.lock().unwrap().note_addon_use(
+                        &addon_id,
+                        stash_core::usage::Given::Stream,
+                        now_ms(),
+                    );
+                    located
+                });
+            }
             let loaded = registry
                 .read()
                 .unwrap()
@@ -814,7 +879,7 @@ fn resolver(
             &registry,
             &library,
             &lacks,
-            id,
+            Asked::Row(id),
             "it is not a file here, and there is no add-on to play it from",
             |addon| addon.offers_resource("stream"),
             |addon, addon_id, track| {

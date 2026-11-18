@@ -171,6 +171,25 @@ pub struct Described {
 }
 
 impl Described {
+    /// A song as the add-ons are asked for it, from what is known of it and what sources call it. A song that came
+    /// from YouTube alone carries the upload's title, channel and length: it is asked for as the song the title names,
+    /// the way the phone app asks.
+    pub fn of(wanted: crate::addons::Wanted, refs: Vec<(String, String)>) -> Described {
+        let from = |source: &str| refs.iter().any(|(s, _)| s == source);
+        let kept = wanted.clone();
+        let (wanted, also) = if from("youtube") && !from("spotify") {
+            crate::youtube_title::asked_for(wanted)
+        } else {
+            (wanted, Vec::new())
+        };
+        Described {
+            wanted,
+            kept,
+            also,
+            refs,
+        }
+    }
+
     /// The search result that is this song: matched as it is asked for, then each other way it may be read.
     pub fn pick<'t>(&self, found: &'t [crate::addons::Track]) -> Option<&'t crate::addons::Track> {
         std::iter::once(&self.wanted)
@@ -801,21 +820,7 @@ impl Library {
             )?
             .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        // A song that came from YouTube alone carries the upload's title, channel and length: it is asked for as the
-        // song the title names, the way the phone app asks.
-        let from = |source: &str| refs.iter().any(|(s, _)| s == source);
-        let kept = wanted.clone();
-        let (wanted, also) = if from("youtube") && !from("spotify") {
-            crate::youtube_title::asked_for(wanted)
-        } else {
-            (wanted, Vec::new())
-        };
-        Ok(Some(Described {
-            wanted,
-            kept,
-            also,
-            refs,
-        }))
+        Ok(Some(Described::of(wanted, refs)))
     }
 
     /// Keeps what `source` calls the song `id` (in place of what it called it before).

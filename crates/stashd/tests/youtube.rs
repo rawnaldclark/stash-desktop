@@ -285,7 +285,7 @@ fn youtube_music_is_the_last_of_the_listener_s_sources() {
         )
     );
     assert!(it["host"].is_null() && it["problem"].is_null(), "{it}");
-    assert_eq!(it["resources"], json!(["search", "stream"]));
+    assert_eq!(it["resources"], json!(["search", "stream", "download"]));
 
     // It is not removed, checked for a new version or added over.
     for path in [

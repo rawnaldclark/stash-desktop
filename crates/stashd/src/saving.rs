@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use serde_json::{Value, json};
 use stash_core::Library;
-use stash_core::addons::{Code, StreamRequest};
+use stash_core::addons::{AddonError, Code, StreamRequest};
 use stash_core::downloads::{self, Song, Trouble};
 use stash_core::lists::{SavedDownload, UnsureTries};
 use stash_core::player::Failure;
@@ -501,13 +501,23 @@ fn fetch_and_keep(state: &State, id: i64, stop: &AtomicBool) -> Result<bool, Tro
             &state.addons,
             &state.library,
             &state.lacks,
-            id,
+            crate::serve::Asked::Row(id),
             "there is no add-on to save it from",
             |addon| addon.offers_download(),
             |addon, _, track| {
-                addon
-                    .download(track, &StreamRequest::default())
-                    .map(|info| (info, addon.reach()))
+                let info = addon.download(track, &StreamRequest::default())?;
+                // A WebM file (Opus from YouTube, through an extension) plays but cannot be tagged: the next source
+                // is asked for a file that can.
+                if info.container.as_deref() == Some("webm") {
+                    return Err(AddonError::host(
+                        Code::QualityUnavailable,
+                        format!(
+                            "{} gives a WebM file, which is not kept",
+                            addon.manifest.name
+                        ),
+                    ));
+                }
+                Ok((info, addon.reach()))
             },
         )
         .map_err(trouble_of)?;

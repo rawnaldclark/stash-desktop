@@ -257,7 +257,8 @@ fn youtube_is_asked_as_its_own_apps_ask_it() {
     assert!(source.is_built_in());
     assert_eq!(source.manifest.id, youtube::ID);
     assert!(source.offers_resource("search") && source.offers_resource("stream"));
-    assert!(!source.offers_download() && !source.offers_resource("resolve"));
+    // Its songs can be saved (the MP4 file, which can be tagged); it is searched, never asked "do you have this".
+    assert!(source.offers_download() && !source.offers_resource("resolve"));
 
     // A search: as YouTube Music on the web, for songs only; the visitor id it hands out is kept and sent back.
     let found = source.search("father stretch my hands", 3).unwrap();

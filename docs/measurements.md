@@ -1732,3 +1732,18 @@ Measured live, signed out (17 November 2026):
 | Johann Sebastian Bach | YouTube answers "Something went wrong": the 10 the page shows, not whole | 1,000 (ten answers, the cap), not whole | 5 s for the singles |
 
 A playlist of 1,000+ songs now says it goes on (`more: true`, 4.8 s for ten answers); lists of 210 and 492 songs say they are whole.
+
+## 46. YouTube Music as the catalogue; your sources as the copies
+
+As on the phone and the web, YouTube Music is what is searched and browsed, and the other sources (Mornye extensions, add-ons) are asked only for a song that plays:
+
+- **Search** asks YouTube Music alone (and the library) when it is switched on; with it off, the other sources are searched as before. No more "Asking JioSaavn, SoundCloud…".
+- **A YouTube Music song that plays** is asked of the listener's sources in their order, as a library song is (`serve::Asked::Found`: nothing is kept of the answers, since the library has no row for it), and YouTube Music plays it when none has it. Live: "Kesariya" from a YouTube search played from JioSaavn (AAC) in 3.0 s; "Around the World", which JioSaavn lacks, from YouTube Music in 1.0 s.
+- **A library artist's page** (where a song's artist name leads) also shows YouTube Music's page for that artist, found by name: their Albums, Singles and EPs, and Fans also like, with Show all; the albums you have are "In your library".
+- **Saving** works from Mornye extensions and YouTube Music. Both were stream-only, so with only those, a save was held with "there is no add-on to save it from" while the window had said "Saving to this computer". A Mornye extension's file is what it plays (whole and opened; encrypted songs without FFmpeg are refused). YouTube Music saves its MP4 (AAC) file, not the Opus WebM it plays, because a WebM file cannot be tagged; a source whose file is WebM (Mornye's YouTube Music extension) is passed over for the next. YouTube's file servers are asked 1 MiB at a time (`downloads::in_pieces`): one long answer slows to ~40 KB/s after its first megabytes.
+
+| Saved | From | Size | Time |
+|---|---|---|---|
+| Kesariya | JioSaavn (Mornye) | 10.9 MB M4A | 9 s |
+| Around the World | YouTube Music, one request | 7.1 MB M4A | 169 s |
+| Around the World | YouTube Music, in pieces | 7.1 MB M4A | 8 s (including the sources asked first) |

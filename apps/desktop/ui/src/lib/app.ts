@@ -844,8 +844,11 @@ const search: SearchAPI = {
 		const titled = albums.find((a) => bare(a.title) === typed);
 		const topPick: TopPick = named ? { kind: 'artist', artist: named } : titled ? { kind: 'album', album: titled } : { kind: 'track' };
 		const found = { artists, albums, playlists: [] as SearchPlaylist[], topPick };
-		// The add-ons a search asks: switched on, usable, and offering search. In the listener's order.
-		const asked = get(offline) ? [] : get(addonStore).filter((a) => a.enabled && !a.problem && a.resources.includes('search'));
+		// The add-ons a search asks: switched on, usable, and offering search. YouTube Music, when it is one of them, is the
+		// catalogue and is asked alone (as on the phone and the web): the other sources are asked for a song only as it
+		// plays, in the listener's order. Without it, the others are searched, in that order.
+		const searchable = get(offline) ? [] : get(addonStore).filter((a) => a.enabled && !a.problem && a.resources.includes('search'));
+		const asked = searchable.some((a) => a.id === core.YOUTUBE) ? searchable.filter((a) => a.id === core.YOUTUBE) : searchable;
 		if (!asked.length) return { top: mergeTop([lib]), ...found, bySource: [lib], failed: [], pending: [] };
 		opts?.onLibrary?.({ top: mergeTop([lib]), ...found, bySource: [lib], failed: [], pending: asked.map((a) => a.name) });
 
@@ -988,6 +991,20 @@ const browse: BrowseAPI = {
 		const art = artOf(a.artist.art);
 		if (art) out.artwork = art;
 		return out;
+	},
+	async catalogueArtist(name) {
+		// YouTube Music is the catalogue: asked only when it is switched on and Stash is online.
+		if (get(offline) || !get(addonStore).some((a) => a.id === core.YOUTUBE && a.enabled && !a.problem)) return null;
+		const bare = (s: string) => fold(s).replace(/^(?:the|a|an)\s+(?=\S)/, '');
+		const wanted = bare(name);
+		if (!wanted) return null;
+		try {
+			const found = await core.tubeSearch(name);
+			const named = [...(found.top?.kind === 'artist' ? [found.top.artist] : []), ...found.artists].find((a) => bare(a.name) === wanted);
+			return named ? await this.artist(core.YOUTUBE, named.id) : null;
+		} catch {
+			return null;
+		}
 	},
 	async discography(sourceId, id, kind) {
 		// Only YouTube Music's artists have more than their page shows; a library artist's page lists all of theirs.

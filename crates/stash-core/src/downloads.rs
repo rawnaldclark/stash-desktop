@@ -216,17 +216,27 @@ pub fn fetch(
         .proxy(None)
         .build();
     let agent = Guarded::agent(reach, config);
-    let mut answer = agent.get(url).call().map_err(|e| {
-        if let Some(words) = crate::reach::refusal(&e) {
-            return Trouble::Failed(format!("the file could not be fetched: {words}"));
+    // YouTube's file servers send one long answer slowly after its first few megabytes: there the file is asked for a
+    // piece at a time, each of which comes at full speed (as yt-dlp and the Mornye host ask).
+    let pieces = in_pieces(url);
+    let ask = |from: u64| {
+        let mut request = agent.get(url);
+        if pieces {
+            request = request.header("Range", format!("bytes={from}-{}", from + PIECE - 1));
         }
-        let why = format!("the file could not be fetched: {e}");
-        if passing(&e) {
-            Trouble::Busy(why, None)
-        } else {
-            Trouble::Failed(why)
-        }
-    })?;
+        request.call().map_err(|e| {
+            if let Some(words) = crate::reach::refusal(&e) {
+                return Trouble::Failed(format!("the file could not be fetched: {words}"));
+            }
+            let why = format!("the file could not be fetched: {e}");
+            if passing(&e) {
+                Trouble::Busy(why, None)
+            } else {
+                Trouble::Failed(why)
+            }
+        })
+    };
+    let mut answer = ask(0)?;
     let status = answer.status().as_u16();
     // Too many asks: everyone's. A server overwhelmed or in between: asked again later. Anything else is this file's own
     // answer.
@@ -247,11 +257,28 @@ pub fn fetch(
             "the file's server answered {status}"
         )));
     }
-    let of = answer
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok());
+    // Asked in pieces, the whole file's size is after the slash of the first piece's range; a server that answered
+    // the whole file at once (200) is read through as it is.
+    let pieces = pieces && status == 206;
+    let of = if pieces {
+        answer
+            .headers()
+            .get("content-range")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.rsplit_once('/'))
+            .and_then(|(_, total)| total.parse::<u64>().ok())
+    } else {
+        answer
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+    };
+    if pieces && of.is_none() {
+        return Err(Trouble::Failed(
+            "the file's server did not say how large the file is".into(),
+        ));
+    }
     if of.is_some_and(|n| n > MAX_FILE) {
         return Err(Trouble::Failed(
             "the file is larger than a song can be".into(),
@@ -261,40 +288,57 @@ pub fn fetch(
         std::fs::create_dir_all(folder)?;
     }
     let mut out = std::io::BufWriter::new(std::fs::File::create(part)?);
-    let mut body = answer.body_mut().with_config().limit(MAX_FILE + 1).reader();
     let mut buffer = vec![0u8; 64 * 1024];
     let (mut head, mut got) = (Vec::with_capacity(64), 0u64);
     let mut told = std::time::Instant::now();
     loop {
-        if cancelled() {
-            return Err(Trouble::Cancelled);
-        }
-        let n = body
-            .read(&mut buffer)
-            .map_err(|e| Trouble::Busy(format!("the file stopped coming in: {e}"), None))?;
-        if n == 0 {
-            break;
-        }
-        if head.len() < 64 {
-            let take = (64 - head.len()).min(n);
-            head.extend_from_slice(&buffer[..take]);
-            // A web page or an error is not saved as a song.
-            if head.len() >= 12 && kind_of(&head).is_none() {
+        let mut body = answer.body_mut().with_config().limit(MAX_FILE + 1).reader();
+        loop {
+            if cancelled() {
+                return Err(Trouble::Cancelled);
+            }
+            let n = body
+                .read(&mut buffer)
+                .map_err(|e| Trouble::Busy(format!("the file stopped coming in: {e}"), None))?;
+            if n == 0 {
+                break;
+            }
+            if head.len() < 64 {
+                let take = (64 - head.len()).min(n);
+                head.extend_from_slice(&buffer[..take]);
+                // A web page or an error is not saved as a song.
+                if head.len() >= 12 && kind_of(&head).is_none() {
+                    return Err(Trouble::Failed(
+                        "the add-on's link did not give an audio file".into(),
+                    ));
+                }
+            }
+            out.write_all(&buffer[..n])?;
+            got += n as u64;
+            if got > MAX_FILE {
                 return Err(Trouble::Failed(
-                    "the add-on's link did not give an audio file".into(),
+                    "the file is larger than a song can be".into(),
                 ));
             }
+            if told.elapsed() >= Duration::from_millis(250) {
+                progress(got, of);
+                told = std::time::Instant::now();
+            }
         }
-        out.write_all(&buffer[..n])?;
-        got += n as u64;
-        if got > MAX_FILE {
-            return Err(Trouble::Failed(
-                "the file is larger than a song can be".into(),
+        drop(body);
+        // The next piece, until the whole file is in.
+        if !pieces || of.is_none_or(|n| got >= n) {
+            break;
+        }
+        answer = ask(got)?;
+        if answer.status().as_u16() != 206 {
+            return Err(Trouble::Busy(
+                format!(
+                    "the file's server answered {} for its next piece",
+                    answer.status().as_u16()
+                ),
+                None,
             ));
-        }
-        if told.elapsed() >= Duration::from_millis(250) {
-            progress(got, of);
-            told = std::time::Instant::now();
         }
     }
     out.flush()?;
@@ -309,6 +353,17 @@ pub fn fetch(
     }
     progress(got, Some(got));
     Ok((head, got))
+}
+
+/// How much of a file is asked for at once from a server that sends one long answer slowly.
+const PIECE: u64 = 1024 * 1024;
+
+/// Whether `url` is on YouTube's file servers, which are asked a piece at a time.
+fn in_pieces(url: &str) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.ends_with(".googlevideo.com")))
+        .unwrap_or(false)
 }
 
 /// A stream as its server answers it, to be relayed to the engine: the status, the headers the engine reads, and the
@@ -558,6 +613,12 @@ mod tests {
         assert_eq!(kind_of(&[0xFF, 0xFB, 0x90, 0x64]), Some("mp3"));
         assert_eq!(kind_of(&[0xFF, 0xF1, 0x50, 0x80]), Some("aac"));
         assert_eq!(kind_of(b"\0\0\0\x20ftypM4A "), Some("m4a"));
+        // YouTube's file servers are asked a piece at a time; others are not.
+        assert!(in_pieces(
+            "https://rr3---sn-abc.googlevideo.com/videoplayback?itag=140"
+        ));
+        assert!(!in_pieces("https://googlevideo.com.example/file"));
+        assert!(!in_pieces("http://127.0.0.1:4000/mornye/play/abc"));
         assert_eq!(
             kind_of(b"OggS\0\x02\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x01\x13OpusHead"),
             Some("opus")

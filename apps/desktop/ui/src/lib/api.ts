@@ -138,6 +138,8 @@ export interface BrowseAPI {
 	artist(sourceId: string, id: string): Promise<Artist>;
 	/** All of an artist's albums, or singles and EPs, when their page has more than it shows (`Artist.more`). */
 	discography(sourceId: string, id: string, kind: 'albums' | 'singles'): Promise<Discography>;
+	/** The catalogue's page for an artist of the library (YouTube Music's artist of that name), or null when there is none to ask or none of that name. */
+	catalogueArtist(name: string): Promise<Artist | null>;
 }
 
 export type Playlist = {

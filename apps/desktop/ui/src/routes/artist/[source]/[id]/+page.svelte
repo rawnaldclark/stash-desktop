@@ -3,7 +3,7 @@
 	import { page } from '$app/state';
 	import { browse, player } from '../../../../lib/app';
 	import type { Artist, LibraryItem } from '../../../../lib/api';
-	import { Refused } from '../../../../lib/core';
+	import { Refused, YOUTUBE } from '../../../../lib/core';
 	import { albumHref, artistHref, LIB_REF, LIBRARY_SOURCE, toLibraryItem } from '../../../../lib/identity';
 	import type { Track } from '../../../../lib/sources/contract';
 	import BrowseMsg from '../../../../lib/ui/BrowseMsg.svelte';
@@ -18,6 +18,8 @@
 	const sid = $derived(page.params.source ?? '');
 	const id = $derived(page.params.id ?? '');
 	let artist = $state.raw<Artist | null>(null);
+	// A library artist's page in the catalogue (YouTube Music): all their albums and singles, not only the ones you have.
+	let tube = $state.raw<Artist | null>(null);
 	let status = $state<'loading' | 'ok' | 'missing' | 'failed'>('loading');
 	let seq = 0;
 
@@ -26,11 +28,16 @@
 		const [s, i] = [sid, id];
 		status = 'loading';
 		artist = null;
+		tube = null;
 		browse.artist(s, i).then(
 			(a) => {
 				if (mine !== seq) return;
 				artist = a;
 				status = 'ok';
+				if (s === LIBRARY_SOURCE)
+					void browse.catalogueArtist(a.name).then((t) => {
+						if (mine === seq) tube = t;
+					});
 			},
 			(e) => {
 				if (mine !== seq) return;
@@ -72,6 +79,8 @@
 			return artist?.name;
 		}
 	};
+	// What the header counts: all their albums when the catalogue has them.
+	const told = $derived(tube ?? artist);
 	const albumSub = (a: Artist['albums'][number]) => [a.year, a.trackCount !== undefined ? songs(a.trackCount) : ''].filter(Boolean).join(' · ');
 </script>
 
@@ -80,11 +89,11 @@
 		<BrowseMsg kind="artist" state={status === 'ok' ? 'loading' : status} retry={load} />
 	{:else}
 		<div class="alb-top">
-			<div class="alb-cover art-round"><Cover artwork={artist.artwork} seed={artist.name} min={300} class="cv" eager /></div>
+			<div class="alb-cover art-round"><Cover artwork={artist.artwork ?? tube?.artwork} seed={artist.name} min={300} class="cv" eager /></div>
 			<div class="alb-txt">
 				<p class="caps">Artist</p>
 				<h1 class="alb-title">{artist.name}</h1>
-				{#if artist.albums.length}<p class="alb-meta"><b>{artist.more?.albums ? `${artist.albums.length}+ albums` : artist.albums.length === 1 ? '1 album' : `${artist.albums.length} albums`}</b></p>{/if}
+				{#if told && told.albums.length}<p class="alb-meta"><b>{told.more?.albums ? `${told.albums.length}+ albums` : told.albums.length === 1 ? '1 album' : `${told.albums.length} albums`}</b></p>{/if}
 			</div>
 		</div>
 		<div class="alb-act">
@@ -104,7 +113,7 @@
 			</div>
 		{/if}
 		{#if artist.albums.length}
-			<h2 class="vh2">Albums {#if artist.more?.albums}<a class="vh2-more" href="{artistHref({ sourceId: sid, id })}/albums">Show all</a>{/if}</h2>
+			<h2 class="vh2">{tube?.albums.length ? 'In your library' : 'Albums'} {#if artist.more?.albums}<a class="vh2-more" href="{artistHref({ sourceId: sid, id })}/albums">Show all</a>{/if}</h2>
 			<div class="shelf-w" use:shelf>
 				<div class="shelf">
 					{#each artist.albums as al (al.id)}
@@ -122,6 +131,40 @@
 					{/each}
 				</div>
 			</div>
+		{/if}
+		{#if tube}
+			{@const tid = tube.id}
+			{#if tube.albums.length}
+				<h2 class="vh2">Albums {#if tube.more?.albums}<a class="vh2-more" href="{artistHref({ sourceId: YOUTUBE, id: tid })}/albums">Show all</a>{/if}</h2>
+				<div class="shelf-w" use:shelf>
+					<div class="shelf">
+						{#each tube.albums as al (al.id)}
+							<Card title={al.title} sub={albumSub(al)} artwork={al.artwork} href={albumHref({ sourceId: YOUTUBE, id: al.id })} />
+						{/each}
+					</div>
+				</div>
+			{/if}
+			{#if tube.singles?.length}
+				<h2 class="vh2">Singles and EPs {#if tube.more?.singles}<a class="vh2-more" href="{artistHref({ sourceId: YOUTUBE, id: tid })}/singles">Show all</a>{/if}</h2>
+				<div class="shelf-w" use:shelf>
+					<div class="shelf">
+						{#each tube.singles as al (al.id)}
+							<Card title={al.title} sub={albumSub(al)} artwork={al.artwork} href={albumHref({ sourceId: YOUTUBE, id: al.id })} />
+						{/each}
+					</div>
+				</div>
+			{/if}
+			{#if tube.related?.length}
+				<h2 class="vh2">Fans also like</h2>
+				<div class="shelf-w" use:shelf>
+					<div class="shelf shelf-artists">
+						{#each tube.related as r (r.id)}
+							<Card title={r.name} artwork={r.artwork} href={artistHref({ sourceId: YOUTUBE, id: r.id })} ini={r.name.slice(0, 2).toUpperCase()} />
+						{/each}
+					</div>
+				</div>
+			{/if}
+			<p class="s-hint tube-all"><a class="lnk" href={artistHref({ sourceId: YOUTUBE, id: tid })}>{artist.name} on YouTube Music</a></p>
 		{/if}
 		{#if artist.related?.length}
 			<h2 class="vh2">Fans also like</h2>
@@ -141,8 +184,12 @@
 				{/each}
 			</div>
 		{/if}
-		{#if !items.length && !artist.albums.length && !withItems.length}
+		{#if !items.length && !artist.albums.length && !withItems.length && !tube}
 			<p class="s-hint">There is nothing to show for this artist yet.</p>
 		{/if}
 	{/if}
 </div>
+
+<style>
+	.tube-all { margin-top: 24px; }
+</style>

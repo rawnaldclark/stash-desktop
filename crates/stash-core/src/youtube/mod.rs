@@ -382,7 +382,11 @@ impl YouTube {
                 "Built into Stash. Finds and plays songs from YouTube Music, signed in or not."
                     .to_string(),
             ),
-            resources: vec!["search".to_string(), "stream".to_string()],
+            resources: vec![
+                "search".to_string(),
+                "stream".to_string(),
+                "download".to_string(),
+            ],
             dialect: Default::default(),
             resolve_by_isrc: false,
             quality: None,
@@ -422,6 +426,22 @@ fn track(song: Song) -> Option<Track> {
     })
 }
 
+impl YouTube {
+    /// Where the video plays from (or, `keep`, the file of it to keep): as one of YouTube's apps; else, when that is
+    /// something yt-dlp could get past, through yt-dlp, signed in as the listener when they are.
+    fn file(&self, id: &str, keep: bool) -> Result<StreamInfo, AddonError> {
+        let failed = match self.players.stream(&self.line, id, keep) {
+            Err(e) if ytdlp::worth_trying(&e) => e,
+            answered => return answered,
+        };
+        let Some(fallback) = self.fallback() else {
+            return Err(failed);
+        };
+        let login = self.line.login().filter(|_| !self.line.login_spent());
+        fallback.stream(id, login.as_ref(), keep)
+    }
+}
+
 impl BuiltIn for YouTube {
     fn search(&self, query: &str, limit: u32) -> Result<Vec<Track>, AddonError> {
         Ok(self
@@ -436,14 +456,11 @@ impl BuiltIn for YouTube {
     /// age to confirm, no plain address, every app asking whether the listener is a bot), through yt-dlp, signed in as
     /// the listener when they are.
     fn stream(&self, id: &str) -> Result<StreamInfo, AddonError> {
-        let failed = match self.players.stream(&self.line, id) {
-            Err(e) if ytdlp::worth_trying(&e) => e,
-            answered => return answered,
-        };
-        let Some(fallback) = self.fallback() else {
-            return Err(failed);
-        };
-        let login = self.line.login().filter(|_| !self.line.login_spent());
-        fallback.stream(id, login.as_ref())
+        self.file(id, false)
+    }
+
+    /// The file to keep: the MP4 (AAC) one, which can be tagged.
+    fn download(&self, id: &str) -> Result<StreamInfo, AddonError> {
+        self.file(id, true)
     }
 }

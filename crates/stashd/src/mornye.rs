@@ -181,6 +181,11 @@ fn codec_of(probed: &str) -> &'static str {
     }
 }
 
+/// The container a file names, when it is one a saved song is not kept in (WebM: no tags of its own that Stash writes).
+fn container_of(path: &Path) -> Option<&'static str> {
+    (content_type_of(path) == "audio/webm").then_some("webm")
+}
+
 fn content_type_of(path: &Path) -> &'static str {
     match path
         .extension()
@@ -341,7 +346,12 @@ impl Mornye {
                     } else {
                         a.description.clone()
                     }),
-                    resources: vec!["search".to_string(), "stream".to_string()],
+                    // What it plays is the whole song, opened (an encrypted one is refused): that is what is saved.
+                    resources: vec![
+                        "search".to_string(),
+                        "stream".to_string(),
+                        "download".to_string(),
+                    ],
                     dialect: Default::default(),
                     resolve_by_isrc: false,
                     quality: None,
@@ -398,7 +408,15 @@ impl Mornye {
         format!("http://127.0.0.1:{}/mornye/play/{token}", self.port)
     }
 
-    fn stream_of(&self, url: String, codec: &str, info: &Value, total: u64) -> StreamInfo {
+    /// `container`: said of a WebM file, which plays but is not kept as a saved song.
+    fn stream_of(
+        &self,
+        url: String,
+        codec: &str,
+        info: &Value,
+        total: u64,
+        container: Option<&str>,
+    ) -> StreamInfo {
         let number = |name: &str| info.get(name).and_then(Value::as_u64);
         let bit_depth = number("bit_depth").map(|b| b as u32).filter(|b| *b > 0);
         let sample_rate = number("sample_rate").map(|r| r as u32).filter(|r| *r > 0);
@@ -412,7 +430,7 @@ impl Mornye {
             manifest: Delivery::None,
             tier: tier_of(codec, bit_depth, sample_rate, bitrate.map(|b| b / 1000)),
             codec: Some(codec.to_string()),
-            container: None,
+            container: container.map(str::to_string),
             bit_depth,
             sample_rate,
             bitrate,
@@ -457,7 +475,7 @@ impl Mornye {
                 .unwrap_or("other")
                 .to_string();
             let url = self.hand(Body::File(file.clone()), total, content_type_of(&file));
-            return Ok(self.stream_of(url, &codec, &info, total));
+            return Ok(self.stream_of(url, &codec, &info, total, container_of(&file)));
         }
         enum Came {
             Live(Arc<Growing>, Playable),
@@ -559,7 +577,7 @@ impl Mornye {
                     Playable::Mp4 => "aac",
                 };
                 let url = self.hand(Body::Growing(g), total, playable.content_type());
-                Ok(self.stream_of(url, codec, &info, total))
+                Ok(self.stream_of(url, codec, &info, total, None))
             }
             Came::Whole(downloaded) => {
                 if downloaded.decryption_key.is_some() {
@@ -582,7 +600,8 @@ impl Mornye {
                     total,
                     content_type_of(&downloaded.file),
                 );
-                Ok(self.stream_of(url, &codec, &downloaded.info, total))
+                let container = container_of(&downloaded.file);
+                Ok(self.stream_of(url, &codec, &downloaded.info, total, container))
             }
             Came::Failed(trouble) => Err(trouble),
         }

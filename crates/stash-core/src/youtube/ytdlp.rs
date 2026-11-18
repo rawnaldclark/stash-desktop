@@ -30,6 +30,8 @@ const GIVE_UP: Duration = Duration::from_secs(45);
 const VERSION_WAIT: Duration = Duration::from_secs(20);
 /// What yt-dlp is asked for: Opus first (as Stash's own way), then AAC, then any sound alone.
 const FORMAT: &str = "bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio";
+/// A file to keep: MP4 (AAC) first, a file that can be tagged and that every player opens.
+const KEEP_FORMAT: &str = "bestaudio[ext=m4a]/bestaudio[acodec=opus]/bestaudio";
 /// Only the fields Stash reads, as one line of JSON.
 const PRINT: &str = "%(.{url,acodec,abr,asr,ext,duration})j";
 /// Lossy at 256 kbps or more is the higher tier, as for Stash's own way.
@@ -336,8 +338,14 @@ impl YtDlp {
         runtime_near(self.exe.parent())
     }
 
-    /// Where the video `id` plays from, asked as the listener when `login` is given.
-    pub fn stream(&self, id: &str, login: Option<&Login>) -> Result<StreamInfo, AddonError> {
+    /// Where the video `id` plays from (or, `keep`, the file of it to keep), asked as the listener when `login` is
+    /// given.
+    pub fn stream(
+        &self,
+        id: &str,
+        login: Option<&Login>,
+        keep: bool,
+    ) -> Result<StreamInfo, AddonError> {
         let Some(id) = video_id(id) else {
             return Err(trouble(Code::NotFound, "that is not a YouTube video"));
         };
@@ -351,7 +359,7 @@ impl YtDlp {
             "--socket-timeout",
             "15",
             "-f",
-            FORMAT,
+            if keep { KEEP_FORMAT } else { FORMAT },
             "--print",
             PRINT,
         ]);

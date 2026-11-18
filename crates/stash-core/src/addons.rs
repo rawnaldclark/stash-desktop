@@ -356,6 +356,10 @@ pub trait BuiltIn: Send + Sync {
     fn search(&self, query: &str, limit: u32) -> Result<Vec<Track>>;
     /// Where its track `id` plays from: one plain file.
     fn stream(&self, id: &str) -> Result<StreamInfo>;
+    /// The file of its track `id` to keep (when it offers `download`): what it plays, unless it says otherwise.
+    fn download(&self, id: &str) -> Result<StreamInfo> {
+        self.stream(id)
+    }
 }
 
 /// An add-on the listener added, ready to be asked.
@@ -715,6 +719,10 @@ impl Addon {
             return self.stream(id, &want);
         }
         self.offers("download")?;
+        // A source built into Stash plays one whole plain file: that is the file to keep.
+        if let Some(source) = &self.built_in {
+            return source.download(id);
+        }
         let mut url = Url::parse(&format!("{}/download/", self.base))
             .map_err(|e| AddonError::invalid(e.to_string()))?;
         url.path_segments_mut()

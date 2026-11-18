@@ -44,8 +44,9 @@ fn number(value: Option<&Value>) -> Option<u64> {
 }
 
 /// The best file of sound in a player answer: sound only, named by a plain https address, the song as it was made
-/// (no levelled-out or dubbed version); Opus at the highest bitrate, else whatever has the highest.
-pub(crate) fn pick(answer: &Value) -> Option<Format> {
+/// (no levelled-out or dubbed version); Opus at the highest bitrate, else whatever has the highest. A file to keep
+/// (`keep`) is MP4 (AAC) before Opus: a file that can be tagged, and that every player opens.
+pub(crate) fn pick(answer: &Value, keep: bool) -> Option<Format> {
     let formats = answer
         .pointer("/streamingData/adaptiveFormats")?
         .as_array()?;
@@ -70,6 +71,11 @@ pub(crate) fn pick(answer: &Value) -> Option<Format> {
             continue;
         }
         let opus = mime.contains("opus");
+        let first = if keep {
+            !opus && mime.starts_with("audio/mp4")
+        } else {
+            opus
+        };
         let found = Format {
             url: url.to_string(),
             codec: if opus {
@@ -91,9 +97,9 @@ pub(crate) fn pick(answer: &Value) -> Option<Format> {
         };
         let better = best
             .as_ref()
-            .is_none_or(|(was_opus, was)| (opus, found.bitrate) > (*was_opus, was.bitrate));
+            .is_none_or(|(was_first, was)| (first, found.bitrate) > (*was_first, was.bitrate));
         if better {
-            best = Some((opus, found));
+            best = Some((first, found));
         }
     }
     best.map(|(_, format)| format)
@@ -184,8 +190,13 @@ impl Players {
         !matches!(asked, Ok(answer) if matches!(answer.status().as_u16(), 401 | 403 | 410))
     }
 
-    /// Where the video `id` plays from.
-    pub(crate) fn stream(&self, line: &InnerTube, id: &str) -> Result<StreamInfo, AddonError> {
+    /// Where the video `id` plays from; or (`keep`) the file of it to keep.
+    pub(crate) fn stream(
+        &self,
+        line: &InnerTube,
+        id: &str,
+        keep: bool,
+    ) -> Result<StreamInfo, AddonError> {
         let Some(id) = video_id(id) else {
             return Err(trouble(Code::NotFound, "that is not a YouTube video"));
         };
@@ -229,7 +240,7 @@ impl Players {
                 }
                 None => {}
             }
-            let Some(format) = pick(&answer) else {
+            let Some(format) = pick(&answer, keep) else {
                 continue;
             };
             if !self.gives_its_end(&format) {
@@ -317,10 +328,16 @@ mod tests {
             levelled,
             dubbed,
         ] } });
-        let best = pick(&answer).unwrap();
+        let best = pick(&answer, false).unwrap();
         assert_eq!(
             (best.url.as_str(), best.codec, best.container, best.bitrate),
             ("https://v.example/opus", "opus", "webm", 128_000)
+        );
+        // A file to keep is the MP4.
+        let kept = pick(&answer, true).unwrap();
+        assert_eq!(
+            (kept.url.as_str(), kept.codec, kept.container),
+            ("https://v.example/aac", "aac", "mp4")
         );
         assert_eq!(
             (best.sample_rate, best.length, best.duration_ms),
@@ -332,12 +349,12 @@ mod tests {
             format("audio/mp4; codecs=\"mp4a.40.5\"", 50_000, Some("https://v.example/low")),
             format("audio/mp4; codecs=\"mp4a.40.2\"", 130_000, Some("https://v.example/aac")),
         ] } });
-        let best = pick(&answer).unwrap();
+        let best = pick(&answer, false).unwrap();
         assert_eq!(
             (best.url.as_str(), best.codec, best.container),
             ("https://v.example/aac", "aac", "mp4")
         );
-        assert_eq!(pick(&json!({ "streamingData": {} })), None);
+        assert_eq!(pick(&json!({ "streamingData": {} }), false), None);
     }
 
     #[test]
