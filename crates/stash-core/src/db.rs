@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 21;
+pub const SCHEMA_VERSION: i64 = 22;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
@@ -319,6 +319,23 @@ const V19: &str = "
 /// Version 20: what Last.fm said is like a song or an artist (radio and autoplay, `similar.rs`), by the question asked
 /// (`similar::Ask::key`): the artists and songs it named as JSON, or NULL for "it does not know that one", and when
 /// (Unix seconds), so each question is asked once in two weeks.
+/// Version 22: plays of songs the library does not have (a YouTube Music search result, an extension's album), so the
+/// listener's history holds everything they played: each as the source that played it calls it, and as it was shown.
+const V22: &str = "
+    CREATE TABLE heard(
+        source        TEXT NOT NULL,
+        ref           TEXT NOT NULL,
+        title         TEXT NOT NULL,
+        artist        TEXT NOT NULL,
+        album         TEXT,
+        duration_ms   INTEGER,
+        art_url       TEXT,
+        played_at_ms  INTEGER NOT NULL,
+        PRIMARY KEY (source, ref, played_at_ms)
+    ) WITHOUT ROWID;
+    CREATE INDEX heard_time ON heard(played_at_ms DESC);
+";
+
 /// Version 21: a playlist that follows a list of a source's (`source_list`, "youtube:VL…"): its songs are that list's,
 /// read again from time to time (`source_checked_ms`). Not `follow_id`, which other Stashes read as a shared mix.
 const V21: &str = "
@@ -553,6 +570,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V21)?;
         tx.pragma_update(None, "user_version", 21)?;
+        tx.commit()?;
+    }
+    if found < 22 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V22)?;
+        tx.pragma_update(None, "user_version", 22)?;
         tx.commit()?;
     }
     Ok(())

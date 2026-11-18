@@ -530,7 +530,14 @@ async function loadFolders(): Promise<void> {
 	folders.set((await core.folders()).map(folderOf));
 }
 async function loadHistory(): Promise<void> {
-	history.set((await core.historyAt(0, HISTORY_MAX)).map((r) => ({ item: itemOfRow(r), playedAt: r.played_at_ms })));
+	// The library's songs played, and the songs played that it does not have (YouTube Music's, an extension's), newest first.
+	const [own, heard] = await Promise.all([core.historyAt(0, HISTORY_MAX), core.heardAt(0, HISTORY_MAX).catch(() => [] as core.HeardRow[])]);
+	const entries: HistoryEntry[] = [
+		...own.map((r) => ({ item: itemOfRow(r), playedAt: r.played_at_ms })),
+		...heard.map((h) => ({ item: itemOfFound(h.source, { id: h.track, title: h.title, artist: h.artist, album: h.album, duration_ms: h.duration_ms, art: h.art, explicit: false, max_tier: null }), playedAt: h.played_at_ms }))
+	];
+	entries.sort((a, b) => b.playedAt - a.playedAt);
+	history.set(entries.slice(0, HISTORY_MAX));
 	// A play may change what a smart playlist holds (most played, played lately).
 	if (get(playlists).some((p) => p.rules)) await core.playlists().then((rows) => syncPlaylists(rows));
 }

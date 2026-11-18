@@ -171,6 +171,9 @@ export const searchLibrary = (query: string, limit: number, signal?: AbortSignal
 export const likedAt = (offset: number, limit: number, signal?: AbortSignal) => rows<LikedRow>(`/api/liked?offset=${offset}&limit=${limit}`, signal);
 /** What was played, the newest first. */
 export const historyAt = (offset: number, limit: number, signal?: AbortSignal) => rows<PlayedRow>(`/api/history?offset=${offset}&limit=${limit}`, signal);
+/** A play of a song the library does not have: the source that played it, its name for the song, the song as shown. */
+export type HeardRow = { source: string; track: string; title: string; artist: string; album: string | null; duration_ms: number | null; art: string | null; played_at_ms: number };
+export const heardAt = (offset: number, limit: number) => rows<HeardRow>(`/api/history/heard?offset=${offset}&limit=${limit}`);
 export const playlists = () => rows<PlaylistRow>('/api/playlists');
 export const playlistTracksAt = (id: number, offset: number, limit: number, signal?: AbortSignal) =>
 	rows<TrackRow>(`/api/playlists/${id}/tracks?offset=${offset}&limit=${limit}`, signal);

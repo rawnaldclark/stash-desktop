@@ -1273,6 +1273,58 @@ impl Library {
         })
     }
 
+    /// A play that counted of a song the library does not have (`heard.source` played it): kept with how it was shown,
+    /// the newest [`HEARD_KEPT`] of them. False when that play is already kept.
+    pub fn record_heard(&mut self, heard: &Heard) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let added = tx.execute(
+            "INSERT OR IGNORE INTO heard(source, ref, title, artist, album, duration_ms, art_url, played_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                heard.source,
+                heard.track,
+                clean_text(&heard.title, 500),
+                clean_text(&heard.artist, 500),
+                heard.album.as_deref().map(|a| clean_text(a, 500)),
+                heard.duration_ms.map(|ms| ms as i64),
+                heard.art,
+                heard.played_at_ms
+            ],
+        )?;
+        if added > 0 {
+            tx.execute(
+                "DELETE FROM heard WHERE played_at_ms < (
+                     SELECT played_at_ms FROM heard ORDER BY played_at_ms DESC LIMIT 1 OFFSET ?1)",
+                [HEARD_KEPT as i64 - 1],
+            )?;
+        }
+        tx.commit()?;
+        Ok(added > 0)
+    }
+
+    /// Plays of songs the library does not have, newest first: `limit` of them from `offset`.
+    pub fn heard_at(&self, offset: usize, limit: usize) -> Result<Vec<Heard>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT source, ref, title, artist, album, duration_ms, art_url, played_at_ms FROM heard
+             ORDER BY played_at_ms DESC, source, ref LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![limit as i64, offset as i64], |r| {
+                Ok(Heard {
+                    source: r.get(0)?,
+                    track: r.get(1)?,
+                    title: r.get(2)?,
+                    artist: r.get(3)?,
+                    album: r.get(4)?,
+                    duration_ms: r.get::<_, Option<i64>>(5)?.map(|ms| ms.max(0) as u64),
+                    art: r.get(6)?,
+                    played_at_ms: r.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// A play that counted: the song `id`, started at `started_at_ms`. False when that play is already kept.
     pub fn record_play(&mut self, id: i64, started_at_ms: i64) -> Result<bool> {
         let tx = self.conn.transaction()?;
@@ -1458,9 +1510,60 @@ impl Library {
     }
 }
 
+/// How many plays of songs the library does not have are kept.
+pub const HEARD_KEPT: usize = 2_000;
+
+/// A play of a song the library does not have: the source that played it and its name for the song, the song as it was
+/// shown, and when it began.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Heard {
+    pub source: String,
+    pub track: String,
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub art: Option<String>,
+    pub played_at_ms: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plays_of_songs_the_library_does_not_have_are_kept_newest_first() {
+        let mut library = Library::open_in_memory().unwrap();
+        let heard = |track: &str, at: i64| Heard {
+            source: "youtube".into(),
+            track: track.into(),
+            title: format!("Song {track}"),
+            artist: "Someone".into(),
+            album: None,
+            duration_ms: Some(200_000),
+            art: None,
+            played_at_ms: at,
+        };
+        assert!(library.record_heard(&heard("a", 10)).unwrap());
+        assert!(library.record_heard(&heard("b", 20)).unwrap());
+        // The same play twice is kept once.
+        assert!(!library.record_heard(&heard("a", 10)).unwrap());
+        let kept = library.heard_at(0, 10).unwrap();
+        assert_eq!(
+            kept.iter()
+                .map(|h| (h.track.as_str(), h.played_at_ms))
+                .collect::<Vec<_>>(),
+            vec![("b", 20), ("a", 10)]
+        );
+        assert_eq!(kept[0].title, "Song b");
+        // Only the newest are kept.
+        for n in 0..HEARD_KEPT as i64 {
+            library.record_heard(&heard("c", 100 + n)).unwrap();
+        }
+        let all = library.heard_at(0, HEARD_KEPT + 10).unwrap();
+        assert_eq!(all.len(), HEARD_KEPT);
+        assert!(all.iter().all(|h| h.track == "c"));
+    }
 
     #[test]
     fn a_followed_list_keeps_its_songs_as_the_list_has_them() {

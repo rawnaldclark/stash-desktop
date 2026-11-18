@@ -899,11 +899,26 @@ fn resolver(
     })
 }
 
-/// A play that counted is kept with its song, when the song is the library's.
+/// A play that counted is kept with its song, when the song is the library's; a song the library does not have (a
+/// YouTube Music search result, an extension's album) is kept as heard, so the history holds it too.
 fn keep_plays(library: Arc<Mutex<Library>>) -> OnPlay {
     Arc::new(move |item: &QueueItem, started_at_ms: i64| {
         if let Some(id) = item.id {
             let _ = library.lock().unwrap().record_play(id, started_at_ms);
+        } else if let Some(from) = &item.addon {
+            let _ = library
+                .lock()
+                .unwrap()
+                .record_heard(&stash_core::lists::Heard {
+                    source: from.addon.clone(),
+                    track: from.track.clone(),
+                    title: item.title.clone(),
+                    artist: item.artist.clone(),
+                    album: item.album.clone(),
+                    duration_ms: item.duration_ms,
+                    art: item.art.clone(),
+                    played_at_ms: started_at_ms,
+                });
         }
     })
 }
@@ -3086,6 +3101,11 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         (Method::Get, "/api/history") => reply_json(
             200,
             json!({ "rows": library().history_at(number("offset", 0), limit(200))? }),
+        ),
+        // Plays of songs the library does not have, newest first.
+        (Method::Get, "/api/history/heard") => reply_json(
+            200,
+            json!({ "rows": library().heard_at(number("offset", 0), limit(200))? }),
         ),
         (Method::Get, "/api/artists") => reply_json(
             200,
