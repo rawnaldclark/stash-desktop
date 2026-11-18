@@ -809,3 +809,77 @@ fn the_home_page_is_read_shelf_by_shelf() {
     assert_eq!(rest.len(), 2);
     assert!(after.is_some());
 }
+
+#[test]
+fn an_artist_s_whole_discography_is_read() {
+    use stash_core::youtube::pages;
+    // Their page links each shelf's "More" (the albums and the singles apart) and a playlist of all their songs.
+    // "Videos" and "Live performances" have a "More" too: neither is taken for the records'.
+    let artist = pages::artist(&recorded("artist_live.json")).unwrap();
+    let albums_more = artist.albums_more.clone().unwrap();
+    let singles_more = artist.singles_more.clone().unwrap();
+    assert_eq!(albums_more.id, "MPADUCRr1xG_2WIDs18a6cIiCxeA");
+    assert_eq!(singles_more.id, albums_more.id);
+    assert_ne!(albums_more.params, singles_more.params);
+    assert_eq!(
+        artist.songs_all.as_deref(),
+        Some("VLOLAK5uy_lNVBcjNtiCwq-n95uoxJ-Gd4vsfMkyZNs")
+    );
+
+    // What "More" opens: a grid of records, each the artist's (no card says whose it is).
+    let albums = pages::discography(&recorded("discography_albums_live.json")).unwrap();
+    assert_eq!(albums.artist, "Daft Punk");
+    let read: Vec<_> = albums
+        .albums
+        .iter()
+        .map(|a| (a.title.as_str(), a.year, a.single, a.artist.as_str()))
+        .collect();
+    assert_eq!(
+        read,
+        [
+            (
+                "Random Access Memories (Drumless Edition)",
+                Some(2023),
+                false,
+                "Daft Punk"
+            ),
+            ("Random Access Memories", Some(2013), false, "Daft Punk"),
+            ("TRON: Legacy", Some(2010), false, "Daft Punk"),
+            ("Human After All", Some(2005), false, "Daft Punk"),
+        ]
+    );
+    assert!(
+        albums
+            .albums
+            .iter()
+            .all(|a| a.id.starts_with("MPREb_") && a.art.is_some())
+    );
+    assert_eq!((albums.more, albums.whole), (None, true));
+    let singles = pages::discography(&recorded("discography_singles_live.json")).unwrap();
+    assert_eq!(singles.albums.len(), 4);
+    assert!(singles.albums.iter().all(|a| a.single));
+    assert_eq!(singles.albums[0].title, "GLBTM (Studio Outtakes)");
+    assert_eq!(pages::discography(&recorded("artist_live.json")), None);
+
+    // A long one goes on in answers of its own, in either form YouTube gives them.
+    let card = recorded("discography_albums_live.json")
+        .pointer("/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/gridRenderer/items/1")
+        .cloned()
+        .unwrap();
+    let older = json!({ "continuationContents": { "gridContinuation": {
+        "items": [card],
+        "continuations": [{ "nextContinuationData": { "continuation": "next-2" } }],
+    } } });
+    let (more, next) = pages::discography_more(&older, "Daft Punk");
+    assert_eq!(
+        (more.len(), more[0].title.as_str(), next.as_deref()),
+        (1, "Random Access Memories", Some("next-2"))
+    );
+    let newer = json!({ "onResponseReceivedActions": [{ "appendContinuationItemsAction": { "continuationItems": [
+        card,
+        { "continuationItemRenderer": { "continuationEndpoint": { "continuationCommand": { "token": "next-3" } } } },
+    ] } }] });
+    let (more, next) = pages::discography_more(&newer, "Daft Punk");
+    assert_eq!((more.len(), next.as_deref()), (1, Some("next-3")));
+    assert_eq!(pages::discography_more(&json!({}), "x"), (Vec::new(), None));
+}

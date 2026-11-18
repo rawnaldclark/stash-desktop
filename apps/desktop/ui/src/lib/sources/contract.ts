@@ -34,7 +34,11 @@ export type Artist = {
 	/** Singles and EPs, when the source tells them from albums; and artists their listeners also play. */
 	singles?: ArtistAlbum[];
 	related?: { id: string; name: string; artwork?: Artwork[] }[];
+	/** More than the page shows: all their albums, all their singles and EPs (`BrowseAPI.discography`), and a playlist of all their songs (its id). */
+	more?: { albums?: boolean; singles?: boolean; songs?: string };
 };
+/** All of an artist's albums, or all their singles and EPs. `whole`: false when the source gave only part of the list. */
+export type Discography = { id: string; name: string; kind: 'albums' | 'singles'; albums: ArtistAlbum[]; whole: boolean };
 
 export type Descriptor = { title: string; artist: string; album?: string; durationMs?: number; isrc?: string };
 

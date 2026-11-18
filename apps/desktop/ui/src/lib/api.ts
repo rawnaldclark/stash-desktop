@@ -5,7 +5,7 @@
  */
 import type { Readable } from 'svelte/store';
 import type { SearchResult } from './sources/search';
-import type { Album, Artist, Artwork, Descriptor, Lyrics, LyricLine, LyricWord, Track } from './sources/contract';
+import type { Album, Artist, Artwork, Descriptor, Discography, LyricLine, Lyrics, LyricWord, Track } from './sources/contract';
 import type { LibraryItem } from './identity';
 import { NO_EQ, type AddonChange, type AddonInfo, type CoreEq, type Counts, type EqPatch, type Replaygain, type Signal, type SmartRules, type Station, type Tier } from './core';
 
@@ -136,6 +136,8 @@ export interface SearchAPI {
 export interface BrowseAPI {
 	album(sourceId: string, id: string): Promise<Album>;
 	artist(sourceId: string, id: string): Promise<Artist>;
+	/** All of an artist's albums, or singles and EPs, when their page has more than it shows (`Artist.more`). */
+	discography(sourceId: string, id: string, kind: 'albums' | 'singles'): Promise<Discography>;
 }
 
 export type Playlist = {

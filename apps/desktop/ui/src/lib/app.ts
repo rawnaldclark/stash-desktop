@@ -973,6 +973,7 @@ const browse: BrowseAPI = {
 				albums: a.albums.map(tubeArtistAlbum),
 				singles: a.singles.map(tubeArtistAlbum),
 				related: a.related.map((r) => ({ id: r.id, name: r.name, ...(artOf(r.art) ? { artwork: artOf(r.art) } : {}) })),
+				more: { albums: a.albums_more, singles: a.singles_more, ...(a.songs_all ? { songs: a.songs_all } : {}) },
 				...(artOf(a.art) ? { artwork: artOf(a.art) } : {})
 			};
 		}
@@ -987,6 +988,15 @@ const browse: BrowseAPI = {
 		const art = artOf(a.artist.art);
 		if (art) out.artwork = art;
 		return out;
+	},
+	async discography(sourceId, id, kind) {
+		// Only YouTube Music's artists have more than their page shows; a library artist's page lists all of theirs.
+		if (sourceId !== core.YOUTUBE) {
+			const a = await this.artist(sourceId, id);
+			return { id, name: a.name, kind, albums: kind === 'albums' ? a.albums : (a.singles ?? []), whole: true };
+		}
+		const d = await core.tubeDiscography(id, kind);
+		return { id, name: d.name, kind, albums: d.albums.map(tubeArtistAlbum), whole: d.whole };
 	}
 };
 

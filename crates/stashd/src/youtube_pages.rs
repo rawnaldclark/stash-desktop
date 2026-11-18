@@ -3,9 +3,11 @@
 //! library of a listener who signed in (see `youtube_account`).
 //!
 //! `GET /api/youtube/search?q=`, `/api/youtube/album?id=`, `/api/youtube/artist?id=`, `/api/youtube/playlist?id=`,
-//! `/api/youtube/home`, `/api/youtube/library?kind=playlists|albums|artists`.
-//! Each asks YouTube once (a long playlist: once for every hundred songs). Not found when this core has no YouTube
-//! Music or the listener switched it off; refused while Stash is offline.
+//! `/api/youtube/home`, `/api/youtube/library?kind=playlists|albums|artists`, and
+//! `/api/youtube/discography?id=&kind=albums|singles` (all of an artist's albums, or singles and EPs).
+//! Each asks YouTube once (a long playlist: once for every hundred songs; a discography: the artist's page, then the
+//! list). Not found when this core has no YouTube Music or the listener switched it off; refused while Stash is
+//! offline.
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -141,8 +143,30 @@ pub(crate) fn route(
                 "albums": page.albums.iter().map(album).collect::<Vec<_>>(),
                 "singles": page.singles.iter().map(album).collect::<Vec<_>>(),
                 "related": page.related.iter().map(artist).collect::<Vec<_>>(),
+                // Whether their albums, their singles, are more than the page shows (see /api/youtube/discography),
+                // and the playlist of all their songs.
+                "albums_more": page.albums_more.is_some(),
+                "singles_more": page.singles_more.is_some(),
+                "songs_all": page.songs_all,
             })
         }),
+        "/api/youtube/discography" => {
+            let singles = match param("kind").as_deref() {
+                Some("albums") => false,
+                Some("singles") => true,
+                _ => return Ok(Some(refuse(400, "kind is albums or singles"))),
+            };
+            youtube.discography(&id, singles).map(|list| {
+                json!({
+                    "id": id,
+                    "name": list.artist,
+                    "albums": list.albums.iter().map(album).collect::<Vec<_>>(),
+                    // False when YouTube Music gave only part of the list (what the artist's page shows, or the
+                    // first thousand).
+                    "whole": list.whole,
+                })
+            })
+        }
         "/api/youtube/playlist" => youtube.playlist(&id).map(|page| {
             json!({
                 "id": id,

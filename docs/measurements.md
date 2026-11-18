@@ -1716,3 +1716,19 @@ On this PC, in a scratch library (volume 0), with the official repository (9 pac
 
 - Albums, artists and playlists of an extension (only its songs are searched and played; Lokal shows songs only too).
 - Dolby Atmos, and post-processing hooks.
+
+## 45. YouTube Music: an artist's whole discography
+
+An artist's page on YouTube Music shows up to ten albums and ten singles and EPs; "More" beside each shelf opens all of them, and "Show all" beside their songs opens a playlist of all their songs. Stash reads those links off the artist's page (`pages::ArtistPage::{albums_more, singles_more, songs_all}`) and the list "More" opens (`pages::discography`, a grid of records under the artist's name, read on through YouTube's "load more" answers, at most ten). `GET /api/youtube/discography?id=&kind=albums|singles` asks for the artist's page, then the list; the window opens it at `/artist/youtube/<id>/albums` (or `/singles`) from "Show all" on the artist's page, whose header then says "10+ albums".
+
+When YouTube Music cannot give the whole list, what the artist's page shows is given and the answer says `whole: false`; the page then says it is part of the list. The same "is there more" mark was lost in the playlist reader whenever it stopped at its last page or a page failed (the window's "The first N songs of this playlist are shown" never showed): it is kept now.
+
+Measured live, signed out (17 November 2026):
+
+| Artist | Albums | Singles and EPs | Time |
+|---|---|---|---|
+| Daft Punk | 11 (page shows 10) | 26 (page shows 10) | 0.7 s each |
+| Taylor Swift | 32 | 92 | under 1 s each |
+| Johann Sebastian Bach | YouTube answers "Something went wrong": the 10 the page shows, not whole | 1,000 (ten answers, the cap), not whole | 5 s for the singles |
+
+A playlist of 1,000+ songs now says it goes on (`more: true`, 4.8 s for ten answers); lists of 210 and 492 songs say they are whole.

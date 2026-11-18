@@ -25,7 +25,7 @@ use crate::reach::Reach;
 use home::{Account, Card, Shelf};
 use innertube::{InnerTube, Signed, WEB_REMIX, trouble};
 use login::Login;
-use pages::{AlbumPage, ArtistPage, Found, PlaylistPage};
+use pages::{AlbumCard, AlbumPage, ArtistPage, Found, PlaylistPage};
 use parse::Song;
 
 /// The id it has among the listener's sources. Songs brought in from Stash for Android carry their YouTube video
@@ -257,6 +257,71 @@ impl YouTube {
             .ok_or_else(|| trouble(Code::NotFound, "YouTube Music has no such artist"))
     }
 
+    /// All of an artist's ("UC…") albums, or all their singles and EPs: what "More" on their page opens, read on
+    /// through at most [`PLAYLIST_PAGES`] answers. An artist whose page shows them all has no "More": that list is it.
+    /// When YouTube Music cannot give the whole list (it answers some artists' "Something went wrong"), what their page
+    /// shows is given, not whole.
+    pub fn discography(&self, id: &str, singles: bool) -> Result<pages::Discography, AddonError> {
+        let page = self.artist(id)?;
+        let (more, shown) = if singles {
+            (page.singles_more, page.singles)
+        } else {
+            (page.albums_more, page.albums)
+        };
+        let fallback = |albums: Vec<AlbumCard>, whole: bool| pages::Discography {
+            artist: page.name.clone(),
+            albums,
+            more: None,
+            whole,
+        };
+        let Some(more) = more else {
+            return Ok(fallback(shown, true));
+        };
+        let answer = self.line.call_as(
+            &WEB_REMIX,
+            "browse",
+            json!({ "browseId": more.id, "params": more.params }),
+            Signed::IfAny,
+        )?;
+        let Some(mut list) = pages::discography(&answer).filter(|list| !list.albums.is_empty())
+        else {
+            return Ok(fallback(shown, false));
+        };
+        if list.artist.is_empty() {
+            list.artist = page.name;
+        }
+        let mut read = 1;
+        while read < PLAYLIST_PAGES {
+            let Some(next) = list.more.take() else {
+                break;
+            };
+            // What was read so far is given when the rest cannot be.
+            let Ok(answer) = self.line.call_as(
+                &WEB_REMIX,
+                "browse",
+                json!({ "continuation": &next }),
+                Signed::IfAny,
+            ) else {
+                list.more = Some(next);
+                break;
+            };
+            let (albums, after) = pages::discography_more(&answer, &list.artist);
+            let before = list.albums.len();
+            for album in albums {
+                if !list.albums.iter().any(|known| known.id == album.id) {
+                    list.albums.push(album);
+                }
+            }
+            if list.albums.len() == before {
+                break;
+            }
+            list.more = after;
+            read += 1;
+        }
+        list.whole = list.more.take().is_none();
+        Ok(list)
+    }
+
     /// A playlist's page, by its page ("VL…") or by the playlist's own id ("PL…", "RD…", "OLAK5uy_…"): its songs,
     /// read on through at most [`PLAYLIST_PAGES`] answers. A station (an id that starts with "RD" and is no list
     /// YouTube keeps) never ends: its first answer is all that is read.
@@ -271,18 +336,20 @@ impl YouTube {
             .ok_or_else(|| trouble(Code::NotFound, "YouTube Music has no such playlist"))?;
         let endless = page.starts_with("VLRD") && !page.starts_with("VLRDCLAK5uy_");
         let mut read = 1;
-        while let Some(more) = playlist
-            .more
-            .take()
-            .filter(|_| !endless && read < PLAYLIST_PAGES)
-        {
+        // `more` stays named when the list goes on past what is read (a station, the last page read, a page that
+        // could not be): the window says the list is longer.
+        while !endless && read < PLAYLIST_PAGES {
+            let Some(more) = playlist.more.take() else {
+                break;
+            };
             // What was read so far is given when the rest cannot be.
             let Ok(answer) = self.line.call_as(
                 &WEB_REMIX,
                 "browse",
-                json!({ "continuation": more }),
+                json!({ "continuation": &more }),
                 Signed::IfAny,
             ) else {
+                playlist.more = Some(more);
                 break;
             };
             let (songs, next) = pages::playlist_more(&answer);

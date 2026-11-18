@@ -429,13 +429,16 @@ export type TubeFound = {
 	playlists: TubePlaylist[];
 };
 export type TubeAlbumPage = TubeAlbum & { songs: TubeSong[] };
-export type TubeArtistPage = TubeArtist & { songs: TubeSong[]; albums: TubeAlbum[]; singles: TubeAlbum[]; related: TubeArtist[] };
+export type TubeArtistPage = TubeArtist & { songs: TubeSong[]; albums: TubeAlbum[]; singles: TubeAlbum[]; related: TubeArtist[]; albums_more: boolean; singles_more: boolean; songs_all: string | null };
+/** All of an artist's albums or singles; `whole` false when YouTube Music gave only part of the list. */
+export type TubeDiscography = { id: string; name: string; albums: TubeAlbum[]; whole: boolean };
 export type TubePlaylistPage = TubePlaylist & { songs: TubeSong[]; more: boolean };
 const tube = (what: string, id: string) => `/api/youtube/${what}?id=${encodeURIComponent(id)}`;
 export const tubeSearch = (query: string, signal?: AbortSignal) => get<TubeFound>(`/api/youtube/search?q=${encodeURIComponent(query)}`, signal);
 export const tubeAlbum = (id: string) => get<TubeAlbumPage>(tube('album', id));
 export const tubeArtist = (id: string) => get<TubeArtistPage>(tube('artist', id));
 export const tubePlaylist = (id: string) => get<TubePlaylistPage>(tube('playlist', id));
+export const tubeDiscography = (id: string, kind: 'albums' | 'singles') => get<TubeDiscography>(`${tube('discography', id)}&kind=${kind}`);
 
 // ---- YouTube Music for a listener who signed in: their account, their library, and the home page
 

@@ -424,6 +424,32 @@ pub struct ArtistPage {
     pub singles: Vec<AlbumCard>,
     /// Artists their listeners also play.
     pub related: Vec<ArtistCard>,
+    /// What "More" beside their albums, and beside their singles and EPs, opens: all of them (see [`discography`]).
+    /// None when the page shows them all.
+    pub albums_more: Option<More>,
+    pub singles_more: Option<More>,
+    /// A playlist of all their songs (the songs' "Show all"): its page ("VL…").
+    pub songs_all: Option<String>,
+}
+
+/// A list an artist's page opens from a shelf's "More": its page ("MPAD…") and what picks the shelf (`params`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct More {
+    pub id: String,
+    pub params: String,
+}
+
+/// What a shelf's "More" opens, when it is a list of the artist's records.
+fn more_of(shelf: &Value) -> Option<More> {
+    let link = shelf.pointer(
+        "/header/musicCarouselShelfBasicHeaderRenderer/moreContentButton/buttonRenderer/navigationEndpoint/browseEndpoint",
+    )?;
+    let id = link.get("browseId")?.as_str()?;
+    let params = link.get("params")?.as_str()?;
+    (id.starts_with("MPAD") && !params.is_empty()).then(|| More {
+        id: id.to_string(),
+        params: params.to_string(),
+    })
 }
 
 /// An artist's page (`browse` of "UC…"); nothing when the answer is no artist's.
@@ -443,6 +469,9 @@ pub fn artist(answer: &Value) -> Option<ArtistPage> {
         albums: Vec::new(),
         singles: Vec::new(),
         related: Vec::new(),
+        albums_more: None,
+        singles_more: None,
+        songs_all: None,
     };
     for section in sections(answer) {
         // The first list of rows is their songs.
@@ -451,6 +480,11 @@ pub fn artist(answer: &Value) -> Option<ArtistPage> {
             .and_then(Value::as_array)
             && page.songs.is_empty()
         {
+            page.songs_all = section
+                .pointer("/musicShelfRenderer/bottomEndpoint/browseEndpoint/browseId")
+                .and_then(Value::as_str)
+                .filter(|id| id.starts_with("VL"))
+                .map(str::to_string);
             for mut song in rows
                 .iter()
                 .filter_map(|item| row(item.get("musicResponsiveListItemRenderer")?))
@@ -464,6 +498,8 @@ pub fn artist(answer: &Value) -> Option<ArtistPage> {
         let cards = section
             .pointer("/musicCarouselShelfRenderer/contents")
             .and_then(Value::as_array);
+        // A shelf of records says by its cards whether its "More" opens the albums or the singles.
+        let mut records = None;
         for card in cards
             .into_iter()
             .flatten()
@@ -471,6 +507,7 @@ pub fn artist(answer: &Value) -> Option<ArtistPage> {
         {
             match card {
                 Opens::Album(mut album) => {
+                    records.get_or_insert(album.single);
                     // A card on the artist's own page does not say whose it is.
                     if album.artist.is_empty() {
                         album.artist = page.name.clone();
@@ -492,8 +529,102 @@ pub fn artist(answer: &Value) -> Option<ArtistPage> {
                 Opens::Playlist(_) => {}
             }
         }
+        if let (Some(single), Some(more)) = (
+            records,
+            section.get("musicCarouselShelfRenderer").and_then(more_of),
+        ) {
+            let place = if single {
+                &mut page.singles_more
+            } else {
+                &mut page.albums_more
+            };
+            place.get_or_insert(more);
+        }
     }
     Some(page)
+}
+
+/// One answer of an artist's discography: their name, the records it lists, and what to ask for the ones after.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Discography {
+    pub artist: String,
+    pub albums: Vec<AlbumCard>,
+    pub more: Option<String>,
+    /// Whether these are all of them: nothing named after them, and none left unread.
+    pub whole: bool,
+}
+
+/// The cards of a grid's items, each as the artist's (a card here does not say whose it is).
+fn grid_cards(items: &[Value], artist: &str) -> Vec<AlbumCard> {
+    let mut out: Vec<AlbumCard> = Vec::new();
+    for card in items
+        .iter()
+        .filter_map(|item| opening_card(item.get("musicTwoRowItemRenderer")?))
+    {
+        if let Opens::Album(mut album) = card {
+            if album.artist.is_empty() {
+                album.artist = artist.to_string();
+            }
+            if !out.iter().any(|known| known.id == album.id) {
+                out.push(album);
+            }
+        }
+    }
+    out
+}
+
+/// What a grid or a continuation names for the items after these.
+fn grid_more(grid: &Value, items: &[Value]) -> Option<String> {
+    grid.pointer("/continuations/0/nextContinuationData/continuation")
+        .or_else(|| {
+            items
+                .last()?
+                .pointer("/continuationItemRenderer/continuationEndpoint/continuationCommand/token")
+        })
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// The list an artist page's "More" opens (`browse` of "MPAD…" with its `params`): all their albums, or all their
+/// singles and EPs. Nothing when the answer holds no such list.
+pub fn discography(answer: &Value) -> Option<Discography> {
+    let artist =
+        text(answer.pointer("/header/musicHeaderRenderer/title/runs/0/text")).unwrap_or_default();
+    let grid = sections(answer).find_map(|section| section.get("gridRenderer"))?;
+    let items = grid.get("items").and_then(Value::as_array)?;
+    let more = grid_more(grid, items);
+    Some(Discography {
+        albums: grid_cards(items, &artist),
+        whole: more.is_none(),
+        more,
+        artist,
+    })
+}
+
+/// The records after these (`browse` of a [`Discography::more`]), and what to ask for the ones after them.
+pub fn discography_more(answer: &Value, artist: &str) -> (Vec<AlbumCard>, Option<String>) {
+    let appended = answer
+        .get("onResponseReceivedActions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find_map(|action| {
+            action
+                .pointer("/appendContinuationItemsAction/continuationItems")?
+                .as_array()
+        });
+    if let Some(items) = appended {
+        return (grid_cards(items, artist), grid_more(&Value::Null, items));
+    }
+    let Some(grid) = answer.pointer("/continuationContents/gridContinuation") else {
+        return (Vec::new(), None);
+    };
+    let items = grid
+        .get("items")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    (grid_cards(items, artist), grid_more(grid, items))
 }
 
 /// A playlist's page, or the part of it one answer holds.

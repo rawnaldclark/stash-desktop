@@ -84,7 +84,7 @@
 			<div class="alb-txt">
 				<p class="caps">Artist</p>
 				<h1 class="alb-title">{artist.name}</h1>
-				{#if artist.albums.length}<p class="alb-meta"><b>{artist.albums.length === 1 ? '1 album' : `${artist.albums.length} albums`}</b></p>{/if}
+				{#if artist.albums.length}<p class="alb-meta"><b>{artist.more?.albums ? `${artist.albums.length}+ albums` : artist.albums.length === 1 ? '1 album' : `${artist.albums.length} albums`}</b></p>{/if}
 			</div>
 		</div>
 		<div class="alb-act">
@@ -96,7 +96,7 @@
 			{/if}
 		</div>
 		{#if items.length}
-			<h2 class="vh2">Songs</h2>
+			<h2 class="vh2">Songs {#if artist.more?.songs}<a class="vh2-more" href={albumHref({ sourceId: sid, id: artist.more.songs })}>Show all</a>{/if}</h2>
 			<div class="trk-list">
 				{#each items as it, i (it.key + i)}
 					<TrackRow item={it} num={i + 1} {pick} at={i} onplay={() => play(i)} />
@@ -104,7 +104,7 @@
 			</div>
 		{/if}
 		{#if artist.albums.length}
-			<h2 class="vh2">Albums</h2>
+			<h2 class="vh2">Albums {#if artist.more?.albums}<a class="vh2-more" href="{artistHref({ sourceId: sid, id })}/albums">Show all</a>{/if}</h2>
 			<div class="shelf-w" use:shelf>
 				<div class="shelf">
 					{#each artist.albums as al (al.id)}
@@ -114,7 +114,7 @@
 			</div>
 		{/if}
 		{#if artist.singles?.length}
-			<h2 class="vh2">Singles and EPs</h2>
+			<h2 class="vh2">Singles and EPs {#if artist.more?.singles}<a class="vh2-more" href="{artistHref({ sourceId: sid, id })}/singles">Show all</a>{/if}</h2>
 			<div class="shelf-w" use:shelf>
 				<div class="shelf">
 					{#each artist.singles as al (al.id)}
