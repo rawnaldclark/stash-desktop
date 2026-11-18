@@ -28,12 +28,12 @@
 	const CATS: [Cat, string, IconName][] = [
 		['sound', 'Sound', 'volume_up'],
 		['playback', 'Playback', 'play_arrow'],
-		['sources', 'Sources', 'radio'],
+		['sources', 'Sources', 'extension'],
 		['library', 'Library', 'library_music'],
 		['scrobbling', 'Scrobbling', 'history'],
-		['shortcuts', 'Shortcuts', 'skip_next'],
-		['appearance', 'Appearance', 'picture_in_picture_alt'],
-		['about', 'About', 'album']
+		['shortcuts', 'Shortcuts', 'keyboard'],
+		['appearance', 'Appearance', 'palette'],
+		['about', 'About', 'info']
 	];
 	/** The parts of a category that links name by their own id. */
 	const PARTS: Record<string, Cat> = { similar: 'playback', lyrics: 'playback', 'not-played': 'playback', addons: 'sources', youtube: 'sources', mornye: 'sources' };
