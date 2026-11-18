@@ -8,6 +8,7 @@
 	import Cover from '../../lib/ui/Cover.svelte';
 	import Icon from '../../lib/ui/Icon.svelte';
 	import LikeButton from '../../lib/ui/LikeButton.svelte';
+	import SaveButton from '../../lib/ui/SaveButton.svelte';
 	import ProgressBar from '../../lib/ui/ProgressBar.svelte';
 	import { S } from '../../lib/ui/state.svelte';
 
@@ -46,7 +47,7 @@
 			<Icon name={s.playing ? 'pause' : 'play_arrow'} />
 		</button>
 		<button type="button" class="bar-ib" aria-label="Next" title="Next" disabled={!s.current} onclick={() => player.next()}><Icon name="skip_next" /></button>
-		{#if s.current}<LikeButton item={s.current} class="bar-ib mini-like" />{/if}
+		{#if s.current}<LikeButton item={s.current} class="bar-ib mini-like" /><SaveButton item={s.current} class="bar-ib" />{/if}
 	</div>
 	<button type="button" class="bar-ib mini-x" aria-label="Back to the full window" title="Back to the full window (Esc)" onclick={full}><Icon name="open_in_full" /></button>
 	{#if s.current}<div class="mini-p"><ProgressBar /></div>{/if}

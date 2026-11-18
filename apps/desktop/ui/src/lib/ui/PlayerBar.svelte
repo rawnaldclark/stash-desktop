@@ -3,6 +3,7 @@
 	import Cover from './Cover.svelte';
 	import Icon from './Icon.svelte';
 	import LikeButton from './LikeButton.svelte';
+	import SaveButton from './SaveButton.svelte';
 	import ProgressBar from './ProgressBar.svelte';
 	import SignalBadge from './SignalBadge.svelte';
 	import Transport from './Transport.svelte';
@@ -28,6 +29,7 @@
 			<a class="bar-cv" href="/now" aria-label="Open Now playing"><Cover artwork={s.current.artwork} seed={s.current.title} min={104} class="cv" eager /></a>
 			<span class="bar-t"><span class="bar-ti"><b dir="auto">{s.current.title}</b><i dir="auto">{s.current.artist}</i></span><SignalBadge kind="bar" /></span>
 			<LikeButton item={s.current} class="bar-ib bar-like" />
+			<SaveButton item={s.current} class="bar-ib" />
 		</div>
 		<div class="bar-c">
 			<Transport kind="bar" />
