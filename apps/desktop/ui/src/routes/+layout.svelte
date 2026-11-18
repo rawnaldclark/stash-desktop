@@ -206,7 +206,7 @@
 {:else}
 <div class="wp stage wp-frame" style="{paletteStyle(palette, ui.light)};--wm-ink:{wmInk}" data-size={size}>
 	<a class="skip" href="#main">Skip to content</a>
-	<div class="wp-g" class:np class:pn-none={panelCollapsed && !np} class:has-bar={hasBar}>
+	<div class="wp-g" class:np class:pn-none={panelCollapsed && !np} class:has-bar={hasBar} class:rail={ui.sideFolded}>
 		{#if !np}<Sidebar />{/if}
 		{#if !np}<Header bind:this={header} />{/if}
 		<main class="main" id="main" tabindex="-1" bind:this={mainEl}>

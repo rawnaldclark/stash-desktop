@@ -146,6 +146,12 @@ class UIState {
 	w = $state(typeof window === 'undefined' ? 1200 : window.innerWidth);
 	h = $state(typeof window === 'undefined' ? 800 : window.innerHeight);
 	panelOpen = $state(true);
+	/** The listener folded the sidebar to its icons (kept on this computer). Under 1100 px it is always folded. */
+	sideFolded = $state(LS.get('stash.sideFolded') === '1');
+	foldSide(folded: boolean) {
+		this.sideFolded = folded;
+		LS.set('stash.sideFolded', folded ? '1' : '0');
+	}
 	/** The command palette (Ctrl+K) is open. */
 	palette = $state(false);
 	/** The smart playlist editor is open: on a new one (`id` null), or on the playlist `id`. */

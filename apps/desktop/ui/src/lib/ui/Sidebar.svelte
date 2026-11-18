@@ -10,7 +10,7 @@
 	import type { Playlist } from '../api';
 	import { carry } from './carry';
 	import { atEvent, folderMenu, moveTo, newMenu, playlistMenu, playlistsWord, under } from '../desktop/playlist-folders';
-	import { L } from './state.svelte';
+	import { L, ui } from './state.svelte';
 	import { songs } from './format';
 	import type { IconName } from './icons';
 
@@ -38,7 +38,10 @@
 {/snippet}
 
 <aside class="side" aria-label="Sidebar">
-	<div class="sb-brand"><Logo size="sm" /></div>
+	<div class="sb-brand">
+		<Logo size="sm" />
+		<button type="button" class="sb-fold-side" aria-label={ui.sideFolded ? 'Show the sidebar' : 'Fold the sidebar to icons'} title={ui.sideFolded ? 'Show the sidebar' : 'Fold the sidebar'} aria-pressed={ui.sideFolded} onclick={() => ui.foldSide(!ui.sideFolded)}><Icon name={ui.sideFolded ? 'chevron_right' : 'chevron_left'} /></button>
+	</div>
 	<nav class="sb-nav" aria-label="Main">
 		{#each nav as [href, name, icon] (href)}
 			<a class="nav-i" class:on={here(href)} {href} title={name} aria-current={here(href) ? 'page' : undefined}><Icon name={icon} /><span>{name}</span></a>

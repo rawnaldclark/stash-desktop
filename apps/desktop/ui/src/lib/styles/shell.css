@@ -42,7 +42,7 @@
 /* ----- the sidebar (L labelled) and the rail (M) */
 .side { display: flex; flex-direction: column; min-width: 0; padding: 16px 12px; background: var(--wp-side); border-right: 1px solid var(--wp-line); overflow: hidden auto; }
 /* the wordmark alone, its left edge on the nav icons' */
-.sb-brand { display: flex; align-items: center; height: 40px; padding-left: 12px; flex: none; }
+.sb-brand { display: flex; align-items: center; justify-content: space-between; height: 40px; padding-left: 12px; padding-right: 2px; flex: none; }
 .sb-nav { display: grid; gap: 2px; margin-top: 12px; flex: none; }
 .nav-i { display: flex; align-items: center; gap: 12px; height: 40px; padding: 0 12px; border-radius: 8px; color: var(--wp-text-2); font: 600 14px/1 var(--font-body); transition: background-color 150ms var(--ease-standard), color 150ms; }
 @media (hover: hover) and (pointer: fine) { .nav-i:hover { background: var(--wp-hover); color: var(--wp-text); } }
@@ -96,6 +96,29 @@ body.carrying, body.carrying * { cursor: grabbing !important; user-select: none;
 	.sb-folder > a.sb-rec { padding-left: 4px; }
 	.sb-folder > a.sb-rec .tile { width: 32px; height: 32px; }
 }
+/* folded by the listener (the button by the wordmark): the same rail at any width */
+.wp-g.rail { grid-template-columns: 72px minmax(0, 1fr) 340px; }
+.wp-g.rail.pn-none:not(.np) { grid-template-columns: 72px minmax(0, 1fr) 0px; }
+.wp-g.rail .side { align-items: center; padding: 16px 0; }
+.wp-g.rail .sb-brand { justify-content: center; padding-left: 0; }
+.wp-g.rail .sb-brand .wm { width: 62px !important; height: auto !important; }
+.wp-g.rail .nav-i span, .wp-g.rail .sb-t { display: none !important; }
+.wp-g.rail .nav-i { justify-content: center; width: 48px; padding: 0; }
+.wp-g.rail .sb-sec { align-self: stretch; margin: 12px 12px 8px; padding: 0; border-top: 1px solid var(--wp-line); height: 0; }
+.wp-g.rail .sb-sec .caps { display: none; }
+.wp-g.rail .sb-list { justify-items: center; }
+.wp-g.rail .sb-rec { width: 48px; height: 48px; padding: 4px; justify-content: center; }
+.wp-g.rail .sb-rec.on { background: none; }
+.wp-g.rail .sb-rec.on .tile { outline: 2px solid var(--acc); outline-offset: 2px; }
+.wp-g.rail .sb-new, .wp-g.rail .sb-chev { display: none; }
+.wp-g.rail .sb-folder, .wp-g.rail .sb-loose { justify-items: center; }
+.wp-g.rail .sb-folder > a.sb-rec { padding-left: 4px; }
+.wp-g.rail .sb-folder > a.sb-rec .tile { width: 32px; height: 32px; }
+.wp-g.rail .sb-brand { flex-direction: column; height: auto; gap: 8px; }
+/* the button that folds the sidebar: by the wordmark; under 1100 px the sidebar is always the rail, so it goes */
+.sb-fold-side { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; color: var(--wp-text-2); }
+@media (hover: hover) and (pointer: fine) { .sb-fold-side:hover { background: var(--wp-hover); color: var(--wp-text); } }
+@container wp (max-width: 1099.98px) { .sb-fold-side { display: none; } }
 
 /* ----- tiles and covers */
 .cv { display: block; object-fit: cover; background: var(--wp-field); }
