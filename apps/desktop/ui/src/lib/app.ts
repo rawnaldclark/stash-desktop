@@ -651,7 +651,12 @@ export function saveSongs(items: LibraryItem[]): Promise<string> {
 	return change(async () => {
 		const ids: number[] = [];
 		for (const it of items) ids.push(await rowOf(it));
-		return savedWords((await core.saveSongs({ ids })).queued ?? 0, ids.length);
+		const queued = (await core.saveSongs({ ids })).queued ?? 0;
+		// Put on the list, but none of the listener's sources can save songs (or Stash is offline): said, not promised.
+		const savers = get(addonStore).some((a) => a.enabled && !a.problem && a.resources.includes('download'));
+		if (queued > 0 && get(offline)) return 'Waiting: Stash is offline';
+		if (queued > 0 && !savers) return 'Waiting: none of your sources can save songs';
+		return savedWords(queued, ids.length);
 	});
 }
 /** Takes songs off the list; saved ones are deleted from this computer and play through the add-ons again. */
