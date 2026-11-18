@@ -9,10 +9,11 @@
 //! - `GET /api/phone`: what is happening: nothing, songs being taken from a phone (how many of how many), or what the
 //!   last transfer did; and the phones plugged in now (with "File transfer" chosen), each with whether it has songs
 //!   sent.
-//! - `POST /api/phone/look`: looks at the phones now, and tries again a send that had songs not taken.
+//! - `POST /api/phone/look`: looks at the phones now, and tries again a send that had songs not taken; answers the
+//!   look's number, which `answered` in `GET /api/phone` reaches once it is done.
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -88,8 +89,9 @@ pub(crate) struct Now {
 static NOW: Mutex<Option<Now>> = Mutex::new(None);
 /// The phones plugged in at the last look: their names, and whether each had songs sent (None: not looked inside yet).
 static SEEN: Mutex<Vec<(String, Option<bool>)>> = Mutex::new(Vec::new());
-/// Asked to look now (Settings' "Look for my phone").
-static LOOK_NOW: AtomicBool = AtomicBool::new(false);
+/// Looks asked for (Settings' "Look for my phone"), and the last one answered: the window waits for its number.
+static ASKED: AtomicU64 = AtomicU64::new(0);
+static ANSWERED: AtomicU64 = AtomicU64::new(0);
 
 fn set(now: Now) {
     *NOW.lock().unwrap() = Some(now);
@@ -362,7 +364,8 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
     let mut sent: HashMap<String, bool> = HashMap::new();
     let mut tried: HashMap<i64, u32> = HashMap::new();
     while !stop.load(Ordering::Relaxed) {
-        if LOOK_NOW.swap(false, Ordering::Relaxed) {
+        let asked = ASKED.load(Ordering::Relaxed);
+        if asked > ANSWERED.load(Ordering::Relaxed) {
             looked.clear();
             tried.clear();
         }
@@ -403,8 +406,11 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
                 }
             }
         }
+        ANSWERED.fetch_max(asked, Ordering::Relaxed);
         let until = Instant::now() + LOOK_EVERY;
-        while Instant::now() < until && !LOOK_NOW.load(Ordering::Relaxed) {
+        while Instant::now() < until
+            && ASKED.load(Ordering::Relaxed) <= ANSWERED.load(Ordering::Relaxed)
+        {
             if stop.load(Ordering::Relaxed) {
                 return;
             }
@@ -430,6 +436,7 @@ pub(crate) fn route(_state: &State, request: &mut Request, path: &str) -> Result
                 ..Default::default()
             });
             let mut out = json!(now);
+            out["answered"] = json!(ANSWERED.load(Ordering::Relaxed));
             out["phones"] = SEEN
                 .lock()
                 .unwrap()
@@ -439,8 +446,8 @@ pub(crate) fn route(_state: &State, request: &mut Request, path: &str) -> Result
             Ok(Some(reply_json(200, out)))
         }
         (Method::Post, "/api/phone/look") => {
-            LOOK_NOW.store(true, Ordering::Relaxed);
-            Ok(Some(reply_json(200, json!({ "looking": true }))))
+            let asked = ASKED.fetch_add(1, Ordering::Relaxed) + 1;
+            Ok(Some(reply_json(200, json!({ "asked": asked }))))
         }
         _ => Ok(None),
     }
