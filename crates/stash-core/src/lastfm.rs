@@ -97,7 +97,9 @@ pub enum Allowed {
 pub fn begin(agent: &Agent, keys: &Keys) -> Result<String, String> {
     let json = read(ask(agent, body(keys, "auth.getToken", Vec::new()))).map_err(why)?;
     text(&json, "token")
-        .filter(|t| t.len() <= 200 && t.chars().all(|c| c.is_ascii_alphanumeric()))
+        // Last.fm's tokens are 32 characters, letters and digits but also others (about half of them): any printable
+        // character is taken (the page's address and the form encode it).
+        .filter(|t| !t.is_empty() && t.len() <= 200 && t.chars().all(|c| c.is_ascii_graphic()))
         .map(str::to_string)
         .ok_or_else(|| NOT_LASTFM.to_string())
 }
