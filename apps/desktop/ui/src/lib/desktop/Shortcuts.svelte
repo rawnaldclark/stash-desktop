@@ -1,6 +1,6 @@
 <!-- Settings › Shortcuts: keys that work in any app (play or pause, skip, the volume, like the song playing, show
      Stash). The core keeps them and the desktop app holds them system-wide; in a browser there are none, and the
-     section does not show (`shown` tells the page, so its list of groups leaves it out too). -->
+     card does not show (`shown` says so too; the page asks the core itself, to leave the category out of its list). -->
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import * as core from '../core';
@@ -160,41 +160,38 @@
 </script>
 
 {#if s?.available}
-	<section class="set-sec" id="shortcuts" aria-labelledby="h-shortcuts">
-		<h2 class="set-g" id="h-shortcuts" tabindex="-1">Shortcuts</h2>
-		<div class="set-card">
-			<div class="set-row">
-				<div class="set-lab">
-					<span class="set-name" id="sk-l">Global shortcuts</span>
-					<span class="set-sub">Work while you use other apps</span>
-				</div>
-				<button type="button" class="sw" role="switch" aria-checked={s.on} aria-labelledby="sk-l" disabled={busy} onclick={() => s && void change({ on: !s.on })}><i></i></button>
+	<div class="set-card">
+		<div class="set-row">
+			<div class="set-lab">
+				<span class="set-name" id="sk-l">Global shortcuts</span>
+				<span class="set-sub">Work while you use other apps</span>
 			</div>
-			{#each s.actions as action (action)}
-				<div class="set-row sk-row" class:sk-off={!s.on}>
-					<div class="set-lab">
-						<span class="set-name" id="sk-{action}">{LABELS[action] ?? action}</span>
-						{#if picking === action}
-							<span class="set-sub" role="status">Esc to cancel, Backspace to clear</span>
-						{/if}
-						{#if s.on && s.trouble[action] && picking !== action}<span class="set-sub set-trouble">{s.trouble[action]}. Pick other keys.</span>{/if}
-						{#if wrong[action]}<span class="set-sub set-trouble" role="alert">{wrong[action]}</span>{/if}
-					</div>
-					<button
-						type="button"
-						class="btn ghost sk-keys"
-						class:picking={picking === action}
-						class:none={!s.keys[action]}
-						aria-labelledby="sk-{action} sk-k-{action}"
-						onclick={() => void (picking === action ? done() : pick(action))}
-						onkeydown={(e) => down(e, action)}
-						onkeyup={(e) => up(e, action)}
-						onblur={() => picking === action && void done()}
-					><span id="sk-k-{action}">{picking === action ? held || 'Press the keys…' : say(s.keys[action])}</span></button>
-				</div>
-			{/each}
+			<button type="button" class="sw" role="switch" aria-checked={s.on} aria-labelledby="sk-l" disabled={busy} onclick={() => s && void change({ on: !s.on })}><i></i></button>
 		</div>
-	</section>
+		{#each s.actions as action (action)}
+			<div class="set-row sk-row" class:sk-off={!s.on}>
+				<div class="set-lab">
+					<span class="set-name" id="sk-{action}">{LABELS[action] ?? action}</span>
+					{#if picking === action}
+						<span class="set-sub" role="status">Esc to cancel, Backspace to clear</span>
+					{/if}
+					{#if s.on && s.trouble[action] && picking !== action}<span class="set-sub set-trouble">{s.trouble[action]}. Pick other keys.</span>{/if}
+					{#if wrong[action]}<span class="set-sub set-trouble" role="alert">{wrong[action]}</span>{/if}
+				</div>
+				<button
+					type="button"
+					class="btn ghost sk-keys"
+					class:picking={picking === action}
+					class:none={!s.keys[action]}
+					aria-labelledby="sk-{action} sk-k-{action}"
+					onclick={() => void (picking === action ? done() : pick(action))}
+					onkeydown={(e) => down(e, action)}
+					onkeyup={(e) => up(e, action)}
+					onblur={() => picking === action && void done()}
+				><span id="sk-k-{action}">{picking === action ? held || 'Press the keys…' : say(s.keys[action])}</span></button>
+			</div>
+		{/each}
+	</div>
 {/if}
 
 <style>

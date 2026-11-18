@@ -97,79 +97,79 @@
 	});
 </script>
 
+<!-- One card: a row for each service, then the form that adds one (or the button that opens it). -->
 <div class="set-card">
-	<div class="set-row set-col">
-		{#if targets?.length}
-			<ol class="src-list">
-				{#each targets as t (t.id)}
-					<li class="src sc-row" class:off={!t.enabled}>
-						<span class="tr-t">
-							<b>{name(t)}</b>
-							<i>{line(t)}</i>
-							{#if t.waiting}<i class="src-use">{many(t.waiting, 'play', 'plays')} waiting</i>{/if}
-							{#if t.dropped}<i>{many(t.dropped, 'play', 'plays')} rejected</i>{/if}
-							{#if t.refused}
-								<i class="src-problem">Token rejected. Enter it again.</i>
-							{:else if t.trouble}
-								<i class="src-problem">Problem {ago(t.trouble.at_ms)}: {t.trouble.message}</i>
-							{/if}
-						</span>
-						<span class="src-acts">
-							<button type="button" class="sw" role="switch" aria-checked={t.enabled} aria-label={name(t)} title={t.enabled ? 'On' : 'Off'} onclick={() => act(() => core.setScrobblingEnabled(t.id, !t.enabled))}><i></i></button>
-							{#if t.trouble && !t.refused && t.enabled}<button type="button" class="btn ghost" onclick={() => act(() => core.scrobbleAgain(t.id))}>Try again</button>{/if}
-							<button type="button" class="btn ghost" aria-label="Remove {name(t)}" onclick={() => act(() => core.removeScrobbling(t.id))}>Remove</button>
-						</span>
+	{#if targets?.length}
+		<ol class="src-list">
+			{#each targets as t (t.id)}
+				<li class="src sc-row" class:off={!t.enabled}>
+					<span class="tr-t">
+						<b>{name(t)}</b>
+						<i>{line(t)}</i>
+						{#if t.waiting}<i class="src-use">{many(t.waiting, 'play', 'plays')} waiting</i>{/if}
+						{#if t.dropped}<i>{many(t.dropped, 'play', 'plays')} rejected</i>{/if}
+						{#if t.refused}
+							<i class="src-problem">Token rejected. Enter it again.</i>
+						{:else if t.trouble}
+							<i class="src-problem">Problem {ago(t.trouble.at_ms)}: {t.trouble.message}</i>
+						{/if}
+					</span>
+					<span class="src-acts">
+						{#if t.trouble && !t.refused && t.enabled}<button type="button" class="btn ghost" onclick={() => act(() => core.scrobbleAgain(t.id))}>Try again</button>{/if}
+						<button type="button" class="btn ghost" aria-label="Remove {name(t)}" onclick={() => act(() => core.removeScrobbling(t.id))}>Remove</button>
+						<button type="button" class="sw" role="switch" aria-checked={t.enabled} aria-label={name(t)} title={t.enabled ? 'On' : 'Off'} onclick={() => act(() => core.setScrobblingEnabled(t.id, !t.enabled))}><i></i></button>
+					</span>
+				</li>
+				{#if t.refused}
+					<li class="sc-again">
+						<form class="dev-rename" onsubmit={(e) => giveAgain(e, t)}>
+							<input class="dev-input" type="password" placeholder="Token" bind:value={again[t.id]} aria-label="{name(t)} token" autocomplete="off" spellcheck="false" />
+							<button type="submit" class="btn" disabled={!(again[t.id] ?? '').trim()}>Save</button>
+						</form>
+						{#if againWrong[t.id]}<p class="set-sub set-trouble" role="alert">{againWrong[t.id]}</p>{/if}
 					</li>
-					{#if t.refused}
-						<li class="sc-again">
-							<form class="dev-rename" onsubmit={(e) => giveAgain(e, t)}>
-								<input class="dev-input" type="password" placeholder="Token" bind:value={again[t.id]} aria-label="{name(t)} token" autocomplete="off" spellcheck="false" />
-								<button type="submit" class="btn" disabled={!(again[t.id] ?? '').trim()}>Save</button>
-							</form>
-							{#if againWrong[t.id]}<p class="set-sub set-trouble" role="alert">{againWrong[t.id]}</p>{/if}
-						</li>
-					{/if}
-				{/each}
-			</ol>
-		{/if}
-		{#if targets && (adding || !targets.length)}
-			<form class="sc-add" onsubmit={add}>
-				{#if !targets.length}
-					<div class="set-lab">
-						<span class="set-name">ListenBrainz</span>
-						<span class="set-sub">Share what you play. Listens there are public.</span>
-					</div>
 				{/if}
-				<label class="sc-field">
-					<span class="set-sub">{elsewhere ? 'Your server’s token' : 'User token, from listenbrainz.org › Settings'}</span>
-					<input class="dev-input" type="password" bind:value={token} placeholder="Token" autocomplete="off" spellcheck="false" />
-				</label>
-				<label class="sc-check"><input type="checkbox" bind:checked={elsewhere} /><span class="set-sub">Use my own server</span></label>
-				{#if elsewhere}
-					<label class="sc-field">
-						<span class="set-sub">Server address</span>
-						<input class="dev-input" type="url" bind:value={url} placeholder="https://…/apis/listenbrainz" autocomplete="off" spellcheck="false" />
-					</label>
-				{/if}
-				<div class="chips">
-					<button type="submit" class="btn" disabled={busy || !token.trim() || (elsewhere && !url.trim())}>{busy ? 'Checking…' : 'Connect'}</button>
-					{#if targets.length}<button type="button" class="btn ghost" onclick={() => ((adding = false), (wrong = ''))}>Cancel</button>{/if}
+			{/each}
+		</ol>
+	{/if}
+	{#if targets && (adding || !targets.length)}
+		<form class="set-row set-col sc-add" onsubmit={add}>
+			{#if !targets.length}
+				<div class="set-lab">
+					<span class="set-name">ListenBrainz</span>
+					<span class="set-sub">Share what you play. Listens there are public.</span>
 				</div>
-				{#if wrong}<p class="set-sub set-trouble" role="alert">{wrong}</p>{/if}
-			</form>
-		{:else if targets?.length}
-			<div class="chips"><button type="button" class="btn ghost" onclick={() => (adding = true)}>Add a service</button></div>
-		{/if}
-	</div>
+			{/if}
+			<label class="sc-field">
+				<span class="set-sub">{elsewhere ? 'Your server’s token' : 'User token, from listenbrainz.org › Settings'}</span>
+				<input class="dev-input" type="password" bind:value={token} placeholder="Token" autocomplete="off" spellcheck="false" />
+			</label>
+			<label class="sc-check"><input type="checkbox" bind:checked={elsewhere} /><span class="set-sub">Use my own server</span></label>
+			{#if elsewhere}
+				<label class="sc-field">
+					<span class="set-sub">Server address</span>
+					<input class="dev-input" type="url" bind:value={url} placeholder="https://…/apis/listenbrainz" autocomplete="off" spellcheck="false" />
+				</label>
+			{/if}
+			<div class="chips">
+				<button type="submit" class="btn" disabled={busy || !token.trim() || (elsewhere && !url.trim())}>{busy ? 'Checking…' : 'Connect'}</button>
+				{#if targets.length}<button type="button" class="btn ghost" onclick={() => ((adding = false), (wrong = ''))}>Cancel</button>{/if}
+			</div>
+			{#if wrong}<p class="set-sub set-trouble" role="alert">{wrong}</p>{/if}
+		</form>
+	{:else if targets?.length}
+		<div class="set-row sc-more"><button type="button" class="btn ghost" onclick={() => (adding = true)}>Add a service</button></div>
+	{/if}
 </div>
 
 <style>
-	/* A service's row: its words, then its switch and buttons (no number: services are not asked in turn). */
-	.sc-row { grid-template-columns: minmax(0, 1fr) auto; }
+	/* A service's row: its words, then its buttons and switch (no number: services are not asked in turn). */
+	.sc-row { grid-template-columns: minmax(0, 1fr) auto; padding-left: 20px; }
 	.sc-row .tr-t i { white-space: normal; overflow-wrap: anywhere; }
-	.sc-add { display: grid; gap: 12px; }
+	.sc-add { gap: 14px; }
 	.sc-field { display: grid; gap: 6px; }
 	.sc-field .dev-input { flex: none; width: min(100%, 460px); }
 	.sc-check { display: flex; align-items: center; gap: 8px; }
-	.sc-again { list-style: none; display: grid; gap: 6px; margin: -4px 0 6px; }
+	.sc-again { list-style: none; display: grid; gap: 6px; padding: 0 16px 14px 20px; }
+	.sc-more { justify-content: flex-start; }
 </style>

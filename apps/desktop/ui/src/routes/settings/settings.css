@@ -1,74 +1,95 @@
-/* Settings (loaded with the route), in the web player's look: a short list of groups beside the page (chips above it in a
-   narrow window), each group a heading and a few cards of rows; a row is a name, a hint where needed, and its control. */
-.view-settings { max-width: 960px; }
-.view-settings > .vh2 { margin-bottom: 24px; }
+/* Settings (loaded with the route): the categories down the left, as the sidebar draws its pages, and the chosen one on
+   the right: a large title, then cards of rows. A row is a name (and at most a short line under it) and its control. In a
+   narrow page (.narrow, measured on the page itself) the list is a card of its own, and a category opens in its place. */
 
-/* ----- the list of groups */
-.set-layout { display: grid; grid-template-columns: 168px minmax(0, 1fr); gap: 40px; align-items: start; }
-.set-nav { position: sticky; top: 16px; display: grid; gap: 2px; }
-.set-nav-i { display: flex; align-items: center; height: 36px; padding: 0 12px; border-radius: 8px; color: var(--wp-text-2); font: 600 14px/1 var(--font-body); text-align: left; white-space: nowrap; transition: background-color 150ms var(--ease-standard), color 150ms; }
+/* ----- the two panes */
+.view-settings { display: grid; grid-template-columns: 220px minmax(0, 720px); column-gap: 48px; align-items: start; }
+.view-settings.narrow { display: block; }
+.set-side { position: sticky; top: 24px; min-width: 0; }
+.set-h1 { margin: 2px 0 16px 12px; }
+.narrow .set-h1 { margin-left: 4px; }
+.set-pane { min-width: 0; max-width: 720px; }
+
+/* ----- the list of categories: the sidebar's own rows (.nav-i in shell.css) */
+.set-nav { display: grid; gap: 2px; }
+.set-nav-i { display: flex; align-items: center; gap: 12px; height: 40px; padding: 0 12px; border-radius: 8px; color: var(--wp-text-2); font: 600 14px/1 var(--font-body); transition: background-color 150ms var(--ease-standard), color 150ms; }
+.set-nav-i > span { flex: 1; min-width: 0; overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
 @media (hover: hover) and (pointer: fine) { .set-nav-i:hover { background: var(--wp-hover); color: var(--wp-text); } }
-.set-nav-i[aria-current='true'] { background: var(--acc-wash); color: var(--wp-text); }
-.set-body { min-width: 0; max-width: 720px; }
-@container main (max-width: 839.98px) {
-	.set-layout { grid-template-columns: minmax(0, 1fr); gap: 24px; }
-	.set-nav { position: static; display: flex; flex-wrap: wrap; gap: 8px; }
-	.set-nav-i { height: 32px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--wp-line-2); font-size: 13px; }
-	.set-nav-i[aria-current='true'] { border-color: transparent; }
-}
-@media (forced-colors: active) { .set-nav-i[aria-current='true'] { border: 1px solid Highlight; } }
+.set-nav-i.on { background: var(--acc-wash); color: var(--wp-text); }
+.set-nav-i.on .ic { color: var(--acc-text); }
+/* narrow: the list fills the page, a card of rows, each opening its category */
+.narrow .set-nav { gap: 0; background: var(--wp-side); border: 1px solid var(--wp-line); border-radius: 12px; overflow: clip; }
+.narrow .set-nav > li + li { border-top: 1px solid var(--wp-line); }
+.narrow .set-nav-i { gap: 16px; height: 56px; padding: 0 14px 0 20px; border-radius: 0; color: var(--wp-text); font: 500 15px/1.3 var(--font-body); }
+.narrow .set-nav-i .ic { color: var(--wp-text-2); }
+.narrow .set-nav-i:focus-visible { outline-offset: -3px; }
+/* back to the list, above a category opened in its place */
+.set-back { display: inline-flex; align-items: center; gap: 2px; height: 32px; margin: 0 0 12px -6px; padding: 0 12px 0 4px; border-radius: 999px; color: var(--wp-text-2); font: 600 13px/1 var(--font-body); transition: background-color 150ms var(--ease-standard), color 150ms; }
+@media (hover: hover) and (pointer: fine) { .set-back:hover { background: var(--wp-hover); color: var(--wp-text); } }
+@media (forced-colors: active) { .set-nav-i.on { outline: 1px solid Highlight; } }
 
-/* ----- groups, their parts, cards and rows */
-.set-sec { scroll-margin-top: 16px; }
-.set-sec:not(:first-child) { margin-top: 48px; }
-.set-g { margin: 0 0 14px; font: 500 18px/1.2 var(--font-display); letter-spacing: -.01em; color: var(--wp-text); }
-.set-part { margin-top: 28px; scroll-margin-top: 16px; }
-.set-g + .set-part { margin-top: 0; }
-.set-h { margin: 0 0 10px; font: 600 11px/1.4 var(--font-body); letter-spacing: .08em; text-transform: uppercase; color: var(--wp-text-2); }
-.set-card { border-radius: 16px; background: var(--wp-side); border: 1px solid var(--wp-line); overflow: clip; }
-.set-card + .set-card, .set-card + .set-more { margin-top: 12px; }
+/* ----- a category: its title, then cards, and parts under a small caption */
+.set-title { margin: 0 0 24px; font: 700 28px/1.15 var(--font-display); letter-spacing: -.025em; color: var(--wp-text); }
+.view-settings .set-title:focus { outline: none; }
+.set-body > * + * { margin-top: 24px; }
+.set-body > * + .set-part { margin-top: 36px; }
+.set-part { scroll-margin-top: 16px; }
+.set-part > .set-card + .set-card { margin-top: 24px; }
+.set-h { margin: 0 4px 10px; font: 600 11px/1.4 var(--font-body); letter-spacing: .08em; text-transform: uppercase; color: var(--wp-text-2); }
+/* a caption with a short line at its end ("Searched in this order") */
+.set-cap { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; margin: 0 4px 10px; }
+.set-cap > .set-h { margin: 0; }
+
+/* ----- cards and rows */
+.set-card { border-radius: 12px; background: var(--wp-side); border: 1px solid var(--wp-line); overflow: clip; }
 .set-card > * + * { border-top: 1px solid var(--wp-line); }
 /* a card whose rows are still being read shows nothing yet */
 .set-card:not(:has(> *)) { display: none; }
-.set-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 20px; min-height: 60px; padding: 14px 20px; scroll-margin-top: 16px; }
-.set-row > .set-lab { flex: 1 1 200px; }
-.set-col { display: grid; justify-content: stretch; gap: 12px; }
+.set-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 24px; min-height: 56px; padding: 8px 16px 8px 20px; scroll-margin-top: 16px; }
+.set-row > .set-lab { flex: 1 1 220px; }
+/* a row of things under each other (a list's form, a few lines) */
+.set-col { display: grid; justify-content: stretch; gap: 12px; padding-top: 14px; padding-bottom: 14px; }
+.set-note { display: grid; justify-content: stretch; gap: 4px; min-height: 0; padding-top: 12px; padding-bottom: 12px; }
 .set-lab { display: grid; gap: 2px; min-width: 0; }
 .set-lab label, .set-name { font: 500 15px/1.3 var(--font-body); color: var(--wp-text); }
-.set-sub { font: 400 13px/1.45 var(--font-body); color: var(--wp-text-2); max-width: 56ch; }
-.set-p { font: 400 14px/1.6 var(--font-body); color: var(--wp-text-2); max-width: 60ch; }
+.set-sub { font: 400 13px/1.4 var(--font-body); color: var(--wp-text-2); max-width: 56ch; }
 .set-trouble, .src-problem { color: var(--red) !important; }
 /* a row's controls when there are more than one: together at its end */
 .set-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .set-na { display: grid; gap: 4px; padding: 18px 20px; background: var(--acc-wash); }
-.set-na b { font: 600 14px/1.3 var(--font-body); color: var(--wp-text); }
-.set-na span { font: 400 13px/1.5 var(--font-body); color: var(--wp-text-2); max-width: 56ch; }
+.set-na b { font: 600 15px/1.3 var(--font-body); color: var(--wp-text); }
+.set-na span { font: 400 13px/1.4 var(--font-body); color: var(--wp-text-2); max-width: 56ch; }
 /* a folder's path: one line (the whole path is its title) */
 .set-path { overflow: clip; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 /* a quiet text button in a line ("Clear") */
 .set-clear { margin-left: 8px; font: 600 13px/1 var(--font-body); color: var(--wp-text); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--wp-line-2); }
 @media (hover: hover) and (pointer: fine) { .set-clear:hover { text-decoration-color: currentColor; } }
 
-/* ----- Advanced: folded shut under a group's cards, or as the last row of a card */
-.set-more > summary { display: inline-flex; align-items: center; gap: 4px; height: 32px; padding: 0 10px 0 4px; border-radius: 8px; list-style: none; cursor: pointer; font: 600 13px/1 var(--font-body); color: var(--wp-text-2); }
+/* ----- Advanced: a row that folds open the rows under it (a card of its own, or the last row of one) */
+.set-more > summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 56px; padding: 8px 16px 8px 20px; list-style: none; cursor: pointer; font: 500 15px/1.3 var(--font-body); color: var(--wp-text); transition: background-color 150ms var(--ease-standard); }
 .set-more > summary::-webkit-details-marker { display: none; }
-@media (hover: hover) and (pointer: fine) { .set-more > summary:hover { background: var(--wp-hover); color: var(--wp-text); } }
-.set-chev { transform: rotate(-90deg); transition: transform 150ms var(--ease-standard); }
-.set-more[open] > summary .set-chev { transform: none; }
-.set-more[open] > .set-card { margin-top: 8px; }
-.set-card > .set-more > summary { display: flex; height: 48px; padding: 0 20px 0 16px; border-radius: 0; }
-.set-card > .set-more > .set-row { border-top: 1px solid var(--wp-line); }
+@media (hover: hover) and (pointer: fine) { .set-more > summary:hover { background: var(--wp-hover); } }
+.set-more > summary:focus-visible { outline-offset: -3px; }
+.set-more > summary ~ * { border-top: 1px solid var(--wp-line); }
+.set-chev { color: var(--wp-text-2); transition: transform 150ms var(--ease-standard); }
+.set-more[open] > summary .set-chev { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) { .set-chev { transition: none; } }
 
-/* ----- controls */
-.chips { display: flex; flex-wrap: wrap; gap: 8px; }
-.eq-name { color: var(--wp-text); }
-/* while the equalizer is off, the tones it keeps are dimmed */
-.eq-off .chip { opacity: .55; }
+/* ----- controls: the app's switch, segmented choice (.seg in shell.css), buttons and fields */
 .sw { position: relative; width: 44px; height: 26px; border-radius: 13px; flex: none; background: var(--wp-line-2); transition: background-color var(--dur-short); }
 .sw i { position: absolute; left: 3px; top: 3px; width: 20px; height: 20px; border-radius: 50%; background: var(--cream); box-shadow: 0 1px 3px rgb(0 0 0 / .4); transition: transform var(--dur-short) var(--ease-out-expo); }
 .sw[aria-checked='true'] { background: var(--acc); }
 .sw[aria-checked='true'] i { transform: translateX(18px); }
 @media (prefers-reduced-motion: reduce) { .sw i { transition: none; } }
+.set-row .seg { flex: none; max-width: 100%; }
+.set-row .seg-i { flex: none; }
+/* the choice made: raised off the track (a hairline and a shadow, so it reads in both themes) */
+.seg-i[aria-pressed='true'] { background: var(--wp-field); color: var(--wp-text); box-shadow: inset 0 0 0 1px var(--wp-line-2), 0 1px 2px rgb(0 0 0 / .2); }
+@media (forced-colors: active) { .seg-i[aria-pressed='true'] { outline: 1px solid Highlight; } }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.eq-name { color: var(--wp-text); }
+/* while the equalizer is off, the tones it keeps are dimmed */
+.eq-off .seg-i { opacity: .55; }
 .bk-pick { cursor: pointer; }
 .bk-pick:focus-within { outline: 2px solid var(--focus); outline-offset: 3px; }
 .bk-pick[aria-disabled='true'] { opacity: .55; pointer-events: none; }
@@ -76,17 +97,17 @@
 .dev-input { flex: 1 1 220px; min-width: 0; height: 36px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--wp-line-2); background: var(--wp-field); color: var(--wp-text); font: 400 14px/1 var(--font-body); }
 .set-select { flex: 0 1 280px; width: 280px; max-width: 100%; padding: 0 10px; cursor: pointer; }
 
-/* ----- a numbered list of sources (Add-ons), and the rows of Scrobbling and the extensions */
-.src-list { display: grid; gap: 2px; }
-.src { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 52px; padding: 6px 0; border-top: 1px solid var(--wp-line); }
+/* ----- lists inside a card, a row each: the add-ons (numbered: asked in turn), the scrobbling services */
+.src-list { display: grid; }
+.src { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 8px 12px; min-height: 56px; padding: 8px 16px 8px 14px; border-top: 1px solid var(--wp-line); }
 .src:first-child { border-top: 0; }
 .src.off .tr-t { opacity: .55; }
 .src .tr-t i { white-space: normal; }
 .src-n { font: 600 12px/1 var(--font-body); font-variant-numeric: tabular-nums; color: var(--wp-num); text-align: center; }
-.src-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 4px; }
-.src-acts .sw { margin-right: 8px; }
-.src-acts .btn { margin-left: 8px; }
-@container main (max-width: 560px) { .src { grid-template-columns: 24px minmax(0, 1fr); } .src-acts { grid-column: 2; } }
+.src-acts { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px 8px; }
+.src-acts .act-ib { --act2: 36px; }
+.src-acts .sw { margin-left: 8px; }
+@container main (max-width: 560px) { .src { grid-template-columns: 24px minmax(0, 1fr); } .src-acts { grid-column: 2; justify-content: flex-start; } .src-acts .sw { margin-left: 0; } }
 /* a new version of an add-on: what changed, what gives it more in red, then take it or put it off */
 .src-offer { grid-column: 2 / -1; display: grid; gap: 6px; margin: 0 0 6px; padding: 10px 12px; border: 1px solid var(--wp-line-2); border-radius: 8px; background: var(--wp-field); font-size: 13px; }
 .src-offer b { font-weight: 600; color: var(--wp-text); }

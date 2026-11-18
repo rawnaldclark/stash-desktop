@@ -217,13 +217,13 @@
 								<i title={a.description || undefined}>{stateOf(a)}{a.playable ? '' : ' · no search'}</i>
 							</span>
 							<span class="src-acts">
-								<button type="button" class="sw" role="switch" aria-checked={a.enabled} aria-label={a.display_name} onclick={() => act(a.key, () => core.mornyeSetEnabled(a.key, !a.enabled))}><i></i></button>
 								{#if a.enabled && !a.access.ready && a.access.kind === 'verification'}
 									<button type="button" class="btn" disabled={ui.offline} onclick={async () => { if (open !== a.key) await openPanel(a.key); await verify(); }}>Verify</button>
 								{/if}
 								{#if entry}<button type="button" class="btn" disabled={busy !== null || ui.offline} onclick={() => act(a.key, () => core.mornyeInstall(entry.repository, entry.id))}>{busy === a.key ? 'Updating…' : `Update to ${entry.version}`}</button>{/if}
 								<button type="button" class="btn ghost" aria-expanded={open === a.key} onclick={() => openPanel(a.key)}>{open === a.key ? 'Close' : 'Settings'}</button>
 								<button type="button" class="btn ghost" aria-label="Remove {a.display_name}" disabled={busy !== null} onclick={() => act(a.key, () => core.mornyeRemove(a.key))}>Remove</button>
+								<button type="button" class="sw" role="switch" aria-checked={a.enabled} aria-label={a.display_name} onclick={() => act(a.key, () => core.mornyeSetEnabled(a.key, !a.enabled))}><i></i></button>
 							</span>
 						</div>
 						{#if open === a.key && panel?.key === a.key}
@@ -362,7 +362,7 @@
 		</div>
 
 		<details class="set-more">
-			<summary><Icon name="expand_more" class="ic set-chev" />Advanced</summary>
+			<summary><span>Advanced</span><Icon name="expand_more" class="ic set-chev" /></summary>
 			<div class="set-row set-col">
 				<span class="set-name">Repositories</span>
 				<ul class="mx-repos">
@@ -389,8 +389,8 @@
 	/* As wide as the card, also inside a column (Available): a long description is cut short, the buttons stay in view. */
 	.mx-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; align-self: stretch; min-width: 0; }
 	/* installed: rows of the card; available: rows inside its column */
-	.mx { padding: 12px 20px; }
-	.set-col .mx { padding: 8px 0; }
+	.mx { display: flex; flex-direction: column; justify-content: center; min-height: 56px; padding: 10px 16px 10px 20px; }
+	.set-col .mx { min-height: 0; padding: 8px 0; }
 	.mx + .mx { border-top: 1px solid var(--wp-line); }
 	.mx.off .tr-t { opacity: 0.6; }
 	.mx-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
