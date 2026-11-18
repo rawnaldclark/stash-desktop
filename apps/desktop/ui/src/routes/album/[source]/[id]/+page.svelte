@@ -3,7 +3,7 @@
 	import { get } from 'svelte/store';
 	import { browse, library, player } from '../../../../lib/app';
 	import type { Album, LibraryItem } from '../../../../lib/api';
-	import { Refused } from '../../../../lib/core';
+	import { Refused, YOUTUBE } from '../../../../lib/core';
 	import { artistHref, artistLink, LIB_REF, LIBRARY_SOURCE, toLibraryItem } from '../../../../lib/identity';
 	import BrowseMsg from '../../../../lib/ui/BrowseMsg.svelte';
 	import Cover from '../../../../lib/ui/Cover.svelte';
@@ -11,7 +11,7 @@
 	import TrackRow from '../../../../lib/ui/TrackRow.svelte';
 	import type { PickList } from '../../../../lib/ui/pick.svelte';
 	import { songs, totalLength } from '../../../../lib/ui/format';
-	import { ui } from '../../../../lib/ui/state.svelte';
+	import { L, ui } from '../../../../lib/ui/state.svelte';
 
 	const sid = $derived(page.params.source ?? '');
 	const id = $derived(page.params.id ?? '');
@@ -99,6 +99,21 @@
 			keeping = false;
 		}
 	}
+	// A YouTube Music playlist is followed: a playlist of yours whose songs are that list's, kept up to date.
+	const following = $derived(sid === YOUTUBE && isPlaylist ? L.playlists.find((p) => p.followsTube === id) : undefined);
+	let followingNow = $state(false);
+	async function follow() {
+		if (!album || followingNow) return;
+		followingNow = true;
+		try {
+			const pl = await library.followTube(id);
+			ui.toast(`Following “${pl.name}”: it stays up to date in your library`);
+		} catch {
+			/* said by the shell (the core's own words) */
+		} finally {
+			followingNow = false;
+		}
+	}
 	// The album becomes a playlist with its name (saved once; a second tap says so).
 	async function save() {
 		if (!album || !items.length) return;
@@ -138,6 +153,13 @@
 			<button type="button" class="act-play" aria-label="Play {album.title}" disabled={!items.length} onclick={() => play()}><Icon name="play_arrow" /></button>
 			<button type="button" class="act-ib" aria-label="Shuffle {album.title}" title="Shuffle" disabled={!items.length} onclick={() => { player.setShuffle(true); play(); }}><Icon name="shuffle" /></button>
 			<button type="button" class="act-ib" aria-label="Add {album.title} to Up next" title="Add to Up next" disabled={!items.length} onclick={upNext}><Icon name="queue_play_next" /></button>
+			{#if sid === YOUTUBE && isPlaylist}
+				{#if following}
+					<a class="act-ib act-on" href="/playlist/{following.id}" aria-label="Following {album.title}: open it in your library" title="Following: open it in your library"><Icon name="library_add_check" /></a>
+				{:else}
+					<button type="button" class="act-ib" aria-label="Follow {album.title}" title="Follow: it stays up to date in your library" disabled={followingNow} onclick={() => void follow()}><Icon name="library_add" /></button>
+				{/if}
+			{/if}
 			{#if foreign}
 				{#if allKept}
 					<button type="button" class="act-ib act-on" aria-label="{album.title} is in your library" title="In your library" onclick={() => ui.toast(`“${album?.title}” is in your library`)}><Icon name="library_add_check" /></button>

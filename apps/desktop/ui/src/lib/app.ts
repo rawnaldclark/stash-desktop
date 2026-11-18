@@ -556,6 +556,10 @@ function syncPlaylists(rows: core.PlaylistRow[], force: number[] = []): Promise<
 					const items = fresh ? (await allPages((o, l) => core.playlistTracksAt(r.id, o, l))).map(itemOfRow) : old.items;
 					const p: Playlist = { id, name: r.name, items, createdAt: r.created_at_ms, updatedAt: r.updated_at_ms };
 					if (r.followed) p.followed = true;
+					if (r.follows?.startsWith('youtube:')) {
+						p.followsTube = r.follows.slice('youtube:'.length);
+						if (r.follows_checked_ms) p.followsCheckedAt = r.follows_checked_ms;
+					}
 					if (r.rules) p.rules = r.rules;
 					if (r.download) p.download = true;
 					if (r.folder) p.folder = r.folder;
@@ -707,6 +711,14 @@ const library: LibraryAPI = {
 		change(async () => {
 			const c = await core.createPlaylist(name.trim());
 			await took(c);
+			const made = get(playlists).find((p) => p.id === String(c.id));
+			if (!made) throw new Refused('The playlist was not made', 500);
+			return made;
+		}),
+	followTube: (id) =>
+		change(async () => {
+			const c = await core.followTube(id);
+			await took(c, c.id !== undefined ? [c.id] : []);
 			const made = get(playlists).find((p) => p.id === String(c.id));
 			if (!made) throw new Refused('The playlist was not made', 500);
 			return made;

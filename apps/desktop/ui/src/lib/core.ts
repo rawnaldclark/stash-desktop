@@ -132,6 +132,9 @@ export type PlaylistRow = {
 	download?: boolean;
 	/** The folder it is in. */
 	folder?: number;
+	/** The list of a source's it follows ("youtube:VL…"), and when that was last read. */
+	follows?: string;
+	follows_checked_ms?: number;
 };
 
 /** A playlist folder (the core's `folders.rs`). */
@@ -193,6 +196,8 @@ export const keepFound = (addon: string, track: KeptTrack) => post<Changed>('/ap
 /** Which of a source's songs (by what it calls them) the library has: each one's row, or null. */
 export const knownRows = (addon: string, ids: string[]) => post<{ rows: (number | null)[] }>('/api/tracks/known', { addon, ids });
 export const createPlaylist = (name: string) => post<Changed>('/api/playlists', { name });
+/** Follows the YouTube Music playlist `id` ("VL…"), or reads it again: the answer's `id` is the playlist that follows it. */
+export const followTube = (id: string) => post<Changed & { changed?: boolean }>('/api/youtube/follow', { id });
 /** What a playlist file brought in: the new playlist, and what came of its entries (files the library had, files it
  * added, songs found by their words, and entries left out). */
 export type Brought = { id: number; name: string; songs: number; files: number; added: number; by_words: number; left_out: number };

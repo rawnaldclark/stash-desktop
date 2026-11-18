@@ -20,6 +20,16 @@
 	const pl = $derived(L.playlists.find((p) => p.id === page.params.id));
 	/** A followed mix is its owner's (it came in with an imported library): it plays; its songs are not edited here. */
 	const followed = $derived(!!pl?.followed);
+	/** A YouTube Music playlist it follows: read again when it is opened and was last read over an hour ago (the core
+	 *  reads followed lists every six hours as well). */
+	const tube = $derived(pl?.followsTube);
+	let readAgain = '';
+	$effect(() => {
+		const [list, checked, plId] = [tube, pl?.followsCheckedAt ?? 0, pl?.id];
+		if (!list || !plId || readAgain === plId || Date.now() - checked < 3_600_000) return;
+		readAgain = plId;
+		void library.followTube(list).catch(() => {});
+	});
 	/** A smart playlist fills itself by its rules: its songs are not edited by hand. */
 	const smart = $derived(pl?.rules);
 	/** The folder it is in, if any. */
@@ -70,7 +80,7 @@
 		<div class="alb-top">
 			<div class="alb-cover"><Tile items={pl.items} seed={pl.name} /></div>
 			<div class="alb-txt">
-				<p class="caps">{smart ? 'Smart playlist' : followed ? 'Shared mix' : 'Playlist'}{#if folder}<span class="sep">{' · '}</span><a class="pl-folder" href={folderHref(folder.id)}>{folder.name}</a>{/if}</p>
+				<p class="caps">{smart ? 'Smart playlist' : tube ? 'Follows YouTube Music' : followed ? 'Shared mix' : 'Playlist'}{#if folder}<span class="sep">{' · '}</span><a class="pl-folder" href={folderHref(folder.id)}>{folder.name}</a>{/if}</p>
 				{#if editing}
 					<form class="rename" onsubmit={(e) => { e.preventDefault(); void rename(); }}>
 						<input aria-label="Playlist name" bind:value={draft} maxlength="80" use:focusNow onkeydown={(e) => e.key === 'Escape' && (editing = false)} />

@@ -6,6 +6,7 @@ pub mod check_addon;
 pub mod demo_addon;
 mod equalizer;
 mod folders;
+mod following;
 mod kept;
 mod mornye;
 mod pieces;

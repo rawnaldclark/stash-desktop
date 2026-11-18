@@ -992,6 +992,105 @@ impl Library {
         Ok(changed > 0)
     }
 
+    /// The playlist that follows the list `list` of a source's ("youtube:VL…"), made the first time (named `name`, last
+    /// in the list), with `tracks` as its songs, in their order: the list's songs as they now are. Answers its id and
+    /// whether its songs changed. A name the listener gave it stays.
+    pub fn follow_list(
+        &mut self,
+        list: &str,
+        name: &str,
+        tracks: &[i64],
+        now_ms: i64,
+    ) -> Result<(i64, bool)> {
+        let tx = self.conn.transaction()?;
+        let found: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM playlists WHERE source_list = ?1",
+                [list],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let id = match found {
+            Some(id) => id,
+            None => {
+                let name = named(name)?;
+                let next: i64 =
+                    tx.query_row("SELECT IFNULL(MAX(id), 0) + 1 FROM playlists", [], |r| {
+                        r.get(0)
+                    })?;
+                tx.execute(
+                    "INSERT INTO playlists(id, external_id, name, created_at_ms, updated_at_ms, position, source_list)
+                     VALUES (?1, ?2, ?3, ?4, ?4, (SELECT IFNULL(MAX(position), 0) + 1 FROM playlists), ?5)",
+                    params![next, format!("desk-{now_ms}-{next}"), name, now_ms, list],
+                )?;
+                next
+            }
+        };
+        // Each song once, in the list's order; only songs the library has.
+        let mut seen = HashSet::new();
+        let mut wanted = Vec::new();
+        {
+            let mut known = tx.prepare("SELECT 1 FROM tracks WHERE id = ?1")?;
+            for track in tracks {
+                if seen.insert(*track) && known.exists([track])? {
+                    wanted.push(*track);
+                }
+            }
+        }
+        let had: Vec<i64> = tx
+            .prepare(
+                "SELECT track_id FROM playlist_items WHERE playlist_id = ?1 ORDER BY position",
+            )?
+            .query_map([id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let changed = had != wanted;
+        if changed {
+            tx.execute("DELETE FROM playlist_items WHERE playlist_id = ?1", [id])?;
+            let mut add = tx.prepare(
+                "INSERT INTO playlist_items(playlist_id, position, track_id) VALUES (?1, ?2, ?3)",
+            )?;
+            for (position, track) in wanted.iter().enumerate() {
+                add.execute(params![id, position as i64, track])?;
+            }
+            drop(add);
+            tx.execute(
+                "UPDATE playlists SET updated_at_ms = ?2 WHERE id = ?1",
+                params![id, now_ms],
+            )?;
+        }
+        tx.execute(
+            "UPDATE playlists SET source_checked_ms = ?2 WHERE id = ?1",
+            params![id, now_ms],
+        )?;
+        tx.commit()?;
+        Ok((id, changed))
+    }
+
+    /// The lists of sources' that playlists follow: (playlist, list, when it was last read).
+    pub fn followed_lists(&self) -> Result<Vec<(i64, String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_list, IFNULL(source_checked_ms, 0) FROM playlists
+             WHERE source_list IS NOT NULL ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The list of a source's the playlist `id` follows, when it follows one: its songs are that list's.
+    pub fn follows(&self, id: i64) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT source_list FROM playlists WHERE id = ?1",
+                [id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     /// Makes an empty playlist, last in the list. Its id for other Stashes is made here and never changes.
     pub fn create_playlist(&mut self, name: &str, now_ms: i64) -> Result<i64> {
         let name = named(name)?;
@@ -1362,6 +1461,78 @@ impl Library {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_followed_list_keeps_its_songs_as_the_list_has_them() {
+        let mut library = Library::open_in_memory().unwrap();
+        let song = |title: &str| crate::import::Song {
+            title: title.into(),
+            artist: "Someone".into(),
+            ..Default::default()
+        };
+        let ids = library
+            .adopt_songs(&[song("A"), song("B"), song("C")])
+            .unwrap();
+        let (a, b, c) = (ids[0], ids[1], ids[2]);
+        let (id, changed) = library
+            .follow_list("youtube:VLx", "Hits", &[a, b, a, 999], 10)
+            .unwrap();
+        assert!(changed);
+        let items = |library: &Library| -> Vec<i64> {
+            library
+                .playlist_tracks_at(id, 0, 100)
+                .unwrap()
+                .iter()
+                .map(|t| t.id)
+                .collect()
+        };
+        // Each song once, only songs the library has.
+        assert_eq!(items(&library), vec![a, b]);
+        let row = library
+            .playlists()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id == id)
+            .unwrap();
+        assert!(row.followed);
+        assert_eq!(
+            (
+                row.name.as_str(),
+                row.follows.as_deref(),
+                row.follows_checked_ms
+            ),
+            ("Hits", Some("youtube:VLx"), Some(10))
+        );
+        // Read again: the same list is the same playlist; the listener's name stays; the songs follow the list.
+        library.rename_playlist(id, "My hits", 15).unwrap();
+        let (again, changed) = library
+            .follow_list("youtube:VLx", "Hits (new)", &[c, b], 20)
+            .unwrap();
+        assert_eq!((again, changed), (id, true));
+        assert_eq!(items(&library), vec![c, b]);
+        let (_, changed) = library
+            .follow_list("youtube:VLx", "Hits", &[c, b], 30)
+            .unwrap();
+        assert!(!changed);
+        let row = library
+            .playlists()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id == id)
+            .unwrap();
+        assert_eq!(
+            (row.name.as_str(), row.follows_checked_ms),
+            ("My hits", Some(30))
+        );
+        assert_eq!(
+            library.followed_lists().unwrap(),
+            vec![(id, "youtube:VLx".to_string(), 30)]
+        );
+        assert_eq!(library.follows(id).unwrap().as_deref(), Some("youtube:VLx"));
+        // A playlist of the listener's own follows nothing.
+        let own = library.create_playlist("Mine", 40).unwrap();
+        assert_eq!(library.follows(own).unwrap(), None);
+    }
 
     #[test]
     fn a_sources_songs_are_found_by_what_it_calls_them() {

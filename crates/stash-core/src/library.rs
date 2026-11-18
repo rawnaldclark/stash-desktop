@@ -139,8 +139,14 @@ pub struct PlaylistRow {
     pub id: i64,
     pub name: String,
     pub tracks: u64,
-    /// A shared mix someone else owns.
+    /// A shared mix someone else owns, or a list of a source's this playlist follows: its songs are not edited here.
     pub followed: bool,
+    /// The list of a source's it follows ("youtube:VL…"), kept up to date from there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follows: Option<String>,
+    /// When that list was last read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follows_checked_ms: Option<i64>,
     /// Its id for other Stashes.
     pub external_id: Option<String>,
     pub created_at_ms: Option<i64>,
@@ -691,8 +697,10 @@ impl Library {
     /// The listener's playlists, in their order.
     pub fn playlists(&self) -> Result<Vec<PlaylistRow>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT p.id, p.name, (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id), p.follow_id IS NOT NULL,
-                    p.external_id, p.created_at_ms, p.updated_at_ms, p.rules, p.download, p.folder_id
+            "SELECT p.id, p.name, (SELECT COUNT(*) FROM playlist_items i WHERE i.playlist_id = p.id),
+                    p.follow_id IS NOT NULL OR p.source_list IS NOT NULL,
+                    p.external_id, p.created_at_ms, p.updated_at_ms, p.rules, p.download, p.folder_id,
+                    p.source_list, p.source_checked_ms
              FROM playlists p ORDER BY p.position, p.id",
         )?;
         let mut rows = stmt
@@ -711,6 +719,8 @@ impl Library {
                         .and_then(|v| crate::smart::Rules::read(&v).ok()),
                     download: r.get(8)?,
                     folder: r.get(9)?,
+                    follows: r.get(10)?,
+                    follows_checked_ms: r.get(11)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

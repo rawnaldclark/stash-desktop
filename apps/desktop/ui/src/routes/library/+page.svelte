@@ -246,7 +246,7 @@
 				{/if}
 			{/if}
 			{#each shownPlaylists as p (p.id)}
-				<Card title={p.name} sub={p.rules ? `Smart · ${songs(p.items.length)}` : p.followed ? `Mix · ${songs(p.items.length)}` : songs(p.items.length)} items={p.items} href="/playlist/{p.id}" kept={p.download} oncontext={(e) => { e.preventDefault(); playlistMenu(p, atEvent(e)); }} />
+				<Card title={p.name} sub={p.rules ? `Smart · ${songs(p.items.length)}` : p.followsTube ? `YouTube Music · ${songs(p.items.length)}` : p.followed ? `Mix · ${songs(p.items.length)}` : songs(p.items.length)} items={p.items} href="/playlist/{p.id}" kept={p.download} oncontext={(e) => { e.preventDefault(); playlistMenu(p, atEvent(e)); }} />
 			{/each}
 		</div>
 		{#if needle && !playlists.length}<p class="s-hint">No playlist matches “{q.trim()}”.</p>{/if}

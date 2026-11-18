@@ -33,7 +33,7 @@
 
 {#snippet row(p: Playlist)}
 	<a class="sb-rec" class:on={page.url.pathname === `/playlist/${p.id}`} href="/playlist/{p.id}" title={p.name} use:carry={{ id: p.id, name: p.name, drop }} oncontextmenu={(e) => { e.preventDefault(); playlistMenu(p, atEvent(e)); }}>
-		<Tile items={p.items} seed={p.name} /><span class="sb-t"><b>{p.name}</b><i>{#if p.download}<Icon name="download" class="kept-mk" label="On this computer" />{/if}{p.rules ? 'Smart playlist' : p.followed ? 'Mix' : 'Playlist'} · {songs(p.items.length)}</i></span>
+		<Tile items={p.items} seed={p.name} /><span class="sb-t"><b>{p.name}</b><i>{#if p.download}<Icon name="download" class="kept-mk" label="On this computer" />{/if}{p.rules ? 'Smart playlist' : p.followsTube ? 'YouTube Music' : p.followed ? 'Mix' : 'Playlist'} · {songs(p.items.length)}</i></span>
 	</a>
 {/snippet}
 

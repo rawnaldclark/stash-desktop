@@ -151,6 +151,9 @@ export type Playlist = {
 	updatedAt: number;
 	/** A shared mix this playlist follows: its songs are not edited here. */
 	followed?: boolean;
+	/** A YouTube Music playlist it follows (its id, "VL…"), and when that was last read: its songs are that list's. */
+	followsTube?: string;
+	followsCheckedAt?: number;
 	/** A smart playlist's rules: it fills itself, and its songs are not edited by hand. */
 	rules?: SmartRules;
 	/** Kept on this computer (its songs are saved, and so are songs added later). */
@@ -178,6 +181,8 @@ export interface LibraryAPI {
 	like(item: LibraryItem): Promise<void>;
 	unlike(item: LibraryItem): Promise<void>;
 	createPlaylist(name: string): Promise<Playlist>;
+	/** Follows a YouTube Music playlist (or reads it again): a playlist of yours whose songs are that list's, kept up to date. */
+	followTube(id: string): Promise<Playlist>;
 	/** A playlist that fills itself by `rules`. */
 	createSmartPlaylist(name: string, rules: SmartRules): Promise<Playlist>;
 	setPlaylistRules(id: string, rules: SmartRules): Promise<void>;

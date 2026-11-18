@@ -1458,6 +1458,11 @@ impl Core {
                 let (state, stop) = (&state, &stop);
                 scope.spawn(move || crate::radio::run(state, stop));
             }
+            // Playlists that follow a YouTube Music playlist, read again from time to time.
+            {
+                let (state, stop) = (&state, &stop);
+                scope.spawn(move || crate::following::run(state, stop));
+            }
             // The shortcuts as the listener left them (the shell holds them once its window is up).
             if state.shortcuts.shell.is_some() {
                 let state = &state;
@@ -2756,6 +2761,12 @@ fn lists_route(state: &State, request: &mut Request, path: &str) -> Result<Optio
             answer = json!({ "id": id });
         }
         (_, Some((id, verb))) => {
+            if matches!(verb, "add" | "remove" | "move") && library.follows(id)?.is_some() {
+                return Ok(Some(refuse(
+                    409,
+                    "this playlist follows a YouTube Music playlist: its songs are that list's",
+                )));
+            }
             if matches!(verb, "add" | "remove" | "move") && library.smart_rules(id)?.is_some() {
                 return Ok(Some(refuse(
                     409,
@@ -2945,6 +2956,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::mornye::route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::following::route(state, request, &path)? {
         return Ok((response, false));
     }
     if let Some(response) = crate::youtube_pages::route(state, request, &path, &param)? {
