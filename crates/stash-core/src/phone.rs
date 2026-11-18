@@ -250,7 +250,7 @@ mod imp {
 
         /// The first `n` bytes of `file` (fewer when it is shorter): what kind of file it is.
         pub fn head(&self, file: &PhoneFile, n: usize) -> Result<Vec<u8>, String> {
-            const ENOUGH: &str = " enough";
+            const ENOUGH: &str = "\0enough";
             let mut out = Vec::new();
             let read = self.each_block(file, &mut |block| {
                 out.extend_from_slice(&block[..block.len().min(n - out.len())]);
@@ -324,6 +324,15 @@ mod imp {
 
         /// Deletes the transfer folder and everything in it from the phone.
         pub fn remove(&self) -> Result<(), String> {
+            self.delete(&self.folder)
+        }
+
+        /// Deletes one file of the transfer from the phone (one taken: the phone counts what is left).
+        pub fn remove_file(&self, file: &PhoneFile) -> Result<(), String> {
+            self.delete(&file.object)
+        }
+
+        fn delete(&self, object: &str) -> Result<(), String> {
             unsafe {
                 let ids: IPortableDevicePropVariantCollection = CoCreateInstance(
                     &PortableDevicePropVariantCollection,
@@ -331,8 +340,8 @@ mod imp {
                     CLSCTX_INPROC_SERVER,
                 )
                 .map_err(said)?;
-                let wide = HSTRING::from(self.folder.as_str());
-                // One VT_LPWSTR naming the folder. `Add` keeps its own copy, so this one is never cleared (the string
+                let wide = HSTRING::from(object);
+                // One VT_LPWSTR naming the object. `Add` keeps its own copy, so this one is never cleared (the string
                 // is `wide`'s, freed with it).
                 let mut one: std::mem::ManuallyDrop<PROPVARIANT> =
                     std::mem::ManuallyDrop::new(std::mem::zeroed());

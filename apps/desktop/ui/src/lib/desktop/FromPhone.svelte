@@ -7,7 +7,7 @@
 	import { songs } from '../ui/format';
 
 	type Phone = { name: string; has_songs: boolean | null };
-	type Now = { state: 'idle' | 'taking' | 'done'; phone: string | null; done: number; total: number; answered: number; phones: Phone[] };
+	type Now = { state: 'idle' | 'connected' | 'preparing' | 'taking' | 'done' | 'stopped'; phone: string | null; done: number; total: number; answered: number; phones: Phone[] };
 	let now = $state<Now | null>(null);
 	let looking = $state(false);
 	/** Set when a look asked for here is done: the status line then says it looked. */
@@ -50,6 +50,7 @@
 	const status = $derived.by(() => {
 		if (!now) return '';
 		if (now.state === 'taking') return `Taking ${songs(now.total)} from ${now.phone ?? 'your phone'}: ${now.done} done`;
+		if (now.state === 'preparing') return `${now.phone ?? 'Your phone'} is getting songs ready…`;
 		const phone = now.phones[0];
 		if (!phone) return 'No phone found. Plug it in, then choose File transfer in its USB notification.';
 		if (phone.has_songs === null) return `${phone.name} is plugged in. Looking for songs…`;
@@ -61,7 +62,7 @@
 <div class="set-row">
 	<div class="set-lab">
 		<span class="set-name">Downloads from your phone</span>
-		<span class="set-sub">In Stash on Android: Settings › Library &amp; storage › Send to computer. Then plug the phone in and choose File transfer. Songs come in by themselves while Stash is open.</span>
+		<span class="set-sub">Plug your phone in and choose File transfer. Then in Stash on the phone: Settings › Library &amp; storage › Send to computer. Songs come in here by themselves, with progress on both screens.</span>
 		{#if status}<span class="set-sub" class:fp-new={lookedAt !== null} role="status">{lookedAt !== null && now?.state !== 'taking' ? 'Looked just now. ' : ''}{status}</span>{/if}
 	</div>
 	<div class="set-ctl">

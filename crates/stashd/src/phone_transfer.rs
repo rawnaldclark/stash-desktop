@@ -27,8 +27,8 @@ use tiny_http::{Method, Request};
 use crate::serve::{Reply, State, now_ms, reply_json};
 
 /// How often the phones are looked at, and how often again a phone with no transfer on it.
-const LOOK_EVERY: Duration = Duration::from_secs(4);
-const PHONE_AGAIN: Duration = Duration::from_secs(30);
+const LOOK_EVERY: Duration = Duration::from_secs(2);
+const PHONE_AGAIN: Duration = Duration::from_secs(3);
 /// The largest list read.
 const LIST_CAP: u64 = 16 * 1024 * 1024;
 /// A transfer taken whole, but its folder could not be deleted from the phone: it is not taken twice.
@@ -69,11 +69,17 @@ struct List {
 /// What the window is told.
 #[derive(Debug, Clone, Default, Serialize)]
 pub(crate) struct Now {
-    /// "idle", "taking" or "done".
+    /// "idle" (no phone), "connected" (a phone with nothing sent), "preparing" (the phone is copying its songs out:
+    /// `ready` so far), "taking", "done", or "stopped" (unplugged while taking).
     state: &'static str,
     phone: Option<String>,
+    ready: usize,
     done: usize,
     total: usize,
+    bytes_done: u64,
+    bytes_total: u64,
+    /// The song being taken ("Title · Artist").
+    song: Option<String>,
     /// Songs that are files here now, songs that were files here already, songs whose file is not kept here (WebM,
     /// which cannot be tagged: the song is in the library, to stream or save from a source), songs not taken.
     taken: usize,
@@ -301,33 +307,65 @@ fn take(
         .iter()
         .map(|f| (f.name.as_str(), f))
         .collect();
+    // Songs whose file is gone were taken by an earlier try (each file is deleted from the phone once taken).
     let total = list.songs.len();
+    let here: Vec<&Sent> = list
+        .songs
+        .iter()
+        .filter(|s| files.contains_key(s.file.as_str()))
+        .collect();
     let mut now = Now {
         state: "taking",
         phone: Some(phone.name.clone()),
         total,
+        done: total - here.len(),
+        bytes_total: here.iter().map(|s| files[s.file.as_str()].size).sum(),
         at_ms: now_ms(),
         ..Default::default()
     };
     set(now.clone());
-    eprintln!("phone: taking {total} songs");
-    for sent in &list.songs {
+    eprintln!(
+        "phone: taking {} songs ({} taken before)",
+        here.len(),
+        now.done
+    );
+    for sent in here {
         if stop.load(Ordering::Relaxed) {
             return;
         }
-        match files.get(sent.file.as_str()) {
-            Some(file) => match take_one(state, transfer, file, sent) {
-                Ok(Took::Taken) => now.taken += 1,
-                Ok(Took::Had) => now.had += 1,
-                Ok(Took::NotKept) => now.not_kept += 1,
-                Err(why) => {
-                    now.failed += 1;
-                    eprintln!("phone: a song was not taken: {why}");
+        let file = files[sent.file.as_str()];
+        now.song = Some(format!("{} · {}", sent.title.trim(), sent.artist.trim()));
+        set(now.clone());
+        match take_one(state, transfer, file, sent) {
+            Ok(took) => {
+                match took {
+                    Took::Taken => now.taken += 1,
+                    Took::Had => now.had += 1,
+                    Took::NotKept => now.not_kept += 1,
                 }
-            },
-            None => now.failed += 1,
+                // Off the phone: what is left there is what is still to come (the phone counts it).
+                let _ = transfer.remove_file(file);
+            }
+            Err(why) => {
+                // Unplugged (or File transfer turned off): stop, and say so; plugged in again, the rest is taken.
+                let gone = !stash_core::phone::phones()
+                    .map(|p| p.iter().any(|p| p.id == phone.id))
+                    .unwrap_or(true);
+                if gone {
+                    now.state = "stopped";
+                    now.song = None;
+                    now.at_ms = now_ms();
+                    eprintln!("phone: unplugged after {} songs", now.done);
+                    set(now);
+                    state.edited();
+                    return;
+                }
+                now.failed += 1;
+                eprintln!("phone: a song was not taken: {why}");
+            }
         }
         now.done += 1;
+        now.bytes_done += file.size;
         set(now.clone());
         // The library pages read the new files as they come.
         if now.done.is_multiple_of(10) {
@@ -349,6 +387,7 @@ fn take(
         }
     }
     now.state = "done";
+    now.song = None;
     now.at_ms = now_ms();
     eprintln!(
         "phone: {} taken, {} here already, {} not kept (WebM), {} not taken",
@@ -370,6 +409,17 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
             tried.clear();
         }
         if let Ok(phones) = stash_core::phone::phones() {
+            // A phone unplugged before anything was taken: nothing to say.
+            {
+                let mut now = NOW.lock().unwrap();
+                let gone = now.as_ref().is_some_and(|n| {
+                    matches!(n.state, "connected" | "preparing")
+                        && !phones.iter().any(|p| Some(&p.name) == n.phone.as_ref())
+                });
+                if gone {
+                    *now = None;
+                }
+            }
             looked.retain(|id, _| phones.iter().any(|p| &p.id == id));
             sent.retain(|id, _| phones.iter().any(|p| &p.id == id));
             *SEEN.lock().unwrap() = phones
@@ -392,7 +442,16 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
                         .is_some_and(|t| t.files.iter().any(|f| f.name == stash_core::phone::LIST));
                     sent.insert(phone.id.clone(), has);
                     seen_inside(&phone.name, has);
-                    if let Some(transfer) = transfer {
+                    // Songs in the folder with no list yet: the phone is still copying them out.
+                    let ready = transfer.as_ref().map_or(0, |t| t.files.len());
+                    if !has {
+                        tell(
+                            &phone.name,
+                            if ready > 0 { "preparing" } else { "connected" },
+                            ready,
+                        );
+                    }
+                    if let Some(transfer) = transfer.filter(|_| has) {
                         take(state, &phone, &transfer, &mut tried, stop);
                         // Taken and deleted from the phone: it has no songs sent now.
                         let cleared = NOW.lock().unwrap().as_ref().is_some_and(|n| {
@@ -417,6 +476,30 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
             std::thread::sleep(Duration::from_millis(250));
         }
     }
+}
+
+/// Says a phone is plugged in with nothing sent ("connected") or is copying its songs out ("preparing", `ready` so
+/// far). What a transfer said last (taking, done, stopped) stays until the phone has something new to say: a phone
+/// still plugged in after its songs were taken is not "connected" again over the result.
+#[cfg(windows)]
+fn tell(phone: &str, what: &'static str, ready: usize) {
+    let mut now = NOW.lock().unwrap();
+    let same = now.as_ref().filter(|n| n.phone.as_deref() == Some(phone));
+    if what == "connected" && same.is_some_and(|n| matches!(n.state, "taking" | "done" | "stopped"))
+    {
+        return;
+    }
+    // The same news keeps its time, so a card closed on it stays closed.
+    let at_ms = same
+        .filter(|n| n.state == what)
+        .map_or_else(now_ms, |n| n.at_ms);
+    *now = Some(Now {
+        state: what,
+        phone: Some(phone.to_string()),
+        ready,
+        at_ms,
+        ..Default::default()
+    });
 }
 
 #[cfg(windows)]
