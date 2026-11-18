@@ -1,10 +1,12 @@
 <!-- Settings › Shortcuts: keys that work in any app (play or pause, skip, the volume, like the song playing, show
      Stash). The core keeps them and the desktop app holds them system-wide; in a browser there are none, and the
-     section does not show. -->
+     section does not show (`shown` tells the page, so its list of groups leaves it out too). -->
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import * as core from '../core';
 	import { Refused } from '../core';
+
+	let { shown = $bindable(false) }: { shown?: boolean } = $props();
 
 	const LABELS: Record<string, string> = {
 		toggle: 'Play or pause',
@@ -12,7 +14,7 @@
 		previous: 'Previous song',
 		volume_up: 'Volume up',
 		volume_down: 'Volume down',
-		like: 'Like the song playing',
+		like: 'Like current song',
 		show: 'Show Stash'
 	};
 	const mac = typeof navigator !== 'undefined' && /Mac/.test(navigator.userAgent);
@@ -57,7 +59,10 @@
 
 	onMount(() => {
 		core.shortcuts().then(
-			(v) => (s = v),
+			(v) => {
+				s = v;
+				shown = v.available;
+			},
 			() => {}
 		);
 		// Leaving Settings in the middle of picking: the keys are held again.
@@ -100,7 +105,7 @@
 		try {
 			s = await core.setShortcuts(what);
 		} catch (e) {
-			if (action) wrong = { ...wrong, [action]: e instanceof Refused ? e.message : 'Stash could not keep those keys' };
+			if (action) wrong = { ...wrong, [action]: e instanceof Refused ? e.message : 'Couldn’t save those keys' };
 			s = await core.shortcuts().catch(() => s);
 		} finally {
 			busy = false;
@@ -134,13 +139,13 @@
 		if (!mods.length && (e.key === 'Backspace' || e.key === 'Delete')) return void done('');
 		if (!usable(mods, e.code)) {
 			held = '';
-			wrong = { ...wrong, [action]: `Add ${NEEDS}: those keys alone would stop working in other apps` };
+			wrong = { ...wrong, [action]: `Add ${NEEDS}` };
 			return;
 		}
 		const keys = [...mods, e.code].join('+');
 		const other = Object.entries(s?.keys ?? {}).find(([it, theirs]) => it !== action && theirs.toLowerCase() === keys.toLowerCase());
 		if (other) {
-			wrong = { ...wrong, [action]: `${say(keys)} is already the shortcut for ${(LABELS[other[0]] ?? other[0]).toLowerCase()}` };
+			wrong = { ...wrong, [action]: `${say(keys)} is already used for ${(LABELS[other[0]] ?? other[0]).toLowerCase()}` };
 			return;
 		}
 		void done(keys);
@@ -156,12 +161,12 @@
 
 {#if s?.available}
 	<section class="set-sec" id="shortcuts" aria-labelledby="h-shortcuts">
-		<h2 class="set-h" id="h-shortcuts">Shortcuts</h2>
+		<h2 class="set-g" id="h-shortcuts" tabindex="-1">Shortcuts</h2>
 		<div class="set-card">
 			<div class="set-row">
 				<div class="set-lab">
-					<span class="set-name" id="sk-l">Shortcuts in any app</span>
-					<span class="set-sub">Play, skip, change the volume and more while you work in another app. Media keys work without these.</span>
+					<span class="set-name" id="sk-l">Global shortcuts</span>
+					<span class="set-sub">Work while you use other apps</span>
 				</div>
 				<button type="button" class="sw" role="switch" aria-checked={s.on} aria-labelledby="sk-l" disabled={busy} onclick={() => s && void change({ on: !s.on })}><i></i></button>
 			</div>
@@ -170,10 +175,10 @@
 					<div class="set-lab">
 						<span class="set-name" id="sk-{action}">{LABELS[action] ?? action}</span>
 						{#if picking === action}
-							<span class="set-sub" role="status">Press the keys. Esc leaves them as they were; Backspace leaves this one without keys.</span>
+							<span class="set-sub" role="status">Esc to cancel, Backspace to clear</span>
 						{/if}
 						{#if s.on && s.trouble[action] && picking !== action}<span class="set-sub set-trouble">{s.trouble[action]}. Pick other keys.</span>{/if}
-						{#if wrong[action]}<span class="set-sub set-trouble" role="alert">{wrong[action]}.</span>{/if}
+						{#if wrong[action]}<span class="set-sub set-trouble" role="alert">{wrong[action]}</span>{/if}
 					</div>
 					<button
 						type="button"

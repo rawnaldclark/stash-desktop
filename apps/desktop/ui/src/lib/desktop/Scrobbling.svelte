@@ -36,8 +36,8 @@
 		return hours < 48 ? `${hours} h ago` : `${Math.floor(hours / 24)} days ago`;
 	};
 	function line(t: core.ScrobbleTarget): string {
-		const sent = t.sent ? `${many(t.sent, 'play', 'plays')} sent${t.sent_at_ms ? `, the last ${ago(t.sent_at_ms)}` : ''}` : 'Nothing sent yet';
-		return [t.user ? `As ${t.user}` : '', sent].filter(Boolean).join(' · ');
+		const sent = t.sent ? `${many(t.sent, 'play', 'plays')} sent${t.sent_at_ms ? ` · last ${ago(t.sent_at_ms)}` : ''}` : 'Nothing sent yet';
+		return [t.user ?? '', sent].filter(Boolean).join(' · ');
 	}
 
 	async function read() {
@@ -106,17 +106,16 @@
 						<span class="tr-t">
 							<b>{name(t)}</b>
 							<i>{line(t)}</i>
-							{#if !t.enabled}<i>Off: what you play now is not kept for it.</i>{/if}
-							{#if t.waiting}<i class="src-use">{many(t.waiting, 'play', 'plays')} waiting to be sent</i>{/if}
-							{#if t.dropped}<i>{many(t.dropped, 'play', 'plays')} it would not take, let go</i>{/if}
+							{#if t.waiting}<i class="src-use">{many(t.waiting, 'play', 'plays')} waiting</i>{/if}
+							{#if t.dropped}<i>{many(t.dropped, 'play', 'plays')} rejected</i>{/if}
 							{#if t.refused}
-								<i class="src-problem">It refused the token. Paste it again to go on; what you play waits meanwhile.</i>
+								<i class="src-problem">Token rejected. Enter it again.</i>
 							{:else if t.trouble}
-								<i class="src-problem">Trouble {ago(t.trouble.at_ms)}: {t.trouble.message}.</i>
+								<i class="src-problem">Problem {ago(t.trouble.at_ms)}: {t.trouble.message}</i>
 							{/if}
 						</span>
 						<span class="src-acts">
-							<button type="button" class="sw" role="switch" aria-checked={t.enabled} aria-label="{name(t)}: on" title={t.enabled ? 'On' : 'Off'} onclick={() => act(() => core.setScrobblingEnabled(t.id, !t.enabled))}><i></i></button>
+							<button type="button" class="sw" role="switch" aria-checked={t.enabled} aria-label={name(t)} title={t.enabled ? 'On' : 'Off'} onclick={() => act(() => core.setScrobblingEnabled(t.id, !t.enabled))}><i></i></button>
 							{#if t.trouble && !t.refused && t.enabled}<button type="button" class="btn ghost" onclick={() => act(() => core.scrobbleAgain(t.id))}>Try again</button>{/if}
 							<button type="button" class="btn ghost" aria-label="Remove {name(t)}" onclick={() => act(() => core.removeScrobbling(t.id))}>Remove</button>
 						</span>
@@ -124,29 +123,31 @@
 					{#if t.refused}
 						<li class="sc-again">
 							<form class="dev-rename" onsubmit={(e) => giveAgain(e, t)}>
-								<input class="dev-input" type="password" placeholder="The token again" bind:value={again[t.id]} aria-label="{name(t)}: the token again" autocomplete="off" spellcheck="false" />
-								<button type="submit" class="btn" disabled={!(again[t.id] ?? '').trim()}>Give</button>
+								<input class="dev-input" type="password" placeholder="Token" bind:value={again[t.id]} aria-label="{name(t)} token" autocomplete="off" spellcheck="false" />
+								<button type="submit" class="btn" disabled={!(again[t.id] ?? '').trim()}>Save</button>
 							</form>
-							{#if againWrong[t.id]}<p class="set-sub set-trouble" role="alert">{againWrong[t.id]}.</p>{/if}
+							{#if againWrong[t.id]}<p class="set-sub set-trouble" role="alert">{againWrong[t.id]}</p>{/if}
 						</li>
 					{/if}
 				{/each}
 			</ol>
-		{:else if targets}
-			<p class="set-p">
-				Stash can send what you play to ListenBrainz, a free and open record of listening that also makes recommendations; your listens are public there. A song is sent once it counts as played (half of it, or four minutes), and what you play with no connection waits here and goes later.
-			</p>
 		{/if}
 		{#if targets && (adding || !targets.length)}
 			<form class="sc-add" onsubmit={add}>
+				{#if !targets.length}
+					<div class="set-lab">
+						<span class="set-name">ListenBrainz</span>
+						<span class="set-sub">Share what you play. Listens there are public.</span>
+					</div>
+				{/if}
 				<label class="sc-field">
-					<span class="set-sub">Your user token, from listenbrainz.org › Settings{elsewhere ? ' (or the one your server gives)' : ''}</span>
+					<span class="set-sub">{elsewhere ? 'Your server’s token' : 'User token, from listenbrainz.org › Settings'}</span>
 					<input class="dev-input" type="password" bind:value={token} placeholder="Token" autocomplete="off" spellcheck="false" />
 				</label>
-				<label class="sc-check"><input type="checkbox" bind:checked={elsewhere} /><span class="set-sub">Another server that speaks ListenBrainz’s language (Maloja, Koito and others you run yourself)</span></label>
+				<label class="sc-check"><input type="checkbox" bind:checked={elsewhere} /><span class="set-sub">Use my own server</span></label>
 				{#if elsewhere}
 					<label class="sc-field">
-						<span class="set-sub">Its address</span>
+						<span class="set-sub">Server address</span>
 						<input class="dev-input" type="url" bind:value={url} placeholder="https://…/apis/listenbrainz" autocomplete="off" spellcheck="false" />
 					</label>
 				{/if}
@@ -154,10 +155,10 @@
 					<button type="submit" class="btn" disabled={busy || !token.trim() || (elsewhere && !url.trim())}>{busy ? 'Checking…' : 'Connect'}</button>
 					{#if targets.length}<button type="button" class="btn ghost" onclick={() => ((adding = false), (wrong = ''))}>Cancel</button>{/if}
 				</div>
-				{#if wrong}<p class="set-sub set-trouble" role="alert">{wrong}.</p>{/if}
+				{#if wrong}<p class="set-sub set-trouble" role="alert">{wrong}</p>{/if}
 			</form>
 		{:else if targets?.length}
-			<div class="chips"><button type="button" class="btn ghost" onclick={() => (adding = true)}>Add another service</button></div>
+			<div class="chips"><button type="button" class="btn ghost" onclick={() => (adding = true)}>Add a service</button></div>
 		{/if}
 	</div>
 </div>

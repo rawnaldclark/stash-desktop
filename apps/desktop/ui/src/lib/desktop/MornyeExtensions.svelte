@@ -4,6 +4,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import * as core from '../core';
+	import Icon from '../ui/Icon.svelte';
 	import { ui } from '../ui/state.svelte';
 
 	let m = $state<core.Mornye | null>(null);
@@ -171,7 +172,7 @@
 			const r = await core.mornyeAction(p.key, action, input, token);
 			const form = r.action_form ?? r.byoa_form;
 			p.form = form && r.formToken ? { action: form.submit_action, token: r.formToken, title: form.title ?? '', fields: form.fields, values: {} } : null;
-			p.said = r.success === false ? (r.error ?? 'It did not work.') : (r.message ?? (r.open_auth_url && !r.window ? '' : 'Done.'));
+			p.said = r.success === false ? (r.error ?? 'That didn’t work.') : (r.message ?? (r.open_auth_url && !r.window ? '' : 'Done.'));
 			if (r.open_auth_url && !r.window) {
 				p.page = r.open_auth_url;
 				p.pasting = true;
@@ -200,13 +201,10 @@
 	const optionsOf = (f: core.MornyeField) => (f.options ?? []).map((o) => (typeof o === 'string' ? { value: o, label: o } : { value: o.value, label: o.label ?? o.value }));
 	const secretOf = (f: core.MornyeField) => f.secret || f.type === 'password' || f.type === 'otp';
 	const stateOf = (a: core.MornyeInstalled) =>
-		!a.enabled ? 'Off' : a.access.ready ? 'Ready' : a.access.missing.length ? `Needs ${a.access.missing.join(', ')}` : a.access.kind === 'verification' ? 'Needs verification' : a.access.kind === 'login' ? 'Needs signing in' : 'Ready';
+		!a.enabled ? 'Off' : a.access.ready ? 'Ready' : a.access.missing.length ? `Needs ${a.access.missing.join(', ')}` : a.access.kind === 'verification' ? 'Needs verification' : a.access.kind === 'login' ? 'Needs sign-in' : 'Ready';
 </script>
 
 <div class="set-card">
-	<div class="set-row set-col">
-		<p class="set-sub">Mornye extensions are packages made for Mornye and SpotiFLAC (Tidal, Qobuz, Deezer, Amazon Music, SoundCloud and more). Stash runs them itself, each one shut in with only what its package asks for, and each one you switch on is one of your sources, asked after your own add-ons.</p>
-	</div>
 	{#if m}
 		{#if m.installed.length}
 			<ol class="mx-list">
@@ -216,11 +214,10 @@
 						<div class="mx-top">
 							<span class="tr-t">
 								<b>{a.display_name} <i class="mx-v">{a.version}</i></b>
-								<i>{stateOf(a)}{a.playable ? '' : ' · cannot be searched'}</i>
-								{#if a.description}<i>{a.description}</i>{/if}
+								<i title={a.description || undefined}>{stateOf(a)}{a.playable ? '' : ' · no search'}</i>
 							</span>
 							<span class="src-acts">
-								<button type="button" class="sw" role="switch" aria-checked={a.enabled} aria-label="{a.display_name}: on" onclick={() => act(a.key, () => core.mornyeSetEnabled(a.key, !a.enabled))}><i></i></button>
+								<button type="button" class="sw" role="switch" aria-checked={a.enabled} aria-label={a.display_name} onclick={() => act(a.key, () => core.mornyeSetEnabled(a.key, !a.enabled))}><i></i></button>
 								{#if a.enabled && !a.access.ready && a.access.kind === 'verification'}
 									<button type="button" class="btn" disabled={ui.offline} onclick={async () => { if (open !== a.key) await openPanel(a.key); await verify(); }}>Verify</button>
 								{/if}
@@ -235,9 +232,9 @@
 								{#if p.status}
 									<p class="set-sub">
 										{#if a.access.kind === 'verification'}
-											{p.status.authenticated ? 'Verified.' : p.status.verifying ? 'Pass the page in the window that opened…' : 'Not verified yet.'}
+											{p.status.authenticated ? 'Verified' : p.status.verifying ? 'Finish in the new window…' : 'Not verified'}
 										{:else if a.access.kind === 'login'}
-											{a.access.verified ? 'Signed in.' : 'Not signed in.'}
+											{a.access.verified ? 'Signed in' : 'Not signed in'}
 										{/if}
 										{#if p.status.result && p.status.result !== 'ok'}<span class="set-trouble">{p.status.result}</span>{/if}
 									</p>
@@ -245,17 +242,17 @@
 								{#if a.access.kind === 'verification'}
 									<div class="chips">
 										<button type="button" class="btn" disabled={ui.offline} onclick={verify}>{p.status?.authenticated ? 'Verify again' : 'Verify'}</button>
-										{#if p.status?.authenticated || a.access.verified}<button type="button" class="btn ghost" onclick={logout}>Forget the session</button>{/if}
+										{#if p.status?.authenticated || a.access.verified}<button type="button" class="btn ghost" onclick={logout}>Forget</button>{/if}
 									</div>
 								{:else if a.access.kind === 'login' && a.access.verified}
 									<div class="chips"><button type="button" class="btn ghost" onclick={logout}>Sign out</button></div>
 								{/if}
 								{#if p.pasting}
 									<div class="mx-paste">
-										<p class="set-sub">Open this page in your browser, pass it, and paste the address it ends on (it starts with <code>spotiflac://</code>, or carries <code>grant=</code>):</p>
-										{#if p.page}<input class="dev-input" readonly value={p.page} aria-label="The verification page" onfocus={(e) => e.currentTarget.select()} />{/if}
+										<p class="set-sub">Open this page in a browser, then paste the address it ends on</p>
+										{#if p.page}<input class="dev-input" readonly value={p.page} aria-label="Verification page" onfocus={(e) => e.currentTarget.select()} />{/if}
 										<form class="dev-rename" onsubmit={(e) => { e.preventDefault(); void paste(); }}>
-											<input class="dev-input" bind:value={p.pasted} placeholder="spotiflac://session-grant?…" aria-label="The address the page ended on" autocomplete="off" spellcheck="false" />
+											<input class="dev-input" bind:value={p.pasted} placeholder="spotiflac://session-grant?…" aria-label="Address it ended on" autocomplete="off" spellcheck="false" />
 											<button type="submit" class="btn" disabled={!p.pasted.trim()}>Done</button>
 										</form>
 									</div>
@@ -264,7 +261,7 @@
 									<label class="mx-field">
 										<span>Quality</span>
 										<select class="dev-input" bind:value={p.values.downloadQuality}>
-											<option value={undefined}>The best it has</option>
+											<option value={undefined}>Best available</option>
 											{#each p.qualities as q (q.id)}<option value={q.id}>{q.label ?? q.name ?? q.id}</option>{/each}
 										</select>
 									</label>
@@ -281,8 +278,8 @@
 											</select>
 										</label>
 									{:else}
-										<label class="mx-field"><span>{labelOf(f)}{f.required ? ' (needed)' : ''}</span>
-											<input class="dev-input" type={secretOf(f) ? 'password' : f.type === 'number' ? 'number' : 'text'} value={secretOf(f) ? '' : (p.values[f.key] ?? '')} placeholder={secretOf(f) && p.values[f.key] ? 'Kept: type to change' : (f.placeholder ?? '')} oninput={(e) => (p.values[f.key] = f.type === 'number' ? Number(e.currentTarget.value) : e.currentTarget.value)} autocomplete="off" spellcheck="false" />
+										<label class="mx-field"><span>{labelOf(f)}{f.required ? ' (required)' : ''}</span>
+											<input class="dev-input" type={secretOf(f) ? 'password' : f.type === 'number' ? 'number' : 'text'} value={secretOf(f) ? '' : (p.values[f.key] ?? '')} placeholder={secretOf(f) && p.values[f.key] ? 'Saved · type to change' : (f.placeholder ?? '')} oninput={(e) => (p.values[f.key] = f.type === 'number' ? Number(e.currentTarget.value) : e.currentTarget.value)} autocomplete="off" spellcheck="false" />
 										</label>
 									{/if}
 									{#if f.description ?? f.help}<p class="set-sub mx-help">{f.description ?? f.help}</p>{/if}
@@ -318,14 +315,20 @@
 		{/if}
 
 		<div class="set-row set-col">
-			<b class="set-name">Available</b>
+			<div class="mx-head">
+				<span class="set-name">Available</span>
+				<div class="set-ctl">
+					<label class="btn ghost bk-pick" aria-disabled={busy !== null}>{busy === 'file' ? 'Installing…' : 'From file…'}<input class="vh" type="file" accept=".sflx,.morneye-ext,.spotiflac-ext" aria-label="Install an extension from a file" disabled={busy !== null} onchange={pickFile} /></label>
+					<button type="button" class="btn ghost" disabled={busy !== null || ui.offline || m.refreshing} onclick={() => act('refresh', () => core.mornyeRefresh())}>{busy === 'refresh' || m.refreshing ? 'Refreshing…' : 'Refresh'}</button>
+				</div>
+			</div>
 			{#if available.length}
 				<ul class="mx-list">
 					{#each available as e (e.repository + e.id)}
 						{#if !e.installed}
 							<li class="mx">
 								<div class="mx-top">
-									<span class="tr-t"><b>{e.display_name} <i class="mx-v">{e.version}</i></b><i>{e.description}{m.repositories.length > 1 ? ` · from ${repoName(e.repository)}` : ''}</i>{#if !e.compatible}<i class="src-problem">Made for a newer Mornye than Stash speaks.</i>{/if}</span>
+									<span class="tr-t"><b>{e.display_name} <i class="mx-v">{e.version}</i></b><i title={e.description}>{e.description}{m.repositories.length > 1 ? ` · from ${repoName(e.repository)}` : ''}</i>{#if !e.compatible}<i class="src-problem">Needs a newer Stash</i>{/if}</span>
 									<span class="src-acts"><button type="button" class="btn" disabled={busy !== null || ui.offline || !e.compatible} onclick={() => act(e.repository + e.id, () => core.mornyeInstall(e.repository, e.id))}>{busy === e.repository + e.id ? 'Installing…' : 'Install'}</button></span>
 								</div>
 							</li>
@@ -333,44 +336,49 @@
 					{/each}
 				</ul>
 			{:else if m.refreshing}
-				<p class="set-sub">Reading the repositories…</p>
+				<p class="set-sub" role="status">Loading…</p>
 			{:else}
-				<p class="set-sub">Everything the repositories list is installed.</p>
+				<p class="set-sub">All installed</p>
 			{/if}
-			<div class="chips">
-				<label class="btn ghost" aria-disabled={busy !== null}>{busy === 'file' ? 'Installing…' : 'Install a package file…'}<input class="vh" type="file" accept=".sflx,.morneye-ext,.spotiflac-ext" disabled={busy !== null} onchange={pickFile} /></label>
-				<button type="button" class="btn ghost" disabled={busy !== null || ui.offline || m.refreshing} onclick={() => act('refresh', () => core.mornyeRefresh())}>{busy === 'refresh' ? 'Reading…' : 'Read the repositories again'}</button>
+		</div>
+
+		<div class="set-row">
+			<div class="set-lab">
+				<span class="set-name">Extra formats</span>
+				{#if m.ffmpeg.fetching}
+					<span class="set-sub" role="status">Downloading… {(m.ffmpeg.fetching.got / 1048576).toFixed(0)}{m.ffmpeg.fetching.total ? ` of ${(m.ffmpeg.fetching.total / 1048576).toFixed(0)}` : ''} MB</span>
+				{:else if m.ffmpeg.found}
+					<span class="set-sub">Ready for Amazon Music and SoundCloud</span>
+				{:else if m.ffmpeg.can_fetch}
+					<span class="set-sub">Needed for Amazon Music and SoundCloud</span>
+				{:else}
+					<span class="set-sub">Install FFmpeg for Amazon Music and SoundCloud</span>
+				{/if}
+				{#if m.ffmpeg.trouble}<span class="set-sub set-trouble" role="alert">{m.ffmpeg.trouble}</span>{/if}
 			</div>
-		</div>
-
-		<div class="set-row set-col">
-			<b class="set-name">Repositories</b>
-			<ul class="mx-repos">
-				{#each m.repositories as r (r.id)}
-					<li>
-						<span class="tr-t"><b>{r.official ? 'Mornye' : (r.name ?? r.url)}</b><i>{r.count} {r.count === 1 ? 'package' : 'packages'}{r.official ? ' · always here' : ''}</i>{#if r.error}<i class="src-problem">{r.error}</i>{/if}</span>
-						{#if !r.official}<button type="button" class="btn ghost" aria-label="Remove {r.name ?? r.url}" onclick={() => act('repo', () => core.mornyeRemoveRepository(r.id))}>Remove</button>{/if}
-					</li>
-				{/each}
-			</ul>
-			<form class="dev-rename" onsubmit={(e) => { e.preventDefault(); const url = repoLink.trim(); void act('repo', () => core.mornyeAddRepository(url)).then(() => (repoLink = '')); }}>
-				<input class="dev-input" type="url" placeholder="A repository’s link (https://…/registry.json)" bind:value={repoLink} aria-label="A repository’s link" autocomplete="off" spellcheck="false" />
-				<button type="submit" class="btn" disabled={busy !== null || ui.offline || repoLink.trim() === ''}>Add</button>
-			</form>
-		</div>
-
-		<div class="set-row set-col">
-			<b class="set-name">FFmpeg</b>
-			{#if m.ffmpeg.fetching}
-				<p class="set-sub" role="status">Fetching FFmpeg… {(m.ffmpeg.fetching.got / 1048576).toFixed(0)}{m.ffmpeg.fetching.total ? ` of ${(m.ffmpeg.fetching.total / 1048576).toFixed(0)}` : ''} MB</p>
-			{:else if m.ffmpeg.found}
-				<p class="set-sub">FFmpeg is here: songs sent encrypted (Amazon Music’s) or in pieces (SoundCloud’s) can be played.</p>
-			{:else}
-				<p class="set-sub">Songs some services send encrypted (Amazon Music’s) or in pieces (SoundCloud’s) need FFmpeg.{m.ffmpeg.can_fetch ? ' Stash can fetch it from FFmpeg’s builds on GitHub (about 160 MB; only the program is kept), checked against the checksum its release publishes.' : ' Install it, and Stash will find it on the PATH.'}</p>
-				{#if m.ffmpeg.can_fetch}<div class="chips"><button type="button" class="btn ghost" disabled={busy !== null || ui.offline} onclick={() => act('ffmpeg', () => core.mornyeFetchFfmpeg())}>Get FFmpeg</button></div>{/if}
+			{#if !m.ffmpeg.fetching && !m.ffmpeg.found && m.ffmpeg.can_fetch}
+				<button type="button" class="btn ghost" disabled={busy !== null || ui.offline} onclick={() => act('ffmpeg', () => core.mornyeFetchFfmpeg())}>Download (160 MB)</button>
 			{/if}
-			{#if m.ffmpeg.trouble}<p class="set-sub set-trouble" role="alert">{m.ffmpeg.trouble}</p>{/if}
 		</div>
+
+		<details class="set-more">
+			<summary><Icon name="expand_more" class="ic set-chev" />Advanced</summary>
+			<div class="set-row set-col">
+				<span class="set-name">Repositories</span>
+				<ul class="mx-repos">
+					{#each m.repositories as r (r.id)}
+						<li>
+							<span class="tr-t"><b>{r.official ? 'Mornye' : (r.name ?? r.url)}</b><i>{r.count} {r.count === 1 ? 'extension' : 'extensions'}{r.official ? ' · built in' : ''}</i>{#if r.error}<i class="src-problem">{r.error}</i>{/if}</span>
+							{#if !r.official}<button type="button" class="btn ghost" aria-label="Remove {r.name ?? r.url}" onclick={() => act('repo', () => core.mornyeRemoveRepository(r.id))}>Remove</button>{/if}
+						</li>
+					{/each}
+				</ul>
+				<form class="dev-rename" onsubmit={(e) => { e.preventDefault(); const url = repoLink.trim(); void act('repo', () => core.mornyeAddRepository(url)).then(() => (repoLink = '')); }}>
+					<input class="dev-input" type="url" placeholder="Repository link" bind:value={repoLink} aria-label="Repository link" autocomplete="off" spellcheck="false" />
+					<button type="submit" class="btn" disabled={busy !== null || ui.offline || repoLink.trim() === ''}>Add</button>
+				</form>
+			</div>
+		</details>
 	{:else if !wrong}
 		<div class="set-row"><p class="set-sub">Loading…</p></div>
 	{/if}
@@ -379,14 +387,18 @@
 
 <style>
 	/* As wide as the card, also inside a column (Available): a long description is cut short, the buttons stay in view. */
-	.mx-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; align-self: stretch; min-width: 0; }
-	.mx { padding: 10px 16px; border-top: 1px solid var(--line, rgba(127, 127, 127, 0.15)); }
+	.mx-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; align-self: stretch; min-width: 0; }
+	/* installed: rows of the card; available: rows inside its column */
+	.mx { padding: 12px 20px; }
+	.set-col .mx { padding: 8px 0; }
+	.mx + .mx { border-top: 1px solid var(--wp-line); }
 	.mx.off .tr-t { opacity: 0.6; }
+	.mx-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
 	.mx-top { display: flex; align-items: center; gap: 12px; min-width: 0; }
 	.mx-top .src-acts { flex-shrink: 0; }
 	.mx-top .tr-t { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 	.mx-v { font-style: normal; font-weight: 400; opacity: 0.6; margin-left: 4px; }
-	.mx-panel { display: flex; flex-direction: column; gap: 10px; margin: 12px 0 4px; padding: 12px; border-radius: 10px; background: var(--raise, rgba(127, 127, 127, 0.08)); }
+	.mx-panel { display: flex; flex-direction: column; gap: 10px; margin: 12px 0 4px; padding: 12px; border-radius: 10px; border: 1px solid var(--wp-line-2); background: var(--wp-field); }
 	.mx-field { display: flex; flex-direction: column; gap: 4px; }
 	.mx-field > span { font-size: 13px; }
 	.mx-check { flex-direction: row; align-items: center; gap: 8px; }
@@ -396,5 +408,4 @@
 	.mx-repos li { display: flex; align-items: center; gap: 12px; }
 	.mx-repos .tr-t { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 	.mx-paste { display: flex; flex-direction: column; gap: 8px; }
-	code { font-family: var(--font-mono, monospace); font-size: 12px; }
 </style>
