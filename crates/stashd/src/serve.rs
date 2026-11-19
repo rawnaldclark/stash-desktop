@@ -1101,6 +1101,8 @@ pub(crate) struct State {
     pub(crate) resolve: stash_core::player::Resolver,
     /// The library served to the listener's other devices on their network (see [`crate::lan`]).
     pub(crate) lan: crate::lan::Lan,
+    /// The library away from home, through Stash's home relay (see [`crate::away`]).
+    pub(crate) away: crate::away::Away,
     /// Opens Google's sign-in for YouTube in a window, when the core runs inside one.
     pub(crate) sign_in: Option<SignInShell>,
 }
@@ -1408,6 +1410,7 @@ impl Core {
                 sign_in: None,
                 resolve,
                 lan: crate::lan::Lan::default(),
+                away: crate::away::Away::default(),
             },
         })
         .map(|mut core: Self| {
@@ -1615,6 +1618,11 @@ impl Core {
             {
                 let (state, stop) = (&state, &stop);
                 scope.spawn(move || crate::lan::run(state, stop));
+            }
+            // …and away from home, through the relay, while they have that on.
+            {
+                let (state, stop) = (&state, &stop);
+                scope.spawn(move || crate::away::run(state, stop));
             }
             // The shortcuts as the listener left them (the shell holds them once its window is up).
             if state.shortcuts.shell.is_some() {
@@ -3154,6 +3162,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::lan::route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::away::route(state, request, &path)? {
         return Ok((response, false));
     }
     if let Some(response) = crate::youtube_pages::route(state, request, &path, &param)? {

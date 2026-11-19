@@ -25,8 +25,47 @@ const CAP: usize = 500;
 /// How long where a song plays from is kept (a player asks for it again as it seeks).
 const LOCATED_FOR: Duration = Duration::from_secs(5 * 60);
 
-type Body = Box<dyn Read + Send>;
-type Out = Response<Body>;
+pub(crate) type Body = Box<dyn Read + Send>;
+
+/// An answer, however it goes back: to a device on the network, or through the relay to one away from home.
+pub(crate) struct Out {
+    pub(crate) status: u16,
+    pub(crate) headers: Vec<(String, String)>,
+    /// Its length, when known.
+    pub(crate) length: Option<u64>,
+    pub(crate) body: Body,
+}
+
+impl Out {
+    fn header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.to_string(), value.to_string()));
+        self
+    }
+
+    fn into_tiny(self) -> Response<Body> {
+        let headers = self
+            .headers
+            .iter()
+            .filter_map(|(n, v)| Header::from_bytes(n.as_bytes(), v.as_bytes()).ok())
+            .collect();
+        Response::new(
+            StatusCode(self.status),
+            headers,
+            self.body,
+            self.length.map(|l| l as usize),
+            None,
+        )
+    }
+}
+
+/// A request, however it came: its address with the query, a form sent by POST, the range of bytes asked for, and
+/// where it came from (for shutting out a place that keeps getting the password wrong).
+pub(crate) struct Asked {
+    pub(crate) url: String,
+    pub(crate) form: Option<Vec<u8>>,
+    pub(crate) range: Option<String>,
+    pub(crate) ip: Option<IpAddr>,
+}
 
 /// Why a request was not answered: Subsonic's code, and words.
 #[derive(Debug, PartialEq)]
@@ -86,19 +125,13 @@ fn id_of(text: &str, prefix: &str) -> Option<i64> {
         .filter(|n| *n > 0)
 }
 
-fn header(name: &str, value: &str) -> Header {
-    Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("a well-formed header")
-}
-
 fn bytes_out(status: u16, content_type: &str, bytes: Vec<u8>) -> Out {
-    let length = bytes.len();
-    Response::new(
-        StatusCode(status),
-        vec![header("Content-Type", content_type)],
-        Box::new(Cursor::new(bytes)) as Body,
-        Some(length),
-        None,
-    )
+    Out {
+        status,
+        headers: vec![("Content-Type".into(), content_type.into())],
+        length: Some(bytes.len() as u64),
+        body: Box::new(Cursor::new(bytes)),
+    }
 }
 
 // ---- answers in JSON or XML
@@ -346,41 +379,64 @@ fn indexed(artists: &[Artist]) -> Value {
 
 // ---- the request
 
-pub(crate) fn answer(state: &State, mut request: Request, path: &str) {
-    let ip: Option<IpAddr> = request.remote_addr().map(|a| a.ip());
-    let mut pairs: Vec<(String, String)> =
-        url::Url::parse(&format!("http://local{}", request.url()))
-            .map(|u| u.query_pairs().into_owned().collect())
-            .unwrap_or_default();
+/// The most of a form sent by POST that is read.
+pub(crate) const MOST_FORM: usize = 256 * 1024;
+
+/// A request from a device on the network.
+pub(crate) fn answer(state: &State, mut request: Request) {
     let form = request.headers().iter().any(|h| {
         h.field.equiv("Content-Type")
             && h.value
                 .as_str()
                 .starts_with("application/x-www-form-urlencoded")
     });
-    if *request.method() == Method::Post && form {
+    let form = (*request.method() == Method::Post && form).then(|| {
         let mut body = Vec::new();
-        let _ = request.as_reader().take(256 * 1024).read_to_end(&mut body);
-        pairs.extend(url::form_urlencoded::parse(&body).into_owned());
+        let _ = request
+            .as_reader()
+            .take(MOST_FORM as u64)
+            .read_to_end(&mut body);
+        body
+    });
+    let asked = Asked {
+        url: request.url().to_string(),
+        form,
+        range: request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("Range"))
+            .map(|h| h.value.as_str().to_string()),
+        ip: request.remote_addr().map(|a| a.ip()),
+    };
+    let _ = request.respond(respond(state, &asked).into_tiny());
+}
+
+/// The answer to a request of the Subsonic API (its address starts `/rest/`).
+pub(crate) fn respond(state: &State, asked: &Asked) -> Out {
+    let parsed = url::Url::parse(&format!("http://local{}", asked.url)).ok();
+    let mut pairs: Vec<(String, String)> = parsed
+        .as_ref()
+        .map(|u| u.query_pairs().into_owned().collect())
+        .unwrap_or_default();
+    if let Some(form) = &asked.form {
+        pairs.extend(url::form_urlencoded::parse(form).into_owned());
     }
     let params = Params(pairs);
-    let method = path
+    let method = parsed
+        .as_ref()
+        .map(|u| u.path().to_string())
+        .unwrap_or_default()
         .trim_start_matches("/rest/")
         .trim_end_matches(".view")
         .to_string();
     let json = matches!(params.one("f"), Some("json"));
-    let range = request
-        .headers()
-        .iter()
-        .find(|h| h.field.equiv("Range"))
-        .map(|h| h.value.as_str().to_string());
     let answered = if method == "getOpenSubsonicExtensions" {
         Ok(extensions())
     } else {
-        authorise(state, &params, ip)
-            .and_then(|device| handle(state, &params, &method, &device, range.as_deref()))
+        authorise(state, &params, asked.ip)
+            .and_then(|device| handle(state, &params, &method, &device, asked.range.as_deref()))
     };
-    let out = match answered {
+    match answered {
         Ok(Reply::Payload(map)) => envelope(json, "ok", map),
         Ok(Reply::Raw(out)) => out,
         Err(Fail(code, message)) => {
@@ -388,8 +444,7 @@ pub(crate) fn answer(state: &State, mut request: Request, path: &str) {
             map.insert("error".into(), json!({ "code": code, "message": message }));
             envelope(json, "failed", map)
         }
-    };
-    let _ = request.respond(out);
+    }
 }
 
 fn md5_hex(text: &str) -> String {
@@ -898,9 +953,10 @@ fn cover(state: &State, id: &str) -> Result<Reply, Fail> {
         .ok_or_else(none)?
     };
     let (content_type, bytes) = picture(state, &address).ok_or_else(|| fail(70, "no picture"))?;
-    let mut out = bytes_out(200, content_type, bytes.to_vec());
-    out.add_header(header("Cache-Control", "private, max-age=86400"));
-    Ok(Reply::Raw(out))
+    Ok(Reply::Raw(
+        bytes_out(200, content_type, bytes.to_vec())
+            .header("Cache-Control", "private, max-age=86400"),
+    ))
 }
 
 /// The picture at a row's art address: a file's own, a cloud song's kept one, or one on the web (kept a while).
@@ -974,28 +1030,30 @@ fn serve_file(path: &str, range: Option<&str>) -> Result<Reply, Fail> {
         .map(str::to_ascii_lowercase)
         .unwrap_or_default();
     let mut headers = vec![
-        header("Content-Type", content_type(&ending)),
-        header("Accept-Ranges", "bytes"),
+        (
+            "Content-Type".to_string(),
+            content_type(&ending).to_string(),
+        ),
+        ("Accept-Ranges".to_string(), "bytes".to_string()),
     ];
     let (status, body, size): (u16, Body, u64) = match range_of(range, length) {
         Some((start, end)) => {
             file.seek(SeekFrom::Start(start))
                 .map_err(|_| fail(0, "the file cannot be read"))?;
-            headers.push(header(
-                "Content-Range",
-                &format!("bytes {start}-{end}/{length}"),
+            headers.push((
+                "Content-Range".to_string(),
+                format!("bytes {start}-{end}/{length}"),
             ));
             (206, Box::new(file.take(end - start + 1)), end - start + 1)
         }
         None => (200, Box::new(file), length),
     };
-    Ok(Reply::Raw(Response::new(
-        StatusCode(status),
+    Ok(Reply::Raw(Out {
+        status,
         headers,
+        length: Some(size),
         body,
-        Some(size as usize),
-        None,
-    )))
+    }))
 }
 
 /// The bytes at `url` (the core's relay for a song an add-on or the cloud gives), with the range asked for.
@@ -1027,24 +1085,23 @@ fn proxy(url: &str, range: Option<&str>) -> Result<Reply, Option<String>> {
             .map(str::to_string)
     };
     let mut headers = vec![
-        header(
-            "Content-Type",
-            &given("content-type").unwrap_or_else(|| "application/octet-stream".into()),
+        (
+            "Content-Type".to_string(),
+            given("content-type").unwrap_or_else(|| "application/octet-stream".into()),
         ),
-        header("Accept-Ranges", "bytes"),
+        ("Accept-Ranges".to_string(), "bytes".to_string()),
     ];
     if let Some(range) = given("content-range") {
-        headers.push(header("Content-Range", &range));
+        headers.push(("Content-Range".to_string(), range));
     }
-    let length = given("content-length").and_then(|l| l.parse::<usize>().ok());
+    let length = given("content-length").and_then(|l| l.parse::<u64>().ok());
     let body: Body = Box::new(response.into_body().into_reader());
-    Ok(Reply::Raw(Response::new(
-        StatusCode(status),
+    Ok(Reply::Raw(Out {
+        status,
         headers,
-        body,
         length,
-        None,
-    )))
+        body,
+    }))
 }
 
 /// Where the song plays from: as the player finds it (kept a few minutes; `fresh`: found again).

@@ -2,6 +2,7 @@
 
 mod artists_following;
 mod autoplay;
+mod away;
 mod blocking;
 pub mod check_addon;
 mod cloud;

@@ -66,6 +66,8 @@ pub(crate) struct Lan {
     kept_seen: Mutex<Option<Instant>>,
     /// Where songs were found to play from lately (a player asks for a song a few times as it seeks).
     pub(crate) located: Mutex<HashMap<i64, (stash_core::player::Located, Instant)>>,
+    /// This computer's Tailscale name, as last asked, and when.
+    tailscale: Mutex<Option<(Instant, Option<String>)>>,
     /// Covers fetched from the web lately.
     pub(crate) covers: Mutex<Vec<KeptCover>>,
 }
@@ -196,6 +198,7 @@ impl Lan {
     }
 
     fn status(&self, state: &State) -> Value {
+        let tailscale = self.tailscale();
         let config = self.config(state);
         let listening = *self.listening.lock().unwrap();
         let address = address();
@@ -206,9 +209,66 @@ impl Lan {
             "trouble": *self.trouble.lock().unwrap(),
             "address": address.map(|ip| ip.to_string()),
             "url": address.zip(listening).map(|(ip, port)| format!("http://{ip}:{port}")),
+            // With Tailscale on this computer (and on the phone), the share is reached from anywhere at this address.
+            "tailscale": tailscale.map(|name| json!({
+                "name": name,
+                "url": listening.map(|port| format!("http://{name}:{port}")),
+            })),
             "devices": config.devices,
         })
     }
+
+    /// This computer's name on its Tailscale network, when Tailscale runs here (asked at most once a minute).
+    fn tailscale(&self) -> Option<String> {
+        let mut known = self.tailscale.lock().unwrap();
+        if let Some((at, name)) = &*known
+            && at.elapsed() < Duration::from_secs(60)
+        {
+            return name.clone();
+        }
+        let name = tailscale_name();
+        *known = Some((Instant::now(), name.clone()));
+        name
+    }
+}
+
+/// `tailscale status --json`'s own name (its MagicDNS name, else its first address), when Tailscale is running.
+fn tailscale_name() -> Option<String> {
+    let program = if cfg!(windows) {
+        let installed = std::path::Path::new(r"C:\Program Files\Tailscale\tailscale.exe");
+        if installed.is_file() {
+            installed.to_path_buf()
+        } else {
+            "tailscale.exe".into()
+        }
+    } else {
+        "tailscale".into()
+    };
+    let mut command = std::process::Command::new(program);
+    command
+        .args(["status", "--json"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = command.output().ok()?;
+    tailscale_of(&serde_json::from_slice(&output.stdout).ok()?)
+}
+
+fn tailscale_of(status: &Value) -> Option<String> {
+    if status["BackendState"] != "Running" {
+        return None;
+    }
+    let me = &status["Self"];
+    me["DNSName"]
+        .as_str()
+        .map(|n| n.trim_end_matches('.').to_string())
+        .filter(|n| !n.is_empty())
+        .or_else(|| me["TailscaleIPs"][0].as_str().map(str::to_string))
 }
 
 /// Listens on the network while the listener has it on, and stops when they switch it off (or change the port).
@@ -264,7 +324,7 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
 fn answer(state: &State, request: Request) {
     let path = request.url().split('?').next().unwrap_or("").to_string();
     if path.starts_with("/rest/") {
-        crate::subsonic::answer(state, request, &path);
+        crate::subsonic::answer(state, request);
         return;
     }
     let text = if path == "/" {
@@ -398,5 +458,17 @@ mod tests {
                 .all(|c| c.is_ascii_alphanumeric() && !"0O1lI".contains(c))
         );
         assert_ne!(p, password());
+    }
+
+    #[test]
+    fn tailscales_name_for_this_computer_is_its_own() {
+        let running = json!({ "BackendState": "Running", "Self": { "DNSName": "desk.tail1234.ts.net.", "TailscaleIPs": ["100.64.0.2"] } });
+        assert_eq!(
+            tailscale_of(&running).as_deref(),
+            Some("desk.tail1234.ts.net")
+        );
+        let bare = json!({ "BackendState": "Running", "Self": { "DNSName": "", "TailscaleIPs": ["100.64.0.2"] } });
+        assert_eq!(tailscale_of(&bare).as_deref(), Some("100.64.0.2"));
+        assert_eq!(tailscale_of(&json!({ "BackendState": "Stopped" })), None);
     }
 }

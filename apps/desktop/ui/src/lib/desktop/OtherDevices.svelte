@@ -1,15 +1,26 @@
-<!-- Settings › Library: the library on the listener's other devices (the core's `lan.rs` and `subsonic.rs`). One switch
-     shares it on their network; each device they add gets a user name and password of its own, which a Subsonic app on
-     the phone or another computer (Symfonium, Feishin, Substreamer, DSub…) signs in with at the address shown. A device
-     removed is let in no more. -->
+<!-- Settings › Library: the library on the listener's other devices. Away from home, through Stash's relay (the core's
+     `away.rs`; for supporters, claimed here by email as on the phone); on their Wi‑Fi (`lan.rs`), or anywhere with
+     Tailscale; and the devices let in, each with its own user name and password, which a Subsonic app (Symfonium,
+     Feishin, Substreamer, DSub…) signs in with. A device removed is let in no more. -->
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import * as core from '../core';
 
 	type Device = { id: string; name: string; user: string; password: string; added_ms: number; seen_ms: number | null };
-	type Lan = { on: boolean; port: number; listening: number | null; trouble: string | null; address: string | null; url: string | null; devices: Device[] };
+	type Lan = {
+		on: boolean;
+		port: number;
+		listening: number | null;
+		trouble: string | null;
+		address: string | null;
+		url: string | null;
+		tailscale: { name: string; url: string | null } | null;
+		devices: Device[];
+	};
+	type Away = { available: boolean; can_claim: boolean; on: boolean; supporter: boolean; claiming: string | null; connected: boolean; trouble: string | null; url: string | null };
 
 	let lan = $state<Lan | null>(null);
+	let away = $state<Away | null>(null);
 	let trouble = $state<string | null>(null);
 	let busy = $state(false);
 	/** The device whose password shows, the one being removed (waiting for a yes), what was just copied. */
@@ -20,10 +31,13 @@
 	let name = $state('');
 	let portText = $state('');
 	let editingPort = $state(false);
+	let email = $state('');
+	let code = $state('');
+	let renewing = $state(false);
 
 	async function ask() {
 		try {
-			lan = await core.get<Lan>('/api/lan');
+			[lan, away] = await Promise.all([core.get<Lan>('/api/lan'), core.get<Away>('/api/away')]);
 		} catch {
 			/* the core is not answering */
 		}
@@ -34,7 +48,8 @@
 		let timer: ReturnType<typeof setTimeout>;
 		const loop = async () => {
 			await ask();
-			if (alive) timer = setTimeout(loop, 5000);
+			const settling = !!away && away.on && away.supporter && !away.connected && !away.trouble;
+			if (alive) timer = setTimeout(loop, settling ? 1500 : 5000);
 		};
 		void loop();
 		return () => {
@@ -43,21 +58,31 @@
 		};
 	});
 
-	async function act(what: () => Promise<Lan | unknown>) {
+	async function act(what: () => Promise<unknown>) {
 		busy = true;
 		trouble = null;
 		try {
-			const got = await what();
-			if (got && typeof got === 'object' && 'devices' in got) lan = got as Lan;
+			await what();
 		} catch (e) {
 			trouble = core.said(e);
 		} finally {
 			busy = false;
 			removing = null;
+			await ask();
 		}
 	}
 
-	const setOn = (on: boolean) => act(() => core.post<Lan>('/api/lan', { on }));
+	const setLan = (on: boolean) => act(() => core.post('/api/lan', { on }));
+	const setAway = (on: boolean) => act(() => core.post('/api/away', { on }));
+	const sendCode = () => act(() => core.post('/api/away/claim/start', { email: email.trim() }));
+	const unlock = () => act(async () => {
+		await core.post('/api/away/claim/verify', { code: code.trim() });
+		code = '';
+		await core.post('/api/away', { on: true });
+	});
+	const cancelClaim = () => act(() => core.post('/api/away/claim/cancel', {}));
+	const newAddress = () => act(() => core.post('/api/away/new-address', {})).then(() => (renewing = false));
+
 	async function addDevice() {
 		const n = name.trim();
 		if (!n) return;
@@ -65,22 +90,21 @@
 			const got = await core.post<Lan>('/api/lan/devices', { name: n });
 			const added = got.devices[got.devices.length - 1];
 			if (added) shown = added.id;
-			return got;
 		});
 		if (!trouble) {
 			adding = false;
 			name = '';
 		}
 	}
-	const remove = (d: Device) => act(() => core.post<Lan>(`/api/lan/devices/${d.id}/remove`, {}));
-	const newPassword = (d: Device) => act(() => core.post<Lan>(`/api/lan/devices/${d.id}/password`, {})).then(() => (shown = d.id));
+	const remove = (d: Device) => act(() => core.post(`/api/lan/devices/${d.id}/remove`, {}));
+	const newPassword = (d: Device) => act(() => core.post(`/api/lan/devices/${d.id}/password`, {})).then(() => (shown = d.id));
 	async function savePort() {
 		const port = Number(portText);
 		if (!Number.isInteger(port) || port < 1024 || port > 65535) {
 			trouble = 'Pick a port from 1024 to 65535.';
 			return;
 		}
-		await act(() => core.post<Lan>('/api/lan', { port }));
+		await act(() => core.post('/api/lan', { port }));
 		if (!trouble) editingPort = false;
 	}
 
@@ -103,38 +127,127 @@
 		const hours = Math.floor(minutes / 60);
 		return hours < 24 ? `${hours} h ago` : `${Math.floor(hours / 24)} d ago`;
 	};
+	const sharing = $derived(!!lan && (lan.on || (!!away && away.on && away.supporter)));
 </script>
 
-{#if lan}
+{#snippet address(url: string, what: string)}
+	<button type="button" class="od-copy" title="Copy the address" onclick={() => copy(url, what)}>{url}</button>{copied === what ? ' · copied' : ''}
+{/snippet}
+
+{#if lan && away}
 	<div class="set-card">
+		<div class="set-row set-col">
+			<span class="set-name">Your library on other devices</span>
+			<span class="set-sub">Play it on your phone or another computer with a Subsonic app, such as Symfonium, Feishin, Substreamer or DSub. This computer has to be on, with Stash open.</span>
+		</div>
+
+		<!-- Away from home -->
+		{#if away.available}
+			<div class="set-row">
+				<div class="set-lab">
+					<span class="set-name" id="away-l">Away from home</span>
+					{#if !away.supporter}
+						<span class="set-sub">Anywhere with a connection, through Stash’s relay. For supporters: anyone who gave $5 or more on Ko‑fi.</span>
+					{:else if !away.on}
+						<span class="set-sub">Anywhere with a connection, through Stash’s relay</span>
+					{:else if away.connected && away.url}
+						<span class="set-sub od-now" role="status">Ready at {@render address(away.url, 'away')}</span>
+						<span class="set-sub">Your music passes through Stash’s relay on its way to your phone. Only devices you add below get in.</span>
+					{:else if away.trouble}
+						<span class="set-sub set-trouble" role="status">Not connected: {away.trouble}</span>
+					{:else}
+						<span class="set-sub" role="status">Connecting…</span>
+					{/if}
+				</div>
+				{#if away.supporter}
+					<button type="button" class="sw" role="switch" aria-checked={away.on} aria-labelledby="away-l" disabled={busy} onclick={() => setAway(!away!.on)}><i></i></button>
+				{/if}
+			</div>
+			{#if !away.supporter && away.can_claim}
+				<div class="set-row od-sub">
+					{#if away.claiming}
+						<form class="od-add" onsubmit={(e) => { e.preventDefault(); void unlock(); }}>
+							<label class="set-sub" for="od-code">Enter the code sent to {away.claiming}</label>
+							<input id="od-code" class="od-input od-port" bind:value={code} maxlength="12" autocomplete="one-time-code" inputmode="numeric" />
+							<button type="submit" class="btn" disabled={busy || !code.trim()}>Unlock</button>
+							<button type="button" class="btn ghost" disabled={busy} onclick={cancelClaim}>Use another email</button>
+						</form>
+					{:else}
+						<form class="od-add" onsubmit={(e) => { e.preventDefault(); void sendCode(); }}>
+							<label class="set-sub" for="od-email">Already a supporter? Enter the email you used on Ko‑fi</label>
+							<input id="od-email" class="od-input" type="email" bind:value={email} maxlength="254" autocomplete="email" placeholder="you@example.com" />
+							<button type="submit" class="btn" disabled={busy || !email.includes('@')}>Send code</button>
+						</form>
+					{/if}
+				</div>
+			{/if}
+			{#if away.on && away.supporter && away.url}
+				<div class="set-row od-sub">
+					{#if renewing}
+						<span class="set-sub od-ask" role="alert">Make a new address? The old one stops working, so every device needs the new one.</span>
+						<div class="set-ctl">
+							<button type="button" class="btn" disabled={busy} onclick={newAddress}>New address</button>
+							<button type="button" class="btn ghost" onclick={() => (renewing = false)}>Cancel</button>
+						</div>
+					{:else}
+						<span class="set-sub">Shared the address by mistake? Make a new one.</span>
+						<div class="set-ctl"><button type="button" class="btn ghost" disabled={busy} onclick={() => (renewing = true)}>New address…</button></div>
+					{/if}
+				</div>
+			{/if}
+		{/if}
+
+		<!-- On the Wi‑Fi (and with Tailscale, anywhere) -->
 		<div class="set-row">
 			<div class="set-lab">
-				<span class="set-name" id="lan-l">Your library on other devices</span>
+				<span class="set-name" id="lan-l">On your Wi‑Fi</span>
 				{#if !lan.on}
-					<span class="set-sub">Play it on your phone or another computer on your Wi‑Fi, with a Subsonic app such as Symfonium, Feishin, Substreamer or DSub</span>
+					<span class="set-sub">Straight from this computer to devices on the same network{lan.tailscale ? ', or on your Tailscale network' : ''}</span>
 				{:else if lan.trouble}
 					<span class="set-sub set-trouble" role="status">{lan.trouble}</span>
 				{:else if lan.url}
-					<span class="set-sub od-now" role="status">Sharing at <button type="button" class="od-copy" title="Copy the address" onclick={() => copy(lan!.url!, 'url')}>{lan.url}</button>{copied === 'url' ? ' · copied' : ''}</span>
-					<span class="set-sub">Only on your network, and only to devices you add below. This computer has to be on, with Stash open.</span>
+					<span class="set-sub od-now" role="status">Ready at {@render address(lan.url, 'lan')}</span>
 				{:else if lan.listening}
 					<span class="set-sub od-now" role="status">Sharing on port {lan.listening}, but this computer isn’t on a network right now</span>
 				{:else}
 					<span class="set-sub" role="status">Starting…</span>
 				{/if}
+				{#if lan.on && lan.tailscale?.url}
+					<span class="set-sub">With Tailscale on your phone too: {@render address(lan.tailscale.url, 'ts')}</span>
+				{/if}
 			</div>
-			<button type="button" class="sw" role="switch" aria-checked={lan.on} aria-labelledby="lan-l" disabled={busy} onclick={() => setOn(!lan!.on)}><i></i></button>
+			<button type="button" class="sw" role="switch" aria-checked={lan.on} aria-labelledby="lan-l" disabled={busy} onclick={() => setLan(!lan!.on)}><i></i></button>
 		</div>
 		{#if lan.on}
+			<div class="set-row od-sub">
+				<div class="set-lab">
+					<span class="set-sub">Port {lan.port}. Change it only if another program uses it. Windows may ask once whether Stash can use your network: allow it on private networks.</span>
+				</div>
+				<div class="set-ctl">
+					{#if editingPort}
+						<form class="od-add" onsubmit={(e) => { e.preventDefault(); void savePort(); }}>
+							<input class="od-input od-port" bind:value={portText} inputmode="numeric" aria-label="Port" />
+							<button type="submit" class="btn" disabled={busy}>Save</button>
+							<button type="button" class="btn ghost" onclick={() => (editingPort = false)}>Cancel</button>
+						</form>
+					{:else}
+						<button type="button" class="btn ghost" disabled={busy} onclick={() => { portText = String(lan!.port); editingPort = true; }}>Change port</button>
+					{/if}
+				</div>
+			</div>
+		{/if}
+
+		<!-- The devices let in -->
+		{#if sharing}
 			{#each lan.devices as d (d.id)}
-				<div class="set-row od-device">
+				<div class="set-row od-sub">
 					<div class="set-lab">
 						<span class="set-name">{d.name}</span>
 						<span class="set-sub">
 							User name <button type="button" class="od-copy" title="Copy the user name" onclick={() => copy(d.user, `u-${d.id}`)}>{d.user}</button>
 							· Password
 							{#if shown === d.id}
-								<button type="button" class="od-copy od-pw" title="Copy the password" onclick={() => copy(d.password, `p-${d.id}`)}>{d.password}</button>
+								<button type="button" class="od-copy" title="Copy the password" onclick={() => copy(d.password, `p-${d.id}`)}>{d.password}</button>
 							{:else}
 								<button type="button" class="od-show" onclick={() => (shown = d.id)}>Show</button>
 							{/if}
@@ -157,7 +270,7 @@
 					</div>
 				</div>
 			{/each}
-			<div class="set-row od-device">
+			<div class="set-row od-sub">
 				{#if adding}
 					<form class="od-add" onsubmit={(e) => { e.preventDefault(); void addDevice(); }}>
 						<label class="set-sub" for="od-name">Name the device</label>
@@ -167,27 +280,10 @@
 					</form>
 				{:else}
 					<div class="set-lab">
-						<span class="set-sub">{lan.devices.length ? 'Each device signs in with its own user name and password.' : 'Add a device to get the user name and password its app signs in with.'} In the app, add a server: the address above, then the user name and password.</span>
+						<span class="set-sub">{lan.devices.length ? 'Each device signs in with its own user name and password.' : 'Add a device to get the user name and password its app signs in with.'} In the app, add a server: an address above, then the user name and password.</span>
 					</div>
 					<div class="set-ctl"><button type="button" class="btn ghost" disabled={busy || lan.devices.length >= 32} onclick={() => (adding = true)}>Add device…</button></div>
 				{/if}
-			</div>
-			<div class="set-row od-device">
-				<div class="set-lab">
-					<span class="set-name">Port</span>
-					<span class="set-sub">Change it only if another program uses {lan.port}. Windows may ask once whether Stash can use your network: allow it on private networks.</span>
-				</div>
-				<div class="set-ctl">
-					{#if editingPort}
-						<form class="od-add" onsubmit={(e) => { e.preventDefault(); void savePort(); }}>
-							<input class="od-input od-port" bind:value={portText} inputmode="numeric" aria-label="Port" />
-							<button type="submit" class="btn" disabled={busy}>Save</button>
-							<button type="button" class="btn ghost" onclick={() => (editingPort = false)}>Cancel</button>
-						</form>
-					{:else}
-						<button type="button" class="btn ghost" disabled={busy} onclick={() => { portText = String(lan!.port); editingPort = true; }}>{lan.port}</button>
-					{/if}
-				</div>
 			</div>
 		{/if}
 		{#if trouble}
@@ -199,12 +295,11 @@
 <style>
 	.od-now { color: var(--wp-text); }
 	.od-ask { margin: 0; color: var(--wp-text); }
-	.od-device { padding-left: 36px; }
-	.od-copy { font: 500 13px/1.3 var(--font-mono, ui-monospace, monospace); color: var(--wp-text); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--wp-line-2); user-select: all; }
-	.od-pw { letter-spacing: 0.02em; }
+	.od-sub { padding-left: 36px; }
+	.od-copy { font: 500 13px/1.3 var(--font-mono, ui-monospace, monospace); color: var(--wp-text); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--wp-line-2); user-select: all; word-break: break-all; }
 	.od-show { color: var(--wp-text); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--wp-line-2); }
 	.od-add { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 	.od-input { min-width: 0; width: 220px; padding: 7px 10px; border: 1px solid var(--wp-line-2); border-radius: 8px; background: transparent; color: var(--wp-text); font: 400 14px/1.3 var(--font-body); }
-	.od-port { width: 90px; }
+	.od-port { width: 110px; }
 	.od-input:focus-visible { outline: 2px solid var(--acc); outline-offset: 1px; }
 </style>
