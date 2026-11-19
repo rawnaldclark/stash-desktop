@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 24;
+pub const SCHEMA_VERSION: i64 = 25;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
@@ -374,6 +374,58 @@ const V24: &str = "
     ) WITHOUT ROWID;
 ";
 
+/// Version 25: the listener's cloud storage (`cloud`). An account is who it is with the provider, and the sign-in that
+/// lets Stash read it (`token`, the refresh token; none once the provider stopped taking it: sign in again), as an
+/// add-on's link is kept. A folder is one the listener picked as music, with where its scan stands: `cursor` is the
+/// next page to read, or, once a pass is whole (`delta`), the provider's mark to ask what changed since. A full pass
+/// stamps each file it sees with the folder's `generation`; once it is whole, a file stamped earlier is gone. An item is
+/// one audio file of a picked folder, the song it is (`track_id`; none once the listener took the song out of the
+/// library: it is not brought back), what the file was last seen as (`version`, `size`), what its audio is, and
+/// whether the scan made the song's row (`added`), so the song goes with the file only then.
+const V25: &str = "
+    CREATE TABLE cloud_accounts(
+        id               INTEGER PRIMARY KEY,
+        provider         TEXT NOT NULL,
+        remote_id        TEXT NOT NULL,
+        name             TEXT NOT NULL,
+        email            TEXT,
+        token            TEXT,
+        connected_at_ms  INTEGER NOT NULL,
+        UNIQUE(provider, remote_id)
+    );
+    CREATE TABLE cloud_folders(
+        id             INTEGER PRIMARY KEY,
+        account_id     INTEGER NOT NULL REFERENCES cloud_accounts(id) ON DELETE CASCADE,
+        item_id        TEXT NOT NULL,
+        path           TEXT NOT NULL,
+        added_at_ms    INTEGER NOT NULL,
+        cursor         TEXT,
+        delta          INTEGER NOT NULL DEFAULT 0,
+        generation     INTEGER NOT NULL DEFAULT 0,
+        scanned_at_ms  INTEGER,
+        trouble        TEXT,
+        UNIQUE(account_id, item_id)
+    );
+    CREATE TABLE cloud_items(
+        account_id   INTEGER NOT NULL REFERENCES cloud_accounts(id) ON DELETE CASCADE,
+        item_id      TEXT NOT NULL,
+        folder_id    INTEGER NOT NULL REFERENCES cloud_folders(id) ON DELETE CASCADE,
+        track_id     INTEGER REFERENCES tracks(id) ON DELETE SET NULL,
+        name         TEXT NOT NULL,
+        path_lower   TEXT,
+        size         INTEGER NOT NULL,
+        version      TEXT,
+        codec        TEXT,
+        sample_rate  INTEGER,
+        bit_depth    INTEGER,
+        generation   INTEGER NOT NULL,
+        added        INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (account_id, item_id)
+    ) WITHOUT ROWID;
+    CREATE INDEX cloud_items_folder ON cloud_items(folder_id, generation);
+    CREATE INDEX cloud_items_track ON cloud_items(track_id);
+";
+
 /// Version 20: what Last.fm said is like a song or an artist (radio and autoplay, `similar.rs`), by the question asked
 /// (`similar::Ask::key`): the artists and songs it named as JSON, or NULL for "it does not know that one", and when
 /// (Unix seconds), so each question is asked once in two weeks.
@@ -646,6 +698,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V24)?;
         tx.pragma_update(None, "user_version", 24)?;
+        tx.commit()?;
+    }
+    if found < 25 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V25)?;
+        tx.pragma_update(None, "user_version", 25)?;
         tx.commit()?;
     }
     Ok(())

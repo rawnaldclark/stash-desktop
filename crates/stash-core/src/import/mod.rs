@@ -147,6 +147,37 @@ pub fn read_file(path: &std::path::Path) -> Result<Incoming, ImportError> {
     }
 }
 
+/// The library's row that is the song known by `words` (its [`words_key`]) and `isrc`, when it has one: by the ISRC, else
+/// by the words (one song, unless both have an ISRC and they differ). A file before a description.
+pub(crate) fn same_song(
+    conn: &rusqlite::Connection,
+    words: &str,
+    isrc: Option<&str>,
+) -> crate::Result<Option<i64>> {
+    if let Some(isrc) = isrc {
+        let found = conn
+            .prepare_cached(
+                "SELECT id FROM tracks WHERE isrc = ?1 ORDER BY origin = 'file' DESC, id LIMIT 1",
+            )?
+            .query_row([isrc], |r| r.get(0))
+            .optional()?;
+        if found.is_some() {
+            return Ok(found);
+        }
+    }
+    let mut same_words = conn.prepare_cached(
+        "SELECT id, isrc FROM tracks WHERE words_key = ?1 ORDER BY origin = 'file' DESC, id",
+    )?;
+    let mut rows = same_words.query([words])?;
+    while let Some(row) = rows.next()? {
+        let theirs: Option<String> = row.get(1)?;
+        if isrcs_agree(theirs.as_deref(), isrc) {
+            return Ok(Some(row.get(0)?));
+        }
+    }
+    Ok(None)
+}
+
 struct Merger<'t> {
     tx: &'t rusqlite::Transaction<'t>,
     writer: Writer<'t>,
@@ -171,28 +202,7 @@ impl Merger<'_> {
         if let Some(id) = self.met.get(&met_as) {
             return Ok(*id);
         }
-        let mut found: Option<i64> = None;
-        if let Some(isrc) = &song.isrc {
-            found = self
-                .tx
-                .prepare_cached("SELECT id FROM tracks WHERE isrc = ?1 ORDER BY origin = 'file' DESC, id LIMIT 1")?
-                .query_row([isrc], |r| r.get(0))
-                .optional()?;
-        }
-        if found.is_none() {
-            // The same words: one song, unless both have an ISRC and they differ. A file before a description.
-            let mut same_words = self
-                .tx
-                .prepare_cached("SELECT id, isrc FROM tracks WHERE words_key = ?1 ORDER BY origin = 'file' DESC, id")?;
-            let mut rows = same_words.query([&words])?;
-            while let Some(row) = rows.next()? {
-                let theirs: Option<String> = row.get(1)?;
-                if isrcs_agree(theirs.as_deref(), song.isrc.as_deref()) {
-                    found = Some(row.get(0)?);
-                    break;
-                }
-            }
-        }
+        let found = same_song(self.tx, &words, song.isrc.as_deref())?;
         let id = match found {
             Some(id) => {
                 // It gains what it lacked; nothing it has is changed.

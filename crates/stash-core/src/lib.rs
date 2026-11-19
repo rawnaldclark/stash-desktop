@@ -6,6 +6,7 @@
 pub mod addons;
 pub mod audio;
 pub mod blocks;
+pub mod cloud;
 pub mod covers;
 pub mod credits;
 pub mod db;

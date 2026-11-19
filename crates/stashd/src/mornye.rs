@@ -745,7 +745,11 @@ impl Mornye {
         };
         shell(VerifyWindow {
             url,
-            title,
+            title: if title.is_empty() {
+                "Verify".to_string()
+            } else {
+                format!("{title}: verify")
+            },
             catches,
             caught,
             closed,

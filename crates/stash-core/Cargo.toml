@@ -6,6 +6,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64 = "0.22.1"
+getrandom = "0.3.4"
 libloading = "0.9.1"
 lofty = "0.25.5"
 md-5 = "0.11"

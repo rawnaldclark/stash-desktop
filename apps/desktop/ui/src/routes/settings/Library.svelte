@@ -3,6 +3,7 @@
 <script lang="ts">
 	import { goOffline, library } from '../../lib/app';
 	import * as core from '../../lib/core';
+	import CloudStorage from '../../lib/desktop/CloudStorage.svelte';
 	import FromPhone from '../../lib/desktop/FromPhone.svelte';
 	import { folders, lastPart, many, trouble, type Notice } from '../../lib/desktop/folders.svelte';
 	import { importPlaylistFile } from '../../lib/desktop/playlist-files';
@@ -108,6 +109,8 @@
 		{/if}
 	</div>
 </div>
+
+<CloudStorage />
 
 <div class="set-card">
 	<div class="set-row">

@@ -159,13 +159,24 @@ pub(crate) fn read_track(
     now: i64,
 ) -> std::result::Result<NewTrack, String> {
     let file = lofty::read_from_path(path).map_err(|e| e.to_string())?;
+    let named = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| locator.to_string());
+    let mut track = from_tagged(&file, named, now);
+    track.locator = locator.to_string();
+    track.file_size = Some(size);
+    track.file_mtime = Some(mtime);
+    Ok(track)
+}
+
+/// The track a file read by lofty holds: its tags where it has them (`named` for a title where it has none), and what
+/// the audio is. A file of the listener's own: the caller says where it is.
+pub(crate) fn from_tagged(file: &lofty::file::TaggedFile, named: String, now: i64) -> NewTrack {
     let properties = file.properties();
     let tag = file.primary_tag().or_else(|| file.first_tag());
 
-    let title = tag
-        .and_then(|t| text(t.title()))
-        .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| locator.to_string());
+    let title = tag.and_then(|t| text(t.title())).unwrap_or(named);
     let artist = tag
         .and_then(|t| text(t.artist()))
         .unwrap_or_else(|| UNKNOWN_ARTIST.to_string());
@@ -193,7 +204,7 @@ pub(crate) fn read_track(
         .map(u32::from)
         .filter(|_| lossless || codec == "alac");
 
-    Ok(NewTrack {
+    NewTrack {
         title,
         artist,
         album_artist: tag
@@ -211,12 +222,12 @@ pub(crate) fn read_track(
             .filter(|s| !s.is_empty()),
         origin: Origin::File,
         addon_id: None,
-        locator: locator.to_string(),
+        locator: String::new(),
         codec: (!codec.is_empty()).then(|| codec.to_string()),
         sample_rate: properties.sample_rate(),
         bit_depth,
         added_at: now,
-        file_size: Some(size),
-        file_mtime: Some(mtime),
-    })
+        file_size: None,
+        file_mtime: None,
+    }
 }

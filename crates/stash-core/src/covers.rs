@@ -34,7 +34,7 @@ const LARGEST: u64 = 32 * 1024 * 1024;
 
 /// What kind of image these bytes are, from the bytes themselves. What a tag says its picture is is not trusted:
 /// only images a window draws are handed out, under their true name.
-fn kind(bytes: &[u8]) -> Option<&'static str> {
+pub(crate) fn kind(bytes: &[u8]) -> Option<&'static str> {
     match bytes {
         [0xFF, 0xD8, 0xFF, ..] => Some("image/jpeg"),
         [0x89, b'P', b'N', b'G', ..] => Some("image/png"),
@@ -66,7 +66,11 @@ pub fn of_file(path: &Path) -> Option<Cover> {
 }
 
 fn inside(path: &Path) -> Option<Cover> {
-    let file = lofty::read_from_path(path).ok()?;
+    of_tagged(&lofty::read_from_path(path).ok()?)
+}
+
+/// The picture inside a file lofty read: the front cover, else any picture it holds that is an image.
+pub(crate) fn of_tagged(file: &lofty::file::TaggedFile) -> Option<Cover> {
     let pictures = || file.tags().iter().flat_map(|tag| tag.pictures());
     let usable = |picture: &&lofty::picture::Picture| kind(picture.data()).is_some();
     let picture = pictures()

@@ -1737,7 +1737,11 @@ impl Library {
             if !named.is_empty() {
                 item.insert("refs".into(), Value::Object(named));
             }
-            if let Some(cover) = row.get::<_, Option<String>>(6)? {
+            // A cover on the web; one kept on this computer (a cloud song's) means nothing to another Stash.
+            if let Some(cover) = row
+                .get::<_, Option<String>>(6)?
+                .filter(|c| c.starts_with("https://"))
+            {
                 item.insert("artwork".into(), json!([{ "url": cover }]));
             }
             item.insert("addedAt".into(), json!(row.get::<_, i64>(7)? * 1000));

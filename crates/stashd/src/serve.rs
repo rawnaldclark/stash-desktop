@@ -114,7 +114,7 @@ pub(crate) fn reply(status: u16, content_type: &str, body: Vec<u8>) -> Reply {
 }
 
 /// A picture the window may keep for a while: unlike every other answer, which is as things are this moment.
-fn reply_picture(content_type: &str, body: Vec<u8>) -> Reply {
+pub(crate) fn reply_picture(content_type: &str, body: Vec<u8>) -> Reply {
     Response::from_data(body)
         .with_status_code(200)
         .with_header(header("Content-Type", content_type))
@@ -243,25 +243,42 @@ const YOUTUBE_VISITOR: &str = "youtube.visitor";
 const BUILT_IN_STAYS: &str =
     "YouTube Music is part of Stash: it can be switched off, not removed or changed";
 
-/// The listener's add-ons in their order, then their Mornye extensions, then YouTube Music (when this core has it):
-/// what the add-ons have comes first, and what they lack is found on YouTube.
+/// The listener's cloud storage first (a song a file of theirs holds plays from that file), then their add-ons in their
+/// order, then their Mornye extensions, then YouTube Music (when this core has it): what the add-ons have comes first,
+/// and what they lack is found on YouTube.
 fn load_addons(
     library: &Library,
     youtube: Option<&BuiltInYouTube>,
     mornye: Option<&Arc<crate::mornye::Mornye>>,
+    cloud: Option<Vec<Addon>>,
 ) -> Result<Vec<Arc<Loaded>>> {
-    let mut loaded: Vec<Arc<Loaded>> = library
+    let mut loaded: Vec<Arc<Loaded>> = Vec::new();
+    for addon in cloud.unwrap_or_default() {
+        loaded.push(Arc::new(Loaded {
+            stored: StoredAddon {
+                id: addon.manifest.id.clone(),
+                link: String::new(),
+                manifest: addon.manifest_json(),
+                enabled: true,
+            },
+            addon: Ok(addon),
+        }));
+    }
+    let stored: Vec<Arc<Loaded>> = library
         .addons()?
         .into_iter()
         // An add-on kept under YouTube's own id (from before it was built in) gives way to it.
         .filter(|stored| youtube.is_none() || stored.id != youtube::ID)
         .filter(|stored| !stored.id.starts_with(crate::mornye::PREFIX))
+        // So does one under a cloud provider's (its songs' names are the provider's files).
+        .filter(|stored| stash_core::cloud::Kind::from_id(&stored.id).is_none())
         .map(|stored| {
             let addon =
                 Addon::from_stored(&stored.link, &stored.manifest).map_err(|e| e.in_words());
             Arc::new(Loaded { stored, addon })
         })
         .collect();
+    loaded.extend(stored);
     for (enabled, addon) in mornye.map(|m| m.sources()).unwrap_or_default() {
         loaded.push(Arc::new(Loaded {
             stored: StoredAddon {
@@ -1078,6 +1095,8 @@ pub(crate) struct State {
     youtube_fallback: Option<Arc<crate::youtube_fallback::TubeFallback>>,
     /// Mornye extensions, each one a source (see [`crate::mornye`]).
     mornye: Option<Arc<crate::mornye::Mornye>>,
+    /// The listener's cloud storage, when this build can connect any (see [`crate::cloud`]).
+    cloud: Option<Arc<crate::cloud::Cloud>>,
     /// Opens Google's sign-in for YouTube in a window, when the core runs inside one.
     pub(crate) sign_in: Option<SignInShell>,
 }
@@ -1184,16 +1203,24 @@ impl State {
         self.mornye.clone()
     }
 
+    /// The listener's cloud storage, when this build can connect any.
+    pub(crate) fn cloud(&self) -> Option<Arc<crate::cloud::Cloud>> {
+        self.cloud.clone()
+    }
+
     /// yt-dlp, when this core has YouTube Music built in.
     pub(crate) fn youtube_fallback(&self) -> Option<Arc<crate::youtube_fallback::TubeFallback>> {
         self.youtube_fallback.clone()
     }
 
     pub(crate) fn reload_addons(&self) -> Result<()> {
+        // Read before the library is held: the cloud reads its accounts from it.
+        let cloud = self.cloud.as_ref().map(|c| c.sources());
         let loaded = load_addons(
             &self.library.lock().unwrap(),
             self.youtube.as_ref(),
             self.mornye.as_ref(),
+            cloud,
         )?;
         *self.addons.write().unwrap() = loaded;
         Ok(())
@@ -1204,11 +1231,16 @@ impl State {
     }
 
     fn addons_value(&self) -> Value {
+        // The cloud's sources are the listener's accounts, kept under Cloud storage, not among the add-ons.
         let listed: Vec<Value> = self
             .addons
             .read()
             .unwrap()
             .iter()
+            .filter(|a| {
+                !(a.addon.as_ref().is_ok_and(Addon::is_built_in)
+                    && stash_core::cloud::Kind::from_id(&a.stored.id).is_some())
+            })
             .map(|a| a.listed())
             .collect();
         json!({ "addons": listed })
@@ -1233,7 +1265,7 @@ impl Core {
             .to_ip()
             .map(|a| a.port())
             .unwrap_or(options.port);
-        let addons: Registry = Arc::new(RwLock::new(load_addons(&library, None, None)?));
+        let addons: Registry = Arc::new(RwLock::new(load_addons(&library, None, None, None)?));
         // Copies of songs as they were played sit next to the library, in a folder of their own.
         let relays = Arc::new(crate::relay::Relays::new(
             options
@@ -1366,10 +1398,20 @@ impl Core {
                 youtube_account: None,
                 youtube_fallback: None,
                 mornye: None,
+                cloud: None,
                 sign_in: None,
             },
         })
         .map(|mut core: Self| {
+            // Cloud storage, when this build has a provider's id (`stash_core::cloud::Keys`).
+            let keys = stash_core::cloud::Keys::found();
+            if keys.dropbox.is_some() || keys.onedrive.is_some() {
+                core.state.cloud = Some(crate::cloud::Cloud::new(
+                    Arc::clone(&core.state.library),
+                    &core.state.options.db,
+                    keys,
+                ));
+            }
             // Mornye extensions are kept beside the library, in a folder of their own.
             let folder = core
                 .state
@@ -1466,6 +1508,9 @@ impl Core {
 
     /// Lets the listener pass a Mornye extension's verification page (or sign in to it) in a window `shell` opens.
     pub fn with_verify(self, shell: crate::mornye::VerifyShell) -> Self {
+        if let Some(cloud) = &self.state.cloud {
+            let _ = cloud.shell.set(Arc::clone(&shell));
+        }
         if let Some(mornye) = &self.state.mornye {
             let _ = mornye.shell.set(shell);
         }
@@ -1552,6 +1597,11 @@ impl Core {
             {
                 let (state, stop) = (&state, &stop);
                 scope.spawn(move || crate::phone_transfer::run(state, stop));
+            }
+            // The music folders in the listener's cloud storage, scanned.
+            {
+                let (state, stop) = (&state, &stop);
+                scope.spawn(move || crate::cloud::run(state, stop));
             }
             // The shortcuts as the listener left them (the shell holds them once its window is up).
             if state.shortcuts.shell.is_some() {
@@ -3012,6 +3062,12 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
     {
         state.reload_addons()?;
     }
+    // So does a cloud account connected (or one whose sign-in the provider stopped taking stops being one).
+    if let Some(cloud) = state.cloud()
+        && cloud.take_changed()
+    {
+        state.reload_addons()?;
+    }
     let url =
         Url::parse(&format!("http://local{}", request.url())).context("the request's path")?;
     let param = |name: &str| {
@@ -3079,6 +3135,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::phone_transfer::route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::cloud::route(state, request, &path)? {
         return Ok((response, false));
     }
     if let Some(response) = crate::youtube_pages::route(state, request, &path, &param)? {

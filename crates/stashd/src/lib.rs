@@ -4,6 +4,7 @@ mod artists_following;
 mod autoplay;
 mod blocking;
 pub mod check_addon;
+mod cloud;
 pub mod demo_addon;
 mod discover;
 mod equalizer;
