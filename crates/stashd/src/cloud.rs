@@ -169,6 +169,11 @@ impl Cloud {
         self.changed.swap(false, Ordering::SeqCst)
     }
 
+    /// The pictures of the cloud's songs, as one at `/api/art/cloud/<name>`.
+    pub(crate) fn cover(&self, name: &str) -> Option<stash_core::covers::Cover> {
+        stash_core::cloud::scan::cover(&self.covers, name)
+    }
+
     /// Each provider with an account Stash may read, as a source built into Stash.
     pub(crate) fn sources(self: &Arc<Self>) -> Vec<Addon> {
         let accounts = self

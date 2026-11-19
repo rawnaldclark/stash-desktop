@@ -233,6 +233,7 @@ macro_rules! art {
               ELSE COALESCE(t.art_url, CASE WHEN t.origin = 'file' AND t.missing_since IS NULL AND IFNULL(t.cover, 1) <> 0 THEN '/api/art/track/' || t.id END) END"
     };
 }
+pub(crate) use art;
 
 /// Whether a track plays with no connection: a file that is here (one of the listener's own, or a song saved), or a
 /// song kept as it was played (`played.rs`).

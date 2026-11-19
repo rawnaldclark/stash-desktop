@@ -34,7 +34,7 @@ const LARGEST: u64 = 32 * 1024 * 1024;
 
 /// What kind of image these bytes are, from the bytes themselves. What a tag says its picture is is not trusted:
 /// only images a window draws are handed out, under their true name.
-pub(crate) fn kind(bytes: &[u8]) -> Option<&'static str> {
+pub fn kind(bytes: &[u8]) -> Option<&'static str> {
     match bytes {
         [0xFF, 0xD8, 0xFF, ..] => Some("image/jpeg"),
         [0x89, b'P', b'N', b'G', ..] => Some("image/png"),

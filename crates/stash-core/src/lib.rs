@@ -30,6 +30,7 @@ pub mod playlist_file;
 pub mod reach;
 pub mod scan;
 pub mod scrobble;
+pub mod served;
 pub mod shuffle;
 pub mod similar;
 pub mod smart;

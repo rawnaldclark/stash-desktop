@@ -5,6 +5,7 @@
 	import * as core from '../../lib/core';
 	import CloudStorage from '../../lib/desktop/CloudStorage.svelte';
 	import FromPhone from '../../lib/desktop/FromPhone.svelte';
+	import OtherDevices from '../../lib/desktop/OtherDevices.svelte';
 	import { folders, lastPart, many, trouble, type Notice } from '../../lib/desktop/folders.svelte';
 	import { importPlaylistFile } from '../../lib/desktop/playlist-files';
 	import { ui } from '../../lib/ui/state.svelte';
@@ -111,6 +112,8 @@
 </div>
 
 <CloudStorage />
+
+<OtherDevices />
 
 <div class="set-card">
 	<div class="set-row">

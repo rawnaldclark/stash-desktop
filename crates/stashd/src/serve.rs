@@ -1097,6 +1097,10 @@ pub(crate) struct State {
     mornye: Option<Arc<crate::mornye::Mornye>>,
     /// The listener's cloud storage, when this build can connect any (see [`crate::cloud`]).
     cloud: Option<Arc<crate::cloud::Cloud>>,
+    /// Where a song of the library plays from: the player's own way of asking.
+    pub(crate) resolve: stash_core::player::Resolver,
+    /// The library served to the listener's other devices on their network (see [`crate::lan`]).
+    pub(crate) lan: crate::lan::Lan,
     /// Opens Google's sign-in for YouTube in a window, when the core runs inside one.
     pub(crate) sign_in: Option<SignInShell>,
 }
@@ -1284,20 +1288,22 @@ impl Core {
         let offline = Arc::new(AtomicBool::new(
             library.lock().unwrap().setting(OFFLINE_SETTING)?.as_deref() == Some("1"),
         ));
+        // Where a song of the library plays from (the player's, and what the library is served to other devices from).
+        let resolve = resolver(
+            Arc::clone(&addons),
+            Arc::clone(&library),
+            Arc::clone(&lacks),
+            Arc::clone(&relays),
+            Arc::clone(&offline),
+            port,
+        );
         let player = match &options.audio {
             None => Err("this core runs without a player".to_string()),
             Some(output) => match options.mpv.clone().or_else(find_library) {
                 None => Err("the audio engine (libmpv) was not found".to_string()),
                 Some(engine) => {
                     let settings = Settings {
-                        resolver: Some(resolver(
-                            Arc::clone(&addons),
-                            Arc::clone(&library),
-                            Arc::clone(&lacks),
-                            Arc::clone(&relays),
-                            Arc::clone(&offline),
-                            port,
-                        )),
+                        resolver: Some(Arc::clone(&resolve)),
                         // A play that counts is kept, and waits for the listener's scrobbling services.
                         on_play: Some({
                             let keep = keep_plays(Arc::clone(&library));
@@ -1400,6 +1406,8 @@ impl Core {
                 mornye: None,
                 cloud: None,
                 sign_in: None,
+                resolve,
+                lan: crate::lan::Lan::default(),
             },
         })
         .map(|mut core: Self| {
@@ -1602,6 +1610,11 @@ impl Core {
             {
                 let (state, stop) = (&state, &stop);
                 scope.spawn(move || crate::cloud::run(state, stop));
+            }
+            // The library served to the listener's other devices, while they have it on.
+            {
+                let (state, stop) = (&state, &stop);
+                scope.spawn(move || crate::lan::run(state, stop));
             }
             // The shortcuts as the listener left them (the shell holds them once its window is up).
             if state.shortcuts.shell.is_some() {
@@ -3138,6 +3151,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::cloud::route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::lan::route(state, request, &path)? {
         return Ok((response, false));
     }
     if let Some(response) = crate::youtube_pages::route(state, request, &path, &param)? {
