@@ -478,7 +478,8 @@ fn answer_agent(relay: &str) -> ureq::Agent {
         .http_status_as_error(false)
         .https_only(relay.starts_with("https://"))
         .timeout_connect(Some(Duration::from_secs(10)))
-        .timeout_recv_response(Some(Duration::from_secs(30)))
+        // A part is answered once the phone has taken it: a phone that has paused takes its time.
+        .timeout_recv_response(Some(Duration::from_secs(10 * 60)))
         .build()
         .into()
 }
@@ -533,25 +534,56 @@ fn answer_in_turn<'scope, 'env>(
         }
         let out = crate::subsonic::respond(state, &request);
         let headers = serde_json::to_string(&out.headers).unwrap_or_else(|_| "[]".into());
-        let mut post = agent
-            .post(&to)
-            .header("Authorization", &format!("Bearer {key}"))
-            .header("X-Stash-Status", &out.status.to_string())
-            .header("X-Stash-Headers", &headers);
-        if let Some(length) = out.length {
-            post = post.header("X-Stash-Length", &length.to_string());
-        }
-        let _ = if head {
-            post.send(&[][..])
-        } else {
-            let mut body = Stoppable {
-                inner: out.body,
-                stop,
-            };
-            post.send(ureq::SendBody::from_reader(&mut body))
+        let mut body = Stoppable {
+            inner: out.body,
+            stop,
         };
+        // The body goes up in parts: Cloudflare hands the relay an upload only once all of it has arrived, so one
+        // upload of a whole song would reach the phone only at its end. A small first part gets the phone its answer
+        // at once; each part is answered once the phone has taken it.
+        let mut buf = Vec::with_capacity(PART);
+        for n in 0u32.. {
+            let size = if n == 0 { FIRST_PART } else { PART };
+            buf.clear();
+            let (last, broke) = if head {
+                (true, false)
+            } else {
+                match (&mut body).take(size as u64).read_to_end(&mut buf) {
+                    Ok(read) => (read < size, false),
+                    Err(_) => (true, true),
+                }
+            };
+            let mut post = agent
+                .post(&to)
+                .header("Authorization", &format!("Bearer {key}"))
+                .header("X-Stash-Part", &n.to_string());
+            if n == 0 {
+                post = post
+                    .header("X-Stash-Status", &out.status.to_string())
+                    .header("X-Stash-Headers", &headers);
+                if let Some(length) = out.length {
+                    post = post.header("X-Stash-Length", &length.to_string());
+                }
+            }
+            if broke {
+                // The song could not be read on (a piece failed): the phone's answer ends in an error.
+                post = post.header("X-Stash-Abort", "1");
+            } else if last {
+                post = post.header("X-Stash-Last", "1");
+            }
+            match post.send(&buf[..]) {
+                Ok(answer) if answer.status().as_u16() == 204 && !last => {}
+                // Done, or the phone stopped listening, or the relay could not be reached.
+                _ => break,
+            }
+        }
     });
 }
+
+/// The first part of an answer: small, so the phone has its answer at once.
+const FIRST_PART: usize = 64 * 1024;
+/// Each part after it.
+const PART: usize = 512 * 1024;
 
 /// A body that ends (with an error) once Stash stops, so quitting never waits for a song to finish streaming up.
 struct Stoppable<'a> {

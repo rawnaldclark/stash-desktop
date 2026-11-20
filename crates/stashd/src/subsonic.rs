@@ -1084,6 +1084,25 @@ fn proxy(url: &str, range: Option<&str>) -> Result<Reply, Option<String>> {
             .and_then(|v| v.to_str().ok())
             .map(str::to_string)
     };
+    // A playlist of pieces (an add-on's DASH or HLS): a Subsonic app plays only a whole file, so the pieces are
+    // played back to back as one stream. A playlist is always read whole, from its start.
+    let landed = ureq::ResponseExt::get_uri(&response).to_string();
+    let bare_type = given("content-type")
+        .unwrap_or_default()
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let landed_path = url::Url::parse(&landed)
+        .map(|u| u.path().to_string())
+        .unwrap_or_default();
+    if crate::pieces::is_playlist(&bare_type, &landed_path) {
+        if status == 206 && range.is_some() {
+            return proxy(url, None);
+        }
+        return joined(&agent, response.into_body().into_reader(), &landed).map_err(Some);
+    }
     let mut headers = vec![
         (
             "Content-Type".to_string(),
@@ -1102,6 +1121,58 @@ fn proxy(url: &str, range: Option<&str>) -> Result<Reply, Option<String>> {
         length,
         body,
     }))
+}
+
+/// The most a playlist of pieces may be.
+const PLAYLIST_MOST: u64 = 4 * 1024 * 1024;
+
+fn playlist_text(body: impl Read) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    body.take(PLAYLIST_MOST + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "the playlist could not be read whole".to_string())?;
+    if bytes.len() as u64 > PLAYLIST_MOST {
+        return Err("the playlist is too large".into());
+    }
+    String::from_utf8(bytes).map_err(|_| "the playlist is not text".into())
+}
+
+/// The playlist of pieces in `body`, read from `landed`, played as one stream ([`crate::flat`]).
+fn joined(agent: &ureq::Agent, body: impl Read, landed: &str) -> Result<Reply, String> {
+    let mut at =
+        url::Url::parse(landed).map_err(|_| "the playlist's address cannot be read".to_string())?;
+    let mut text = playlist_text(body)?;
+    // A playlist of renditions names the chosen one's playlist, read in turn.
+    for _ in 0..2 {
+        let kind = crate::pieces::kind_of(&text)
+            .ok_or("the stream is text, and not a playlist Stash knows")?;
+        match crate::flat::flatten(kind, &text, &at)? {
+            crate::flat::Flat::Pieces {
+                pieces,
+                content_type,
+            } => {
+                return Ok(Reply::Raw(Out {
+                    status: 200,
+                    headers: vec![("Content-Type".to_string(), content_type)],
+                    length: None,
+                    body: Box::new(crate::flat::Joined::new(agent.clone(), pieces)),
+                }));
+            }
+            crate::flat::Flat::Rendition(url) => {
+                let response = agent.get(url.as_str()).call().map_err(|e| e.to_string())?;
+                if !response.status().is_success() {
+                    return Err(format!(
+                        "the song's rendition answered {}",
+                        response.status().as_u16()
+                    ));
+                }
+                at = url::Url::parse(&ureq::ResponseExt::get_uri(&response).to_string())
+                    .map_err(|_| "the playlist's address cannot be read".to_string())?;
+                text = playlist_text(response.into_body().into_reader())?;
+            }
+        }
+    }
+    Err("the playlist names renditions of renditions".into())
 }
 
 /// Where the song plays from: as the player finds it (kept a few minutes; `fresh`: found again).

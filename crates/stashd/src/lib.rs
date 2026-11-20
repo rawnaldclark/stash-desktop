@@ -9,6 +9,7 @@ mod cloud;
 pub mod demo_addon;
 mod discover;
 mod equalizer;
+mod flat;
 mod folders;
 mod following;
 mod kept;
