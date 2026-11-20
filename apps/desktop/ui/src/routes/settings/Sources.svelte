@@ -1,7 +1,8 @@
-<!-- Settings › Sources: where music beyond the listener's own files comes from. Add-ons (each added by its link; the order
-     is the listener's), Stash's own Tidal (its daily allowance), YouTube Music (the account, restricted songs), and the
-     Mornye extensions. -->
+<!-- Settings › Sources: where music beyond the listener's own files comes from. Add-ons (each added by its link, or Stash's
+     own Tidal from Stash's offer; the order is the listener's), Stash's Tidal once added (its daily allowance), YouTube
+     Music (the account, restricted songs), and the Mornye extensions. -->
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { sources } from '../../lib/app';
 	import * as core from '../../lib/core';
 	import { trouble } from '../../lib/desktop/folders.svelte';
@@ -39,6 +40,49 @@
 			addonTrouble = x instanceof core.Refused ? `Couldn’t add that link: ${trouble(x)}` : trouble(x);
 		} finally {
 			adding = false;
+		}
+	}
+	/** How Stash's own Tidal stands: offered (when this build has it) until it is added, then its allowance. */
+	let tidal = $state<core.TidalStatus | null>(null);
+	/** Until this time, it is read often: it was just added, or a claim just went through. */
+	let settleUntil = 0;
+	async function askTidal() {
+		try {
+			tidal = await core.get<core.TidalStatus>('/api/tidal');
+		} catch {
+			/* the core is not answering */
+		}
+	}
+	onMount(() => {
+		let alive = true;
+		let timer: ReturnType<typeof setTimeout>;
+		const loop = async () => {
+			await askTidal();
+			if (alive) timer = setTimeout(loop, Date.now() < settleUntil ? 1500 : 30_000);
+		};
+		void loop();
+		return () => {
+			alive = false;
+			clearTimeout(timer);
+		};
+	});
+	async function tidalChanged() {
+		settleUntil = Date.now() + 15_000;
+		await askTidal();
+	}
+	const tidalAdded = $derived(L.sources.some((a) => a.id === core.STASH_TIDAL));
+	let addingTidal = $state(false);
+	async function addTidal() {
+		if (addingTidal) return;
+		addingTidal = true;
+		addonTrouble = null;
+		try {
+			await sources.addTidal();
+			await tidalChanged();
+		} catch (x) {
+			addonTrouble = `Couldn’t add Tidal: ${trouble(x)}`;
+		} finally {
+			addingTidal = false;
 		}
 	}
 	/** A new version of an add-on, shown until it is taken or put off. */
@@ -110,7 +154,10 @@
 	};
 	/** Where it is, when that is nearer than the internet: it may send Stash only as near as that. */
 	const where = (a: SourceStatus) => (a.reach === 'home' ? 'on your network' : a.reach === 'here' ? 'on this computer' : '');
-	const detail = (a: SourceStatus) => (a.builtIn ? [a.id.startsWith('mornye.') ? 'Mornye extension' : 'Built in', partial(a)] : [a.version ? `v${a.version}` : '', a.host ?? '', where(a), partial(a)]).filter((p) => p !== '').join(' · ');
+	const detail = (a: SourceStatus) =>
+		(a.builtIn ? [a.id.startsWith('mornye.') ? 'Mornye extension' : 'Built in', partial(a)] : a.byStash ? ['By Stash', partial(a)] : [a.version ? `v${a.version}` : '', a.host ?? '', where(a), partial(a)])
+			.filter((p) => p !== '')
+			.join(' · ');
 	/** How many of the sources are the listener's own add-ons (they come first in the list). */
 	const own = $derived(L.sources.filter((a) => !a.builtIn).length);
 </script>
@@ -137,7 +184,7 @@
 							{#if !a.builtIn}
 								<button type="button" class="act-ib" disabled={i === 0} aria-label="Move {a.name} up" title="Move up" onclick={() => move(i, -1)}><Icon name="arrow_upward" /></button>
 								<button type="button" class="act-ib" disabled={i >= own - 1} aria-label="Move {a.name} down" title="Move down" onclick={() => move(i, 1)}><Icon name="arrow_downward" /></button>
-								<button type="button" class="btn ghost" aria-label="Check {a.name} for updates" title="Check for updates" disabled={checking !== null || ui.offline} onclick={() => check(a)}>{checking === a.id && offer?.id !== a.id ? 'Checking…' : 'Check'}</button>
+								{#if !a.byStash}<button type="button" class="btn ghost" aria-label="Check {a.name} for updates" title="Check for updates" disabled={checking !== null || ui.offline} onclick={() => check(a)}>{checking === a.id && offer?.id !== a.id ? 'Checking…' : 'Check'}</button>{/if}
 								<button type="button" class="btn ghost" aria-label="Remove {a.name}" onclick={() => { if (offer?.id === a.id) offer = null; void addonChange(() => sources.remove(a.id)); }}>Remove</button>
 							{/if}
 							<button type="button" class="sw" role="switch" aria-checked={a.enabled} aria-label={a.name} title={a.enabled ? 'On' : 'Off'} onclick={() => addonChange(() => sources.setEnabled(a.id, !a.enabled))}><i></i></button>
@@ -159,6 +206,15 @@
 				{/each}
 			</ol>
 		{/if}
+		{#if tidal?.available && !tidalAdded}
+			<div class="set-row">
+				<div class="set-lab">
+					<span class="set-name">Tidal, by Stash</span>
+					<span class="set-sub">Lossless and Hi-Res. Free with a daily allowance, unlimited for supporters.</span>
+				</div>
+				<button type="button" class="btn" disabled={addingTidal || ui.offline} onclick={addTidal}>{addingTidal ? 'Adding…' : 'Add'}</button>
+			</div>
+		{/if}
 		<div class="set-row set-col">
 			<form class="dev-rename" onsubmit={add}>
 				<input class="dev-input" type="url" placeholder="Paste an add-on link" bind:value={link} aria-label="Add-on link" autocomplete="off" spellcheck="false" />
@@ -170,7 +226,7 @@
 	</div>
 </section>
 
-<StashTidal />
+{#if tidal?.available && tidalAdded}<StashTidal t={tidal} onchange={tidalChanged} />{/if}
 
 <section class="set-part" id="youtube" aria-labelledby="h-youtube">
 	<h3 class="set-h" id="h-youtube">YouTube Music</h3>

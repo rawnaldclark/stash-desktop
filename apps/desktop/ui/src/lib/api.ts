@@ -245,6 +245,8 @@ export interface SourcesAPI {
 	reload(): Promise<void>;
 	/** Adds the add-on at `link` (the address of its manifest). Rejects with the core's words when it is refused. */
 	add(link: string): Promise<void>;
+	/** Adds Stash's own Tidal, which Settings offers when this build has it. Rejects with the core's words. */
+	addTidal(): Promise<void>;
 	remove(id: string): Promise<void>;
 	setEnabled(id: string, on: boolean): Promise<void>;
 	/** The add-ons' ids in the order they are asked. */

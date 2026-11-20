@@ -613,10 +613,9 @@ impl Addon {
         })
     }
 
-    /// Whether it is part of Stash itself (a source built in, or one of Stash's own add-ons), not an add-on the
-    /// listener added.
+    /// Whether it is part of Stash itself, not an add-on the listener added.
     pub fn is_built_in(&self) -> bool {
-        self.built_in.is_some() || self.signer.is_some()
+        self.built_in.is_some()
     }
 
     /// Where its link is: as near as it may send Stash.

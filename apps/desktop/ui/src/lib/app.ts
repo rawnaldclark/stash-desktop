@@ -917,6 +917,7 @@ const sources: SourcesAPI = {
 	status: ro(addonStore),
 	reload: () => loadAddons(),
 	add: async (link) => addonStore.set(await core.addAddon(link)),
+	addTidal: async () => addonStore.set(await core.addStashTidal()),
 	remove: async (id) => addonStore.set(await core.removeAddon(id)),
 	setEnabled: async (id, on) => addonStore.set(await core.setAddonEnabled(id, on)),
 	order: async (ids) => addonStore.set(await core.orderAddons(ids)),

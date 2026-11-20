@@ -1,18 +1,17 @@
-//! Stash's own Tidal: lossless and Hi-Res from Tidal through Stash's Tidal add-on, for everyone, with the same free
-//! allowance a day as on the phone, and unlimited for supporters.
+//! Stash's own Tidal: lossless and Hi-Res from Tidal through Stash's Tidal add-on, an add-on the listener chooses to
+//! add (Settings › Add-ons offers it), with the same free allowance a day as on the phone, unlimited for supporters.
 //!
-//! The add-on is found through Stash's signed config (see [`stash_core::first_party`]), whose address and key are given
-//! when Stash is built (`STASH_LOSSLESS_CONFIG_URL`, `STASH_LOSSLESS_CONFIG_PUBKEY`); a build without them has no Stash
-//! Tidal. The config is read at start and every 6 hours (15 minutes after a failure), and kept, so Stash's Tidal is
-//! there offline too. The add-on's link carries Stash's access token: it is kept here and never shown.
+//! Until it is added, nothing is asked of Stash's servers. Adding it reads Stash's signed config (see
+//! [`stash_core::first_party`]), whose address and key are given when Stash is built (`STASH_LOSSLESS_CONFIG_URL`,
+//! `STASH_LOSSLESS_CONFIG_PUBKEY`; a build without them does not offer it), and the add-on the config names. It is then
+//! one of the listener's add-ons, kept in the add-ons table under [`ID`] like the others: in their order, switched off
+//! or removed as they choose. Its row's link is [`LINK`], not the add-on's: that carries Stash's access token, and is
+//! kept apart, never shown. While it is added, the config is read again every 6 hours (15 minutes after a failure).
 //!
 //! Every song played or saved from it is signed with this computer's own install id, which the add-on counts each
 //! day; a supporter's token (claimed in Settings, see [`crate::away`]) goes with it and makes it unlimited. What the
 //! add-on last said of the allowance is kept, and while it is spent Stash's Tidal is not asked for songs: they come from
 //! the listener's other sources until the day turns over.
-//!
-//! It is one of the listener's sources, after the add-ons they added and their Mornye extensions, before YouTube Music;
-//! it can be switched off, not removed.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -26,12 +25,14 @@ use stash_core::addons::{Addon, Code, Signer};
 use stash_core::first_party::{self, Config, Signing};
 use tiny_http::{Method, Request};
 
-use crate::serve::{Reply, State, reply_json};
+use crate::serve::{Reply, State, offline, refuse, reply_json};
 
-/// Its id among the listener's sources (not the add-on's own, which another add-on could share).
+/// Its id among the listener's add-ons (not the add-on's own, which another add-on could share).
 pub(crate) const ID: &str = "stash.tidal";
-/// "1" while the listener has it switched off.
-pub(crate) const OFF: &str = "tidal.off";
+/// What its row in the add-ons table keeps as its link.
+pub(crate) const LINK: &str = "stash:tidal";
+/// What an added Stash's Tidal says while the add-on it names is not at hand.
+pub(crate) const NOT_AT_HAND: &str = "Stash's Tidal is not available right now";
 /// The config as it came (its signature was checked before it was kept).
 const CONFIG: &str = "stash.config";
 /// The add-on's link and manifest, as last read.
@@ -95,8 +96,20 @@ pub(crate) struct Tidal {
     /// Why it cannot be used, when it cannot.
     trouble: Mutex<Option<String>>,
     look_now: AtomicBool,
+    /// When the config is read again.
+    next_look: Mutex<Instant>,
     ask_allowance: AtomicBool,
     allowance_asked: Mutex<Option<Instant>>,
+}
+
+/// Whether the listener has added Stash's Tidal.
+fn added(state: &State) -> bool {
+    state
+        .addons
+        .read()
+        .unwrap()
+        .iter()
+        .any(|a| a.stored.id == ID)
 }
 
 fn setting(library: &Library, key: &str) -> Option<String> {
@@ -133,6 +146,7 @@ impl Tidal {
             found: RwLock::new(found),
             trouble: Mutex::default(),
             look_now: AtomicBool::new(true),
+            next_look: Mutex::new(Instant::now()),
             ask_allowance: AtomicBool::new(true),
             allowance_asked: Mutex::default(),
         }
@@ -144,7 +158,7 @@ impl Tidal {
         self.look_now.store(true, Ordering::Relaxed);
     }
 
-    /// Whether this build can have Stash's Tidal at all.
+    /// Whether this build offers Stash's Tidal at all.
     fn available(&self) -> bool {
         self.from.read().unwrap().is_some()
     }
@@ -172,19 +186,27 @@ impl Tidal {
         }
     }
 
-    /// Reads the config, and the add-on it names. Answers whether the config was read, and whether the add-on as the
-    /// listener's sources hold it changed.
-    fn look(&self, library: &Mutex<Library>) -> (bool, bool) {
+    /// Reads the config, and the add-on it names (kept for the add-ons table's row, when there is one). Answers whether
+    /// the add-on changed.
+    fn look(&self, library: &Mutex<Library>) -> bool {
         let Some((url, key)) = self.from.read().unwrap().clone() else {
-            return (false, false);
+            return false;
         };
+        let (read, changed) = self.read(library, &url, &key);
+        *self.next_look.lock().unwrap() =
+            Instant::now() + if read { LOOK_EVERY } else { LOOK_AGAIN };
+        changed
+    }
+
+    /// [`Tidal::look`]'s reading: whether the config was read, and whether the add-on changed.
+    fn read(&self, library: &Mutex<Library>, url: &str, key: &str) -> (bool, bool) {
         let floor = self
             .config
             .read()
             .unwrap()
             .as_ref()
             .map_or(0, |c| c.updated_at);
-        let (text, config) = match first_party::fetch(&url, &key, floor) {
+        let (text, config) = match first_party::fetch(url, key, floor) {
             Ok(read) => read,
             Err(why) => {
                 // What was read before still holds; the trouble is said only when there is nothing.
@@ -240,10 +262,55 @@ impl Tidal {
                 .as_ref()
                 .and_then(|f| serde_json::to_string(f).ok())
                 .unwrap_or_default();
-            let _ = library.lock().unwrap().set_setting(FOUND, &kept);
+            let mut library = library.lock().unwrap();
+            let _ = library.set_setting(FOUND, &kept);
+            // The listing keeps the add-on's manifest as it now is (its place and switch stay).
+            if let Some(found) = &found
+                && library
+                    .addons()
+                    .is_ok_and(|kept| kept.iter().any(|a| a.id == ID))
+            {
+                let _ = library.save_addon(ID, LINK, &found.manifest);
+            }
+            drop(library);
             *self.found.write().unwrap() = found;
         }
         (true, changed)
+    }
+
+    /// Adds Stash's Tidal to the listener's add-ons (last, as an add-on added by its link goes): reads the config now,
+    /// and the add-on it names.
+    fn add(&self, state: &State) -> Result<Reply> {
+        if !self.available() {
+            return Ok(refuse(404, "this copy of Stash does not offer Tidal"));
+        }
+        if offline(state) {
+            return Ok(refuse(
+                409,
+                "Stash is offline: Tidal is found online when it is added",
+            ));
+        }
+        self.look(&state.library);
+        let Some(found) = self.found.read().unwrap().clone() else {
+            let why = self
+                .trouble
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| NOT_AT_HAND.to_string());
+            return Ok(refuse(502, &why));
+        };
+        state
+            .library
+            .lock()
+            .unwrap()
+            .save_addon(ID, LINK, &found.manifest)?;
+        state.reload_addons()?;
+        state.lacks.forget_addon(ID);
+        state.saving.release();
+        state.saving.ring();
+        self.ask_allowance.store(true, Ordering::Relaxed);
+        Ok(state.addons_reply())
     }
 
     /// Asks the add-on how the listener's allowance stands (it is told with every song too).
@@ -268,8 +335,16 @@ impl Tidal {
 
     /// How it stands, for Settings.
     fn status(&self, state: &State) -> Value {
-        let on = setting(&state.library.lock().unwrap(), OFF).as_deref() != Some("1");
-        let ready = self.source().is_some();
+        let row = state
+            .addons
+            .read()
+            .unwrap()
+            .iter()
+            .find(|a| a.stored.id == ID)
+            .cloned();
+        let added = row.is_some();
+        let on = row.as_ref().is_some_and(|r| r.stored.enabled);
+        let ready = added && self.source().is_some();
         // Asked again when Settings looks and it was not asked for a while.
         let stale = self
             .allowance_asked
@@ -288,9 +363,10 @@ impl Tidal {
         });
         json!({
             "available": self.available(),
+            "added": added,
             "ready": ready,
             "on": on,
-            "trouble": if ready { None } else { self.trouble.lock().unwrap().clone() },
+            "trouble": if ready || !added { None } else { self.trouble.lock().unwrap().clone() },
             "allowance": allowance,
             "supporter": self.signing.entitled(),
             "can_claim": state.away.can_claim(),
@@ -299,34 +375,35 @@ impl Tidal {
     }
 }
 
-/// Reads the config (and the add-on) as it falls due, and the allowance when it is asked for, until Stash stops.
+/// While the listener has Stash's Tidal added: reads the config (and the add-on) as it falls due, and the allowance
+/// when it is asked for, until Stash stops. Nothing is asked of Stash's servers while it is not added.
 pub(crate) fn run(state: &State, stop: &AtomicBool) {
     let tidal = &state.tidal;
-    let mut next_look = Instant::now();
     let mut refused_at: Option<Instant> = None;
     while !stop.load(Ordering::Relaxed) {
         let online = !state.offline.load(Ordering::Relaxed);
+        let added = added(state);
         if tidal.signing.take_refused() && refused_at.is_none_or(|at| at.elapsed() >= REFUSED_LOOK)
         {
             refused_at = Some(Instant::now());
             tidal.look_now.store(true, Ordering::Relaxed);
         }
+        let due = Instant::now() >= *tidal.next_look.lock().unwrap();
         if online
+            && added
             && tidal.available()
-            && (tidal.look_now.swap(false, Ordering::Relaxed) || Instant::now() >= next_look)
+            && (tidal.look_now.swap(false, Ordering::Relaxed) || due)
+            // The add-on changed: the listener's add-ons are read again.
+            && tidal.look(&state.library)
         {
-            let (read, changed) = tidal.look(&state.library);
-            next_look = Instant::now() + if read { LOOK_EVERY } else { LOOK_AGAIN };
-            if changed {
-                if let Err(e) = state.reload_addons() {
-                    eprintln!("Stash's Tidal could not be listed: {e:#}");
-                }
-                state.lacks.forget_addon(ID);
-                state.saving.ring();
-                tidal.ask_allowance.store(true, Ordering::Relaxed);
+            if let Err(e) = state.reload_addons() {
+                eprintln!("Stash's Tidal could not be listed: {e:#}");
             }
+            state.lacks.forget_addon(ID);
+            state.saving.ring();
+            tidal.ask_allowance.store(true, Ordering::Relaxed);
         }
-        if online && tidal.ask_allowance.swap(false, Ordering::Relaxed) {
+        if online && added && tidal.ask_allowance.swap(false, Ordering::Relaxed) {
             tidal.ask(state);
         }
         for _ in 0..4 {
@@ -342,6 +419,7 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
 pub(crate) fn route(state: &State, request: &mut Request, path: &str) -> Result<Option<Reply>> {
     match (request.method(), path) {
         (Method::Get, "/api/tidal") => Ok(Some(reply_json(200, state.tidal.status(state)))),
+        (Method::Post, "/api/tidal/add") => state.tidal.add(state).map(Some),
         _ => Ok(None),
     }
 }

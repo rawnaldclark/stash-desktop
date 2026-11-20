@@ -199,6 +199,16 @@ impl Servers {
                     "/lossless.json" => tiny_http::Response::from_string(config.clone()),
                     "/lossless.json.sig" => tiny_http::Response::from_string(signature.clone()),
                     p if p.starts_with("/audio/") => tiny_http::Response::from_data(audio.clone()),
+                    // Another add-on, calling itself by Stash's Tidal's name.
+                    "/impostor/manifest.json" => answer(
+                        200,
+                        json!({
+                            "stash": 1, "id": "stash.tidal", "name": "Tidal", "version": "1.0.0", "kind": "server",
+                            "resources": ["search", "stream"],
+                            "stream": { "cors": false, "manifests": ["none"], "tiers": ["lossless"] }
+                        }),
+                        vec![],
+                    ),
                     p if !p.starts_with(&v1) => answer(
                         404,
                         json!({ "error": { "code": "not_found", "message": "" } }),
@@ -347,15 +357,31 @@ impl Client {
     }
 
     fn post(&self, path: &str, body: Value) -> Value {
+        let (status, answer) = self.post_any(path, body);
+        assert_eq!(status, 200, "{path}: {answer}");
+        answer
+    }
+
+    fn post_any(&self, path: &str, body: Value) -> (u16, Value) {
         let mut response = self
             .agent
             .post(&format!("{}{path}", self.base))
             .send_json(body)
             .unwrap();
-        let status = response.status().as_u16();
-        let answer = response.body_mut().read_json().unwrap_or(Value::Null);
-        assert_eq!(status, 200, "{path}: {answer}");
-        answer
+        (
+            response.status().as_u16(),
+            response.body_mut().read_json().unwrap_or(Value::Null),
+        )
+    }
+
+    /// Stash's Tidal among the listener's add-ons, if it is.
+    fn listed(&self) -> Option<Value> {
+        self.get("/api/addons").1["addons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == "stash.tidal")
+            .cloned()
     }
 
     fn upload(&self, path: &str, bytes: &[u8]) -> u16 {
@@ -443,9 +469,26 @@ fn like(client: &Client, n: usize) {
     assert_eq!(client.upload("/api/import", file.as_bytes()), 200);
 }
 
+/// Adds Stash's Tidal, as Settings' Add button does, and waits for its allowance.
+fn add(client: &Client) -> Value {
+    let added = client.post("/api/tidal/add", json!({}));
+    assert!(
+        added["addons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["id"] == "stash.tidal"),
+        "{added}"
+    );
+    client.until(
+        "/api/tidal",
+        "Stash's Tidal ready, its allowance known",
+        |t| t["ready"] == true && t["allowance"].is_object(),
+    )
+}
+
 #[test]
-fn stash_s_tidal_is_found_through_the_signed_config_and_signed_songs_count_against_the_free_allowance()
- {
+fn stash_s_tidal_is_added_by_the_listener_and_signed_songs_count_against_the_free_allowance() {
     let Some(engine) = engine() else {
         eprintln!("skipped: no libmpv");
         return;
@@ -453,37 +496,49 @@ fn stash_s_tidal_is_found_through_the_signed_config_and_signed_songs_count_again
     let servers = Servers::start(false);
     let (client, dir) = core("free", Some(&servers), None, Some(&engine));
 
-    // Found through the config, listed among the sources as part of Stash: never its link or Stash's token.
-    let tidal = client.until(
-        "/api/tidal",
-        "Stash's Tidal ready, its allowance known",
-        |t| t["ready"] == true && t["allowance"]["limit"] == json!(FREE),
+    // Offered, not there: until the listener adds it, nothing is asked of Stash's servers.
+    let tidal = client.get("/api/tidal").1;
+    assert_eq!(
+        (tidal["available"].clone(), tidal["added"].clone()),
+        (json!(true), json!(false)),
+        "{tidal}"
     );
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(client.listed().is_none());
+    assert!(
+        servers.seen.lock().unwrap().paths.is_empty(),
+        "Stash's servers were asked before it was added"
+    );
+
+    // Added: found through the config, one of the listener's add-ons, never its link or Stash's token.
+    let tidal = add(&client);
     assert_eq!(
         (
-            tidal["available"].clone(),
+            tidal["added"].clone(),
             tidal["on"].clone(),
-            tidal["supporter"].clone()
+            tidal["supporter"].clone(),
+            tidal["allowance"]["limit"].clone(),
+            tidal["allowance"]["used"].clone(),
         ),
-        (json!(true), json!(true), json!(false))
+        (
+            json!(true),
+            json!(true),
+            json!(false),
+            json!(FREE),
+            json!(0)
+        ),
+        "{tidal}"
     );
-    assert_eq!(tidal["allowance"]["used"], json!(0), "{tidal}");
     let listed = client.text("/api/addons");
-    let sources: Value = serde_json::from_str(&listed).unwrap();
-    let row = sources["addons"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| a["id"] == "stash.tidal")
-        .cloned()
-        .unwrap();
+    let row = client.listed().unwrap();
     assert_eq!(
         (
             row["name"].clone(),
             row["builtIn"].clone(),
+            row["byStash"].clone(),
             row["host"].clone()
         ),
-        (json!("Tidal"), json!(true), Value::Null),
+        (json!("Tidal"), json!(false), json!(true), Value::Null),
         "{row}"
     );
     for secret in [TOKEN, "tok%20en", RELAY_KEY, servers.base.as_str()] {
@@ -492,20 +547,11 @@ fn stash_s_tidal_is_found_through_the_signed_config_and_signed_songs_count_again
             "{secret} is shown"
         );
     }
-    // It names itself as Stash; it is not removed or changed like an add-on the listener added.
+    // It names itself as Stash. Stash keeps it up to date: there is no new version to check for.
     let agents = servers.seen.lock().unwrap().agents.clone();
     assert!(agents.iter().all(|a| a.starts_with("Stash/")), "{agents:?}");
-    let mut refused = client
-        .agent
-        .post(&format!("{}/api/addons/remove", client.base))
-        .send_json(json!({ "id": "stash.tidal" }))
-        .unwrap();
-    assert_eq!(
-        refused.status().as_u16(),
-        400,
-        "{}",
-        refused.body_mut().read_to_string().unwrap_or_default()
-    );
+    let (status, _) = client.post_any("/api/addons/check", json!({ "id": "stash.tidal" }));
+    assert_eq!(status, 400);
 
     // Liked songs play from it, each one signed (at its own clock, once it said the clocks differ) and counted.
     like(&client, 3);
@@ -543,12 +589,15 @@ fn stash_s_tidal_is_found_through_the_signed_config_and_signed_songs_count_again
     assert_eq!(seen.counted.len(), 1, "one install");
     drop(seen);
 
-    // Switched off, it is not asked.
+    // Switched off and removed as any add-on is.
     client.post(
         "/api/addons/enabled",
         json!({ "id": "stash.tidal", "enabled": false }),
     );
     assert_eq!(client.get("/api/tidal").1["on"], false);
+    client.post("/api/addons/remove", json!({ "id": "stash.tidal" }));
+    assert!(client.listed().is_none());
+    assert_eq!(client.get("/api/tidal").1["added"], false);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -560,9 +609,7 @@ fn a_supporter_plays_without_a_limit() {
     };
     let servers = Servers::start(false);
     let (client, dir) = core("supporter", Some(&servers), Some(SUPPORTER), Some(&engine));
-    let tidal = client.until("/api/tidal", "Stash's Tidal ready", |t| {
-        t["ready"] == true && t["allowance"].is_object()
-    });
+    let tidal = add(&client);
     assert_eq!(
         (
             tidal["supporter"].clone(),
@@ -586,6 +633,7 @@ fn a_supporter_plays_without_a_limit() {
 
 #[test]
 fn without_a_config_signed_by_stash_there_is_no_stash_tidal() {
+    let servers = Servers::start(true);
     // A build that names no config.
     let (client, dir) = core("none", None, None, None);
     let tidal = client.get("/api/tidal").1;
@@ -594,24 +642,30 @@ fn without_a_config_signed_by_stash_there_is_no_stash_tidal() {
         (json!(false), json!(false)),
         "{tidal}"
     );
-    let sources = client.get("/api/addons").1;
-    assert!(!sources.to_string().contains("stash.tidal"), "{sources}");
+    assert_eq!(client.post_any("/api/tidal/add", json!({})).0, 404);
+    assert!(client.listed().is_none());
+    // An add-on that calls itself by Stash's Tidal's name is not added by its link.
+    let (status, refused) = client.post_any(
+        "/api/addons",
+        json!({ "link": format!("{}/impostor/manifest.json", servers.base) }),
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert!(client.listed().is_none());
+    servers.seen.lock().unwrap().paths.clear();
     let _ = std::fs::remove_dir_all(&dir);
 
-    // A config whose signature is not Stash's key's is not believed.
-    let servers = Servers::start(true);
+    // A config whose signature is not Stash's key's is not believed: Tidal is not added.
     let (client, dir) = core("tampered", Some(&servers), None, None);
-    let tidal = client.until("/api/tidal", "the config refused", |t| {
-        t["trouble"].is_string()
-    });
-    assert_eq!(tidal["ready"], false, "{tidal}");
+    let (status, refused) = client.post_any("/api/tidal/add", json!({}));
+    assert_eq!(status, 502, "{refused}");
     assert!(
-        tidal["trouble"]
+        refused["error"]["message"]
             .as_str()
             .unwrap()
             .contains("not signed right"),
-        "{tidal}"
+        "{refused}"
     );
+    assert!(client.listed().is_none());
     assert!(
         !servers
             .seen

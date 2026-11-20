@@ -406,6 +406,8 @@ export type AddonInfo = {
 	problem: string | null;
 	/** Part of Stash itself (YouTube Music): asked after the listener's add-ons; switched off, never removed. */
 	builtIn?: boolean;
+	/** One of Stash's own add-ons (Tidal), added from Stash's list: Stash keeps it up to date, its server is not shown. */
+	byStash?: boolean;
 };
 
 /** A track an add-on found. */
@@ -434,6 +436,26 @@ type Listed = { addons: AddonInfo[] };
 export const addons = () => get<Listed>('/api/addons').then((r) => r.addons);
 /** Adds the add-on at `link` (the address of its manifest). */
 export const addAddon = (link: string) => post<Listed>('/api/addons', { link }).then((r) => r.addons);
+/** Adds Stash's own Tidal (the core reads Stash's config and the add-on it names). */
+export const addStashTidal = () => post<Listed>('/api/tidal/add', {}).then((r) => r.addons);
+/** Stash's own Tidal's id among the add-ons. */
+export const STASH_TIDAL = 'stash.tidal';
+/** How Stash's own Tidal stands (`GET /api/tidal`). */
+export type TidalStatus = {
+	/** This build offers it. */
+	available: boolean;
+	/** The listener added it. */
+	added: boolean;
+	/** Added, and the add-on is at hand. */
+	ready: boolean;
+	on: boolean;
+	trouble: string | null;
+	/** Today's plays, as the add-on last said; `limit` null: unlimited. */
+	allowance: { used: number; limit: number | null; resets_at_ms: number } | null;
+	supporter: boolean;
+	can_claim: boolean;
+	claiming: string | null;
+};
 export const removeAddon = (id: string) => post<Listed>('/api/addons/remove', { id }).then((r) => r.addons);
 export const setAddonEnabled = (id: string, enabled: boolean) => post<Listed>('/api/addons/enabled', { id, enabled }).then((r) => r.addons);
 export const orderAddons = (ids: string[]) => post<Listed>('/api/addons/order', { ids }).then((r) => r.addons);

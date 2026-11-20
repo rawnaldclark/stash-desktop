@@ -213,6 +213,8 @@ impl Loaded {
             "problem": self.addon.as_ref().err(),
             // Part of Stash itself (YouTube Music): it can be switched off, not removed or checked.
             "builtIn": self.addon.as_ref().is_ok_and(Addon::is_built_in),
+            // One of Stash's own add-ons, which the listener added from Stash's list: Stash keeps it up to date.
+            "byStash": self.stored.id == crate::tidal::ID,
         })
     }
 }
@@ -242,19 +244,17 @@ const YOUTUBE_OFF: &str = "youtube.off";
 const YOUTUBE_VISITOR: &str = "youtube.visitor";
 const BUILT_IN_STAYS: &str =
     "YouTube Music is part of Stash: it can be switched off, not removed or changed";
-const TIDAL_STAYS: &str =
-    "Stash's Tidal is part of Stash: it can be switched off, not removed or changed";
 
 /// The listener's cloud storage first (a song a file of theirs holds plays from that file), then their add-ons in their
-/// order, then their Mornye extensions, then Stash's own Tidal (when this build has it), then YouTube Music (when this
-/// core has it): what the listener chose comes first, lossless before YouTube, and what the others lack is found on
-/// YouTube.
+/// order (Stash's own Tidal among them when they added it: `tidal`, the add-on as it now is), then their Mornye
+/// extensions, then YouTube Music (when this core has it): what the listener chose comes first, and what the others
+/// lack is found on YouTube.
 fn load_addons(
     library: &Library,
     youtube: Option<&BuiltInYouTube>,
     mornye: Option<&Arc<crate::mornye::Mornye>>,
     cloud: Option<Vec<Addon>>,
-    tidal: Option<Addon>,
+    mut tidal: Option<Addon>,
 ) -> Result<Vec<Arc<Loaded>>> {
     let mut loaded: Vec<Arc<Loaded>> = Vec::new();
     for addon in cloud.unwrap_or_default() {
@@ -274,12 +274,17 @@ fn load_addons(
         // An add-on kept under YouTube's own id (from before it was built in) gives way to it.
         .filter(|stored| youtube.is_none() || stored.id != youtube::ID)
         .filter(|stored| !stored.id.starts_with(crate::mornye::PREFIX))
-        .filter(|stored| stored.id != crate::tidal::ID)
         // So does one under a cloud provider's (its songs' names are the provider's files).
         .filter(|stored| stash_core::cloud::Kind::from_id(&stored.id).is_none())
         .map(|stored| {
-            let addon =
-                Addon::from_stored(&stored.link, &stored.manifest).map_err(|e| e.in_words());
+            // Stash's Tidal: its row keeps no link of its own (the add-on's carries Stash's access token).
+            let addon = if stored.id == crate::tidal::ID {
+                tidal
+                    .take()
+                    .ok_or_else(|| crate::tidal::NOT_AT_HAND.to_string())
+            } else {
+                Addon::from_stored(&stored.link, &stored.manifest).map_err(|e| e.in_words())
+            };
             Arc::new(Loaded { stored, addon })
         })
         .collect();
@@ -291,18 +296,6 @@ fn load_addons(
                 link: String::new(),
                 manifest: addon.manifest_json(),
                 enabled,
-            },
-            addon: Ok(addon),
-        }));
-    }
-    // Its link carries Stash's access token: it is not kept with the listing.
-    if let Some(addon) = tidal {
-        loaded.push(Arc::new(Loaded {
-            stored: StoredAddon {
-                id: crate::tidal::ID.to_string(),
-                link: String::new(),
-                manifest: addon.manifest_json(),
-                enabled: library.setting(crate::tidal::OFF)?.as_deref() != Some("1"),
             },
             addon: Ok(addon),
         }));
@@ -1271,7 +1264,7 @@ impl State {
         Ok(())
     }
 
-    fn addons_reply(&self) -> Reply {
+    pub(crate) fn addons_reply(&self) -> Reply {
         reply_json(200, self.addons_value())
     }
 
@@ -1310,8 +1303,17 @@ impl Core {
             .to_ip()
             .map(|a| a.port())
             .unwrap_or(options.port);
-        let addons: Registry =
-            Arc::new(RwLock::new(load_addons(&library, None, None, None, None)?));
+        let mut library = library;
+        crate::radio::prune(&mut library);
+        // Stash's own Tidal, as this computer kept it.
+        let tidal = crate::tidal::Tidal::open(&mut library);
+        let addons: Registry = Arc::new(RwLock::new(load_addons(
+            &library,
+            None,
+            None,
+            None,
+            tidal.source(),
+        )?));
         // Copies of songs as they were played sit next to the library, in a folder of their own.
         let relays = Arc::new(crate::relay::Relays::new(
             options
@@ -1321,10 +1323,6 @@ impl Core {
                 .join("Played"),
             &library,
         ));
-        let mut library = library;
-        crate::radio::prune(&mut library);
-        // Stash's own Tidal, as this computer kept it (listed with the rest once the core is up).
-        let tidal = crate::tidal::Tidal::open(&mut library);
         let library = Arc::new(Mutex::new(library));
         let lacks = Arc::new(Lacks::default());
         let scrobbling = Arc::new(crate::scrobbling::Scrobbling::default());
@@ -2599,24 +2597,21 @@ fn addons_route(
         }
         return Ok(Some(state.addons_reply()));
     }
-    // YouTube Music and Stash's Tidal are not add-ons the listener added: they are switched on and off, and nothing else.
-    let tidal = id == crate::tidal::ID;
-    if (state.youtube.is_some() && id == youtube::ID) || tidal {
+    // Stash keeps its own Tidal up to date: there is no new version of it to ask its link for.
+    if id == crate::tidal::ID && matches!(path, "/api/addons/check" | "/api/addons/update") {
+        return Ok(Some(refuse(400, "Stash keeps its Tidal up to date itself")));
+    }
+    // YouTube Music is not an add-on the listener added: it is switched on and off, and nothing else.
+    if state.youtube.is_some() && id == youtube::ID {
         if path != "/api/addons/enabled" {
-            return Ok(Some(refuse(
-                400,
-                if tidal { TIDAL_STAYS } else { BUILT_IN_STAYS },
-            )));
+            return Ok(Some(refuse(400, BUILT_IN_STAYS)));
         }
         let enabled = body.get("enabled").and_then(Value::as_bool).unwrap_or(true);
-        state.library.lock().unwrap().set_setting(
-            if tidal {
-                crate::tidal::OFF
-            } else {
-                YOUTUBE_OFF
-            },
-            if enabled { "0" } else { "1" },
-        )?;
+        state
+            .library
+            .lock()
+            .unwrap()
+            .set_setting(YOUTUBE_OFF, if enabled { "0" } else { "1" })?;
         state.reload_addons()?;
         if enabled {
             state.lacks.forget_addon(id);
@@ -2654,6 +2649,12 @@ fn addons_route(
                 return Ok(Some(refuse(
                     400,
                     "that add-on calls itself by the name of Stash's own YouTube Music, and cannot be added",
+                )));
+            }
+            if addon.manifest.id == crate::tidal::ID {
+                return Ok(Some(refuse(
+                    400,
+                    "that add-on calls itself by the name of Stash's own Tidal, and cannot be added",
                 )));
             }
             state.offered.lock().unwrap().remove(&addon.manifest.id);
