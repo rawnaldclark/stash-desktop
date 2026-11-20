@@ -450,6 +450,7 @@ impl Mornye {
             duration_ms,
             expires_at: None,
             encrypted: None,
+            quota: None,
         }
     }
 

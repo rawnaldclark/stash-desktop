@@ -1,10 +1,12 @@
 <!-- Settings › Sources: where music beyond the listener's own files comes from. Add-ons (each added by its link; the order
-     is the listener's), YouTube Music (the account, restricted songs), and the Mornye extensions. -->
+     is the listener's), Stash's own Tidal (its daily allowance), YouTube Music (the account, restricted songs), and the
+     Mornye extensions. -->
 <script lang="ts">
 	import { sources } from '../../lib/app';
 	import * as core from '../../lib/core';
 	import { trouble } from '../../lib/desktop/folders.svelte';
 	import MornyeExtensions from '../../lib/desktop/MornyeExtensions.svelte';
+	import StashTidal from '../../lib/desktop/StashTidal.svelte';
 	import TubeAccount from '../../lib/desktop/TubeAccount.svelte';
 	import TubeFallback from '../../lib/desktop/TubeFallback.svelte';
 	import Icon from '../../lib/ui/Icon.svelte';
@@ -167,6 +169,8 @@
 		</div>
 	</div>
 </section>
+
+<StashTidal />
 
 <section class="set-part" id="youtube" aria-labelledby="h-youtube">
 	<h3 class="set-h" id="h-youtube">YouTube Music</h3>

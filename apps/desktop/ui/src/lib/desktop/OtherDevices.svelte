@@ -6,6 +6,7 @@
 	import { onMount } from 'svelte';
 	import * as core from '../core';
 	import { ui } from '../ui/state.svelte';
+	import SupporterClaim from './SupporterClaim.svelte';
 
 	type Device = { id: string; name: string; user: string; password: string; added_ms: number; seen_ms: number | null };
 	type Lan = {
@@ -34,8 +35,6 @@
 	let name = $state('');
 	let portText = $state('');
 	let editingPort = $state(false);
-	let email = $state('');
-	let code = $state('');
 	let renewing = $state(false);
 
 	async function ask() {
@@ -77,13 +76,6 @@
 
 	const setLan = (on: boolean) => act(() => core.post('/api/lan', { on }));
 	const setAway = (on: boolean) => act(() => core.post('/api/away', { on }));
-	const sendCode = () => act(() => core.post('/api/away/claim/start', { email: email.trim() }));
-	const unlock = () => act(async () => {
-		await core.post('/api/away/claim/verify', { code: code.trim() });
-		code = '';
-		await core.post('/api/away', { on: true });
-	});
-	const cancelClaim = () => act(() => core.post('/api/away/claim/cancel', {}));
 	const newAddress = () => act(() => core.post('/api/away/new-address', {})).then(() => (renewing = false));
 	const fetchFfmpeg = () => act(() => core.mornyeFetchFfmpeg());
 
@@ -168,21 +160,8 @@
 				{/if}
 			</div>
 			{#if !away.supporter && away.can_claim}
-				<div class="set-row od-sub">
-					{#if away.claiming}
-						<form class="od-add" onsubmit={(e) => { e.preventDefault(); void unlock(); }}>
-							<label class="set-sub" for="od-code">Enter the code sent to {away.claiming}</label>
-							<input id="od-code" class="od-input od-port" bind:value={code} maxlength="12" autocomplete="one-time-code" inputmode="numeric" />
-							<button type="submit" class="btn" disabled={busy || !code.trim()}>Unlock</button>
-							<button type="button" class="btn ghost" disabled={busy} onclick={cancelClaim}>Use another email</button>
-						</form>
-					{:else}
-						<form class="od-add" onsubmit={(e) => { e.preventDefault(); void sendCode(); }}>
-							<label class="set-sub" for="od-email">Already a supporter? Enter the email you used on Ko‑fi</label>
-							<input id="od-email" class="od-input" type="email" bind:value={email} maxlength="254" autocomplete="email" placeholder="you@example.com" />
-							<button type="submit" class="btn" disabled={busy || !email.includes('@')}>Send code</button>
-						</form>
-					{/if}
+				<div class="set-row set-col od-sub">
+					<SupporterClaim claiming={away.claiming} onchange={ask} onunlocked={() => core.post('/api/away', { on: true })} />
 				</div>
 			{/if}
 			{#if away.on && away.supporter && away.url}

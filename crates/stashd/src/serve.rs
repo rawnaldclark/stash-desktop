@@ -242,15 +242,19 @@ const YOUTUBE_OFF: &str = "youtube.off";
 const YOUTUBE_VISITOR: &str = "youtube.visitor";
 const BUILT_IN_STAYS: &str =
     "YouTube Music is part of Stash: it can be switched off, not removed or changed";
+const TIDAL_STAYS: &str =
+    "Stash's Tidal is part of Stash: it can be switched off, not removed or changed";
 
 /// The listener's cloud storage first (a song a file of theirs holds plays from that file), then their add-ons in their
-/// order, then their Mornye extensions, then YouTube Music (when this core has it): what the add-ons have comes first,
-/// and what they lack is found on YouTube.
+/// order, then their Mornye extensions, then Stash's own Tidal (when this build has it), then YouTube Music (when this
+/// core has it): what the listener chose comes first, lossless before YouTube, and what the others lack is found on
+/// YouTube.
 fn load_addons(
     library: &Library,
     youtube: Option<&BuiltInYouTube>,
     mornye: Option<&Arc<crate::mornye::Mornye>>,
     cloud: Option<Vec<Addon>>,
+    tidal: Option<Addon>,
 ) -> Result<Vec<Arc<Loaded>>> {
     let mut loaded: Vec<Arc<Loaded>> = Vec::new();
     for addon in cloud.unwrap_or_default() {
@@ -270,6 +274,7 @@ fn load_addons(
         // An add-on kept under YouTube's own id (from before it was built in) gives way to it.
         .filter(|stored| youtube.is_none() || stored.id != youtube::ID)
         .filter(|stored| !stored.id.starts_with(crate::mornye::PREFIX))
+        .filter(|stored| stored.id != crate::tidal::ID)
         // So does one under a cloud provider's (its songs' names are the provider's files).
         .filter(|stored| stash_core::cloud::Kind::from_id(&stored.id).is_none())
         .map(|stored| {
@@ -286,6 +291,18 @@ fn load_addons(
                 link: String::new(),
                 manifest: addon.manifest_json(),
                 enabled,
+            },
+            addon: Ok(addon),
+        }));
+    }
+    // Its link carries Stash's access token: it is not kept with the listing.
+    if let Some(addon) = tidal {
+        loaded.push(Arc::new(Loaded {
+            stored: StoredAddon {
+                id: crate::tidal::ID.to_string(),
+                link: String::new(),
+                manifest: addon.manifest_json(),
+                enabled: library.setting(crate::tidal::OFF)?.as_deref() != Some("1"),
             },
             addon: Ok(addon),
         }));
@@ -556,11 +573,15 @@ pub(crate) fn through_addons<T>(
             lacks.missed(id, addon_id, believed);
         }
     };
+    // An add-on whose allowance is spent (Stash's Tidal, until the day turns over) is not asked: the others are.
     let addons: Vec<Arc<Loaded>> = registry
         .read()
         .unwrap()
         .iter()
-        .filter(|a| a.usable().is_some_and(&can))
+        .filter(|a| {
+            a.usable()
+                .is_some_and(|addon| addon.spent_for().is_none() && can(addon))
+        })
         .cloned()
         .collect();
     // No add-on to ask (none added, or switched off): not the song's own trouble.
@@ -1103,6 +1124,8 @@ pub(crate) struct State {
     pub(crate) lan: crate::lan::Lan,
     /// The library away from home, through Stash's home relay (see [`crate::away`]).
     pub(crate) away: crate::away::Away,
+    /// Stash's own Tidal, when this build has it (see [`crate::tidal`]).
+    pub(crate) tidal: crate::tidal::Tidal,
     /// Opens Google's sign-in for YouTube in a window, when the core runs inside one.
     pub(crate) sign_in: Option<SignInShell>,
 }
@@ -1236,11 +1259,13 @@ impl State {
     pub(crate) fn reload_addons(&self) -> Result<()> {
         // Read before the library is held: the cloud reads its accounts from it.
         let cloud = self.cloud.as_ref().map(|c| c.sources());
+        let tidal = self.tidal.source();
         let loaded = load_addons(
             &self.library.lock().unwrap(),
             self.youtube.as_ref(),
             self.mornye.as_ref(),
             cloud,
+            tidal,
         )?;
         *self.addons.write().unwrap() = loaded;
         Ok(())
@@ -1285,7 +1310,8 @@ impl Core {
             .to_ip()
             .map(|a| a.port())
             .unwrap_or(options.port);
-        let addons: Registry = Arc::new(RwLock::new(load_addons(&library, None, None, None)?));
+        let addons: Registry =
+            Arc::new(RwLock::new(load_addons(&library, None, None, None, None)?));
         // Copies of songs as they were played sit next to the library, in a folder of their own.
         let relays = Arc::new(crate::relay::Relays::new(
             options
@@ -1297,6 +1323,8 @@ impl Core {
         ));
         let mut library = library;
         crate::radio::prune(&mut library);
+        // Stash's own Tidal, as this computer kept it (listed with the rest once the core is up).
+        let tidal = crate::tidal::Tidal::open(&mut library);
         let library = Arc::new(Mutex::new(library));
         let lacks = Arc::new(Lacks::default());
         let scrobbling = Arc::new(crate::scrobbling::Scrobbling::default());
@@ -1425,6 +1453,7 @@ impl Core {
                 resolve,
                 lan: crate::lan::Lan::default(),
                 away: crate::away::Away::default(),
+                tidal,
             },
         })
         .map(|mut core: Self| {
@@ -1502,6 +1531,13 @@ impl Core {
 
     pub fn port(&self) -> u16 {
         self.state.port
+    }
+
+    /// Reads Stash's config (which names Stash's Tidal) at `url`, checked with `public_key`, in place of the one this
+    /// build names: a test's, or another to try.
+    pub fn with_stash_config(self, url: &str, public_key: &str) -> Self {
+        self.state.tidal.read_config_from(url, public_key);
+        self
     }
 
     /// Lets the page ask `shell` for the full window or the mini player.
@@ -1631,6 +1667,11 @@ impl Core {
             {
                 let (state, stop) = (&state, &stop);
                 scope.spawn(move || crate::away::run(state, stop));
+            }
+            // Stash's own Tidal: its config read as it falls due, and the listener's allowance.
+            {
+                let (state, stop) = (&state, &stop);
+                scope.spawn(move || crate::tidal::run(state, stop));
             }
             // The shortcuts as the listener left them (the shell holds them once its window is up).
             if state.shortcuts.shell.is_some() {
@@ -2558,17 +2599,24 @@ fn addons_route(
         }
         return Ok(Some(state.addons_reply()));
     }
-    // YouTube Music is not an add-on the listener added: it is switched on and off, and nothing else.
-    if state.youtube.is_some() && id == youtube::ID {
+    // YouTube Music and Stash's Tidal are not add-ons the listener added: they are switched on and off, and nothing else.
+    let tidal = id == crate::tidal::ID;
+    if (state.youtube.is_some() && id == youtube::ID) || tidal {
         if path != "/api/addons/enabled" {
-            return Ok(Some(refuse(400, BUILT_IN_STAYS)));
+            return Ok(Some(refuse(
+                400,
+                if tidal { TIDAL_STAYS } else { BUILT_IN_STAYS },
+            )));
         }
         let enabled = body.get("enabled").and_then(Value::as_bool).unwrap_or(true);
-        state
-            .library
-            .lock()
-            .unwrap()
-            .set_setting(YOUTUBE_OFF, if enabled { "0" } else { "1" })?;
+        state.library.lock().unwrap().set_setting(
+            if tidal {
+                crate::tidal::OFF
+            } else {
+                YOUTUBE_OFF
+            },
+            if enabled { "0" } else { "1" },
+        )?;
         state.reload_addons()?;
         if enabled {
             state.lacks.forget_addon(id);
@@ -3173,6 +3221,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::away::route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::tidal::route(state, request, &path)? {
         return Ok((response, false));
     }
     if let Some(response) = crate::youtube_pages::route(state, request, &path, &param)? {

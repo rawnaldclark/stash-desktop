@@ -213,6 +213,38 @@ pub struct StreamInfo {
     pub expires_at: Option<i64>,
     #[serde(default)]
     pub encrypted: Option<bool>,
+    /// What is left of the listener's allowance after this answer, when the add-on counts one.
+    #[serde(default)]
+    pub quota: Option<Allowance>,
+}
+
+/// An add-on's daily allowance (contract `quota`): how much of it is used, of how much (`None`: no limit), and when it
+/// is there again (seconds).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Allowance {
+    pub used: u64,
+    #[serde(default)]
+    pub limit: Option<u64>,
+    pub resets_at: i64,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// Stash's own signature on what one of Stash's own add-ons counts against the listener's allowance (its streams, the
+/// songs saved, the allowance itself), and what it said of that allowance (see [`crate::first_party`]). Only Stash's
+/// own add-ons are signed: never one the listener added.
+pub trait Signer: Send + Sync {
+    /// The headers that sign a request about `what`: a track's id exactly as it is sent, or `quota`.
+    fn headers(&self, what: &str) -> Vec<(&'static str, String)>;
+    /// The add-on's clock, from a refusal that gave it: signatures are made at its time from then on.
+    fn clock_from(&self, server_secs: i64);
+    /// What the add-on said of the allowance, with an answer or a refusal.
+    fn allowance(&self, told: &Allowance);
+    /// While the allowance is spent, how many seconds until it is there again: the add-on is not asked meanwhile.
+    fn spent_for(&self) -> Option<u32>;
+    /// The add-on refused Stash's access token: the link may have changed.
+    fn refused(&self);
 }
 
 /// Why a call to an add-on did not give an answer. The first eight are the add-on's own words (its `error.code`);
@@ -372,6 +404,8 @@ pub struct Addon {
     agent: ureq::Agent,
     /// Set for a source built into Stash: it is asked in place of a server.
     built_in: Option<std::sync::Arc<dyn BuiltIn>>,
+    /// Set for one of Stash's own add-ons: what it counts is signed (see [`Addon::signed_by`]).
+    signer: Option<std::sync::Arc<dyn Signer>>,
 }
 
 impl Addon {
@@ -382,6 +416,16 @@ impl Addon {
     /// Where the link is (the internet, the listener's network, this computer) is noted now, and holds from then
     /// on: the add-on may send Stash no nearer.
     pub fn from_link(link: &str) -> Result<Self> {
+        Self::read_link(link, config())
+    }
+
+    /// [`Addon::from_link`] for one of Stash's own add-ons (see [`Addon::signed_by`]): it is asked as Stash, which is
+    /// what its add-ons serve.
+    pub fn from_own_link(link: &str) -> Result<Self> {
+        Self::read_link(link, config_as(crate::first_party::USER_AGENT))
+    }
+
+    fn read_link(link: &str, config: ureq::config::Config) -> Result<Self> {
         let (url, base) = base_of(link)?;
         // Each place in turn, farthest first, until one answers: there the add-on is (see `Guarded::only`). A place
         // where the name has no address is passed over at once; one where nothing answers, after its wait.
@@ -389,7 +433,7 @@ impl Addon {
         let mut trouble: Option<AddonError> = None;
         for place in [Reach::Internet, Reach::Home, Reach::Here] {
             match get_json::<serde_json::Value>(
-                &reach::Guarded::only(place, config()),
+                &reach::Guarded::only(place, config.clone()),
                 url.as_str(),
             ) {
                 Ok(given) => {
@@ -460,6 +504,7 @@ impl Addon {
             reach,
             agent: agent(reach),
             built_in: None,
+            signer: None,
         })
     }
 
@@ -482,7 +527,71 @@ impl Addon {
             reach,
             agent: agent(reach),
             built_in: None,
+            signer: None,
         })
+    }
+
+    /// The add-on as one of Stash's own (Stash's Tidal): what it counts against the listener's allowance (a stream, a
+    /// song saved, the allowance itself) is signed by `signer`, and not asked for while the allowance is spent. It
+    /// names itself to the add-on as Stash, which Stash's add-ons serve. Never for an add-on the listener added.
+    pub fn signed_by(mut self, signer: std::sync::Arc<dyn Signer>) -> Self {
+        self.agent = reach::Guarded::agent(self.reach, config_as(crate::first_party::USER_AGENT));
+        self.signer = Some(signer);
+        self
+    }
+
+    /// While the add-on's allowance is spent (one of Stash's own: see [`Addon::signed_by`]), the seconds until it is
+    /// there again. It is not asked for songs meanwhile.
+    pub fn spent_for(&self) -> Option<u32> {
+        self.signer.as_ref().and_then(|s| s.spent_for())
+    }
+
+    /// The listener's allowance with the add-on (contract `quota`), asked now. Never counted.
+    pub fn allowance(&self) -> Result<Allowance> {
+        self.offers("quota")?;
+        let told: Allowance = self.counted_json(&format!("{}/quota", self.base), "quota", false)?;
+        if let Some(signer) = &self.signer {
+            signer.allowance(&told);
+        }
+        Ok(told)
+    }
+
+    /// GETs `url`, a request the add-on counts (`counted`) or one about its allowance, for `what` (a track's id as
+    /// sent, or `quota`). For one of Stash's own add-ons it is signed; signed again once at the add-on's own time when
+    /// it says the clocks differ; not sent at all while the allowance is spent; and what it says of the allowance is
+    /// kept. Any other add-on is asked as it always is.
+    fn counted_json<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        what: &str,
+        counted: bool,
+    ) -> Result<T> {
+        let Some(signer) = &self.signer else {
+            return get_json(&self.agent, url);
+        };
+        if counted && let Some(wait) = signer.spent_for() {
+            return Err(AddonError {
+                code: Code::QuotaExceeded,
+                message: "today's allowance is used up".into(),
+                retry_after: Some(wait),
+                who: None,
+            });
+        }
+        let ask = || fetch_with(&self.agent, url, None, &signer.headers(what));
+        let mut fetched = ask()?;
+        if fetched.status == 401 {
+            match fetched.server_time {
+                Some(at) => {
+                    signer.clock_from(at);
+                    fetched = ask()?;
+                }
+                None => signer.refused(),
+            }
+        }
+        if let Some(told) = told_allowance(&fetched.body) {
+            signer.allowance(&told);
+        }
+        decoded(fetched)
     }
 
     /// A source built into Stash, as an add-on of `reach`: it has no link, and `source` is asked in place of a
@@ -500,12 +609,14 @@ impl Addon {
             reach,
             agent: agent(reach),
             built_in: Some(source),
+            signer: None,
         })
     }
 
-    /// Whether it is part of Stash itself, not an add-on the listener added.
+    /// Whether it is part of Stash itself (a source built in, or one of Stash's own add-ons), not an add-on the
+    /// listener added.
     pub fn is_built_in(&self) -> bool {
-        self.built_in.is_some()
+        self.built_in.is_some() || self.signer.is_some()
     }
 
     /// Where its link is: as near as it may send Stash.
@@ -733,7 +844,7 @@ impl Addon {
             .append_pair("tier", want.tier.as_str())
             .append_pair("minTier", want.min_tier.as_str())
             .append_pair("manifest", "none");
-        let info: StreamInfo = get_json(&self.agent, url.as_str())?;
+        let info: StreamInfo = self.counted_json(url.as_str(), id, true)?;
         check_stream(&info, &want)?;
         Ok(info)
     }
@@ -977,7 +1088,7 @@ impl Addon {
             .append_pair("tier", want.tier.as_str())
             .append_pair("minTier", want.min_tier.as_str())
             .append_pair("manifest", &deliveries.join(","));
-        let info: StreamInfo = get_json(&self.agent, url.as_str())?;
+        let info: StreamInfo = self.counted_json(url.as_str(), id, true)?;
         check_stream(&info, want)?;
         Ok(info)
     }
@@ -1129,6 +1240,11 @@ fn agent(reach: Reach) -> ureq::Agent {
 }
 
 fn config() -> ureq::config::Config {
+    config_as(concat!("Stash-desktop/", env!("CARGO_PKG_VERSION")))
+}
+
+/// The add-on agent's settings, naming itself `user_agent`.
+fn config_as(user_agent: &'static str) -> ureq::config::Config {
     ureq::Agent::config_builder()
         .timeout_global(Some(TIMEOUT))
         // Within the whole wait, so a name that is not found or a connection that is not made in time is told apart
@@ -1137,7 +1253,7 @@ fn config() -> ureq::config::Config {
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .max_redirects(0)
         .http_status_as_error(false)
-        .user_agent(concat!("Stash-desktop/", env!("CARGO_PKG_VERSION")))
+        .user_agent(user_agent)
         // Through a proxy, the guard would look up the proxy and never the add-on: none is used.
         .proxy(None)
         .build()
@@ -1333,6 +1449,8 @@ struct Fetched {
     status: u16,
     retry_after: Option<u64>,
     www_authenticate: Option<String>,
+    /// The add-on's clock (seconds), when it gave it with a refusal of Stash's signature.
+    server_time: Option<i64>,
     body: String,
 }
 
@@ -1342,7 +1460,20 @@ fn fetch(agent: &ureq::Agent, url: &str) -> Result<Fetched> {
 
 /// [`fetch`], waiting as long as `wait` for the whole answer when it is given (else the agent's own time).
 fn fetch_within(agent: &ureq::Agent, url: &str, wait: Option<Duration>) -> Result<Fetched> {
-    let request = agent.get(url);
+    fetch_with(agent, url, wait, &[])
+}
+
+/// [`fetch_within`], sending `headers` with the request.
+fn fetch_with(
+    agent: &ureq::Agent,
+    url: &str,
+    wait: Option<Duration>,
+    headers: &[(&'static str, String)],
+) -> Result<Fetched> {
+    let mut request = agent.get(url);
+    for (name, value) in headers {
+        request = request.header(*name, value.as_str());
+    }
     let request = match wait {
         Some(wait) => request.config().timeout_global(Some(wait)).build(),
         None => request,
@@ -1357,6 +1488,9 @@ fn fetch_within(agent: &ureq::Agent, url: &str, wait: Option<Duration>) -> Resul
     };
     let retry_after = header("retry-after").and_then(|v| v.trim().parse::<u64>().ok());
     let www_authenticate = header("www-authenticate");
+    let server_time = header("x-stash-server-time")
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|t| *t > 0);
     let status = response.status().as_u16();
     let body = match response
         .body_mut()
@@ -1373,18 +1507,33 @@ fn fetch_within(agent: &ureq::Agent, url: &str, wait: Option<Duration>) -> Resul
         status,
         retry_after,
         www_authenticate,
+        server_time,
         body,
     })
 }
 
 /// GETs `url` and reads a JSON answer of type `T`, or the add-on's error (contract section 7).
 fn get_json<T: serde::de::DeserializeOwned>(agent: &ureq::Agent, url: &str) -> Result<T> {
+    decoded(fetch(agent, url)?)
+}
+
+/// What an answer says of the listener's allowance: a stream's `quota`, or the `quota` of a refusal (contract section 7).
+fn told_allowance(body: &str) -> Option<Allowance> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let quota = value
+        .get("quota")
+        .or_else(|| value.get("error").and_then(|e| e.get("quota")))?;
+    serde_json::from_value(quota.clone()).ok()
+}
+
+/// A JSON answer of type `T`, or the add-on's error (contract section 7).
+fn decoded<T: serde::de::DeserializeOwned>(fetched: Fetched) -> Result<T> {
     let Fetched {
         status,
         retry_after: header_retry,
         body,
         ..
-    } = fetch(agent, url)?;
+    } = fetched;
 
     if (200..300).contains(&status) {
         return serde_json::from_str(&body).map_err(|e| {

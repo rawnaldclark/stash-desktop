@@ -308,6 +308,7 @@ fn stream_of(printed: &str) -> Result<StreamInfo, AddonError> {
             .map(|seconds| (seconds * 1_000.0) as u64),
         expires_at,
         encrypted: None,
+        quota: None,
     })
 }
 

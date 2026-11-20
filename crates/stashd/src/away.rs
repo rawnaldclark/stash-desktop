@@ -31,7 +31,9 @@ use crate::subsonic::{Asked, MOST_FORM};
 const ON: &str = "away.on";
 const ID: &str = "away.id";
 const KEY: &str = "away.key";
-const TOKEN: &str = "supporter.token";
+/// The supporter's token from the tip jar: the relay lets a supporter in by it, and Stash's Tidal is unlimited with it.
+pub(crate) const SUPPORTER_TOKEN: &str = "supporter.token";
+const TOKEN: &str = SUPPORTER_TOKEN;
 /// Requests answered at once (a song playing holds one).
 const MOST_ANSWERING: usize = 12;
 /// A ping to the relay this often keeps the way open (the relay answers it without waking).
@@ -147,6 +149,16 @@ impl Away {
         }
         let (id, key) = Self::home(state).ok()?;
         Some(Wanted { token, id, key })
+    }
+
+    /// Whether this build can claim supporter status (it knows the tip jar).
+    pub(crate) fn can_claim(&self) -> bool {
+        self.tipjar.is_some()
+    }
+
+    /// The email a code was sent to, while the claim waits for the code.
+    pub(crate) fn claiming(&self) -> Option<String> {
+        self.claiming.lock().unwrap().clone()
     }
 
     fn told(&self, connected: bool, trouble: Option<String>) {
@@ -797,6 +809,8 @@ pub(crate) fn route(state: &State, request: &mut Request, path: &str) -> Result<
                     *away.claiming.lock().unwrap() = None;
                     away.link.lock().unwrap().refused_token = None;
                     away.restart.store(true, Ordering::Relaxed);
+                    // Stash's Tidal is unlimited with it from the next song on.
+                    state.tidal.supporter(Some(token.to_string()));
                     Ok(Some(reply_json(200, away.status(state))))
                 }
                 Ok((401, _)) => Ok(Some(refuse(

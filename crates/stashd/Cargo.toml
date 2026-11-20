@@ -28,4 +28,6 @@ webpki-roots = "1.0.12"
 [dev-dependencies]
 ureq = { version = "3.5.2", features = ["json"] }
 lofty = "0.25.5"
+# Signs the stand-in config and checks Stash's signature in tests/tidal.rs (already in the build through rustls).
+ring = "0.17.14"
 zip = { version = "9.6.0", default-features = false }

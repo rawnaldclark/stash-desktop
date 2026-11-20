@@ -613,6 +613,7 @@ impl BuiltIn for Source {
                         duration_ms: None,
                         expires_at: None,
                         encrypted: None,
+                        quota: None,
                     });
                 }
                 Err(CloudError::Gone) => {}

@@ -36,7 +36,7 @@
 		['about', 'About', 'info']
 	];
 	/** The parts of a category that links name by their own id. */
-	const PARTS: Record<string, Cat> = { similar: 'playback', lyrics: 'playback', 'not-played': 'playback', addons: 'sources', youtube: 'sources', mornye: 'sources' };
+	const PARTS: Record<string, Cat> = { similar: 'playback', lyrics: 'playback', 'not-played': 'playback', addons: 'sources', tidal: 'sources', youtube: 'sources', mornye: 'sources' };
 	const isCat = (v: string | null | undefined): v is Cat => CATS.some(([id]) => id === v);
 
 	/** Whether this computer can hold keys system-wide (null until the core says): Shortcuts is listed only where it can. */

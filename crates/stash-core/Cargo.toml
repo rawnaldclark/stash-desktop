@@ -12,6 +12,8 @@ libloading = "0.9.1"
 lofty = "0.25.5"
 md-5 = "0.11"
 regex = "1.13.1"
+# Already in the build (rustls uses it): ECDSA P-256 for the signed config, HMAC-SHA256 for Stash's own signature.
+ring = "0.17.14"
 rusqlite = { version = "0.42.0", features = ["bundled", "functions"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

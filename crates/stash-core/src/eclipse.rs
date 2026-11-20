@@ -636,6 +636,7 @@ pub fn stream(value: &Value) -> Result<Streamed, AddonError> {
             duration_ms: None,
             expires_at,
             encrypted: None,
+            quota: None,
         },
         stated,
     })

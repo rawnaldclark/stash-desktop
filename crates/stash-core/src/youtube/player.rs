@@ -263,6 +263,7 @@ impl Players {
                 bitrate: Some(format.bitrate).filter(|rate| *rate > 0),
                 duration_ms: format.duration_ms,
                 encrypted: None,
+                quota: None,
             });
         }
         if bot_checks == PLAYERS.len() {
