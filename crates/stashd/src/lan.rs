@@ -215,6 +215,13 @@ impl Lan {
                 "url": listening.map(|port| format!("http://{name}:{port}")),
             })),
             "devices": config.devices,
+            // For smaller songs on mobile data (see `transcode`); fetched as for Mornye's extensions.
+            "ffmpeg": state.mornye().map(|m| m.ffmpeg_told()).unwrap_or_else(|| json!({
+                "found": state.ffmpeg().is_some(),
+                "can_fetch": false,
+                "fetching": null,
+                "trouble": null,
+            })),
         })
     }
 

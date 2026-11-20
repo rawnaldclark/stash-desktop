@@ -8,7 +8,8 @@
 //! the whole playlist: nothing is fetched from where an add-on's playlist alone says.
 //!
 //! Not played this way: protected (encrypted) pieces, pieces given as byte ranges of one file, playlists of more than
-//! one part (DASH periods). The stream has no length and cannot be asked from the middle.
+//! one part (DASH periods). The stream has no length, so a player cannot ask for it from the middle; a song made
+//! smaller ([`crate::transcode`]) starts from the piece a time falls in, when the playlist says when each one starts.
 
 use std::collections::VecDeque;
 use std::io::{self, Read};
@@ -24,10 +25,14 @@ const MOST_PIECES: usize = 20_000;
 /// What a playlist comes to.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Flat {
-    /// The pieces, in order, and the content type of the stream they make.
+    /// The pieces, in order, and the content type of the stream they make. The first `head` pieces start every
+    /// stream (an initialization piece); `starts` says when each piece after them starts, in seconds from the
+    /// song's start, when the playlist says.
     Pieces {
         pieces: Vec<Url>,
         content_type: String,
+        head: usize,
+        starts: Option<Vec<f64>>,
     },
     /// A playlist of renditions (HLS): the chosen one's playlist, to be read in turn.
     Rendition(Url),
@@ -57,6 +62,27 @@ pub(crate) fn flatten(kind: Kind, text: &str, at: &Url) -> Result<Flat, String> 
         }
     }
     Ok(flat)
+}
+
+/// The pieces to play from `at` seconds into the song: those every stream starts with, then from the piece `at` falls
+/// in; and how far into what they make `at` is. Without the pieces' times, all of them, and `at` as it is.
+pub(crate) fn from_time(
+    pieces: Vec<Url>,
+    head: usize,
+    starts: Option<&[f64]>,
+    at: f64,
+) -> (Vec<Url>, f64) {
+    let at = at.max(0.0);
+    let Some(starts) = starts.filter(|s| !s.is_empty() && s.len() + head == pieces.len()) else {
+        return (pieces, at);
+    };
+    let k = starts.iter().rposition(|s| *s <= at).unwrap_or(0);
+    if k == 0 {
+        return (pieces, at);
+    }
+    let mut kept = pieces[..head].to_vec();
+    kept.extend_from_slice(&pieces[head + k..]);
+    (kept, at - starts[k])
 }
 
 // ---- reading XML, as much as a DASH playlist needs
@@ -336,6 +362,8 @@ fn dash(text: &str, at: &Url) -> Result<Flat, String> {
     let bandwidth = rep.attr("bandwidth").unwrap_or("");
 
     let mut pieces = Vec::new();
+    let mut head = 0;
+    let mut starts = Some(Vec::new());
     if let Some(template) = rep
         .kid("SegmentTemplate")
         .or_else(|| set.kid("SegmentTemplate"))
@@ -350,11 +378,14 @@ fn dash(text: &str, at: &Url) -> Result<Flat, String> {
             .unwrap_or(1);
         if let Some(init) = attr("initialization") {
             pieces.push(join(&fill(init, id, bandwidth, number, 0)?)?);
+            head = 1;
         }
         let media = attr("media").ok_or("the playlist's pieces have no address")?;
         let end = length.map(|s| (s * timescale as f64).round() as u64);
+        let at = |ticks: u64| ticks as f64 / timescale as f64;
         if let Some(timeline) = template.kid("SegmentTimeline") {
             let mut time: u64 = 0;
+            let mut first: Option<u64> = None;
             for s in timeline.kids("S") {
                 if let Some(t) = s.attr("t").and_then(|t| t.parse().ok()) {
                     time = t;
@@ -377,6 +408,10 @@ fn dash(text: &str, at: &Url) -> Result<Flat, String> {
                         return Err("the playlist names too many pieces".into());
                     }
                     pieces.push(join(&fill(media, id, bandwidth, number, time)?)?);
+                    let first = *first.get_or_insert(time);
+                    if let Some(starts) = &mut starts {
+                        starts.push(at(time.saturating_sub(first)));
+                    }
                     number += 1;
                     time += d;
                 }
@@ -393,6 +428,9 @@ fn dash(text: &str, at: &Url) -> Result<Flat, String> {
             }
             for i in 0..count {
                 pieces.push(join(&fill(media, id, bandwidth, number, i * d)?)?);
+                if let Some(starts) = &mut starts {
+                    starts.push(at(i * d));
+                }
                 number += 1;
             }
         }
@@ -405,8 +443,22 @@ fn dash(text: &str, at: &Url) -> Result<Flat, String> {
                 init.attr("sourceURL")
                     .ok_or("the playlist's first piece has no address")?,
             )?);
+            head = 1;
         }
-        for s in list.kids("SegmentURL") {
+        // Even pieces, when the list says how long each is.
+        let timescale: f64 = list
+            .attr("timescale")
+            .and_then(|t| t.parse().ok())
+            .filter(|t: &f64| *t > 0.0)
+            .unwrap_or(1.0);
+        let d: Option<f64> = list
+            .attr("duration")
+            .and_then(|d| d.parse().ok())
+            .filter(|d: &f64| *d > 0.0);
+        if d.is_none() {
+            starts = None;
+        }
+        for (i, s) in list.kids("SegmentURL").enumerate() {
             if s.attr("mediaRange").is_some() {
                 return Err("the playlist's pieces are parts of one file".into());
             }
@@ -414,14 +466,20 @@ fn dash(text: &str, at: &Url) -> Result<Flat, String> {
                 s.attr("media")
                     .ok_or("the playlist has a piece with no address")?,
             )?);
+            if let (Some(starts), Some(d)) = (&mut starts, d) {
+                starts.push(i as f64 * d / timescale);
+            }
         }
     } else {
         // One whole file (SegmentBase, or nothing): its address.
         pieces.push(base.clone());
+        starts = None;
     }
     Ok(Flat::Pieces {
         pieces,
         content_type,
+        head,
+        starts,
     })
 }
 
@@ -481,9 +539,17 @@ fn hls(text: &str, at: &Url) -> Result<Flat, String> {
     }
     let mut pieces = Vec::new();
     let mut map = false;
+    // When each piece starts, from each one's #EXTINF (a piece without one leaves the times unknown).
+    let (mut starts, mut time, mut length) = (Some(Vec::new()), 0.0f64, None::<f64>);
     for line in &lines {
         if let Some(tag) = line.strip_prefix('#') {
-            if tag.starts_with("EXT-X-KEY") || tag.starts_with("EXT-X-SESSION-KEY") {
+            if let Some(info) = tag.strip_prefix("EXTINF:") {
+                length = info
+                    .split(',')
+                    .next()
+                    .and_then(|d| d.trim().parse().ok())
+                    .filter(|d: &f64| d.is_finite() && *d >= 0.0);
+            } else if tag.starts_with("EXT-X-KEY") || tag.starts_with("EXT-X-SESSION-KEY") {
                 if hls_attr(line, "METHOD").is_some_and(|m| m != "NONE") {
                     return Err("the song's pieces are protected".into());
                 }
@@ -503,6 +569,13 @@ fn hls(text: &str, at: &Url) -> Result<Flat, String> {
             }
         } else {
             pieces.push(join(line)?);
+            match (&mut starts, length.take()) {
+                (Some(starts), Some(d)) => {
+                    starts.push(time);
+                    time += d;
+                }
+                _ => starts = None,
+            }
         }
     }
     let ending = pieces
@@ -523,6 +596,8 @@ fn hls(text: &str, at: &Url) -> Result<Flat, String> {
     Ok(Flat::Pieces {
         pieces,
         content_type: content_type.to_string(),
+        head: usize::from(map),
+        starts,
     })
 }
 
@@ -595,6 +670,7 @@ mod tests {
             Flat::Pieces {
                 pieces,
                 content_type,
+                ..
             } => (pieces.iter().map(|u| u.to_string()).collect(), content_type),
             other => panic!("{other:?}"),
         }
@@ -698,6 +774,48 @@ mod tests {
         );
         let (_, kind) = pieces(flatten(Kind::Hls, "#EXTM3U\n#EXTINF:10,\na.ts\n", &at()).unwrap());
         assert_eq!(kind, "video/mp2t");
+    }
+
+    #[test]
+    fn a_song_in_pieces_starts_from_the_piece_a_time_falls_in() {
+        // Tidal's: 55 pieces of 176128 / 44100 s (about 3.99 s), then a short one.
+        let Flat::Pieces {
+            pieces,
+            head,
+            starts,
+            ..
+        } = flatten(Kind::Dash, TIDAL, &at()).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(head, 1);
+        let starts = starts.unwrap();
+        assert_eq!(starts.len(), 56);
+        let piece = 176128.0 / 44100.0;
+        assert!((starts[10] - 10.0 * piece).abs() < 1e-9);
+        let (kept, left) = from_time(pieces.clone(), head, Some(&starts), 42.0);
+        // The first piece, then from the 11th (40.0 s in).
+        assert_eq!(kept.len(), 1 + 46);
+        assert_eq!(kept[0], pieces[0]);
+        assert_eq!(kept[1], pieces[11]);
+        assert!((left - (42.0 - 10.0 * piece)).abs() < 1e-9);
+        // From the start, or without times: all of them.
+        assert_eq!(
+            from_time(pieces.clone(), head, Some(&starts), 0.0).0.len(),
+            57
+        );
+        assert_eq!(from_time(pieces.clone(), head, None, 42.0), (pieces, 42.0));
+        // HLS: from each piece's #EXTINF.
+        let text = "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4,\n1.m4s\n#EXTINF:4.5,\n2.m4s\n#EXTINF:4,\n3.m4s\n";
+        let Flat::Pieces { head, starts, .. } = flatten(Kind::Hls, text, &at()).unwrap() else {
+            panic!()
+        };
+        assert_eq!((head, starts), (1, Some(vec![0.0, 4.0, 8.5])));
+        let text = "#EXTM3U\n#EXTINF:4,\n1.ts\n2.ts\n";
+        let Flat::Pieces { head, starts, .. } = flatten(Kind::Hls, text, &at()).unwrap() else {
+            panic!()
+        };
+        assert_eq!((head, starts), (0, None));
     }
 
     #[test]

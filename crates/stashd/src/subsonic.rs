@@ -509,6 +509,7 @@ fn extensions() -> Reply {
         json!([
             { "name": "apiKeyAuthentication", "versions": [1] },
             { "name": "formPost", "versions": [1] },
+            { "name": "transcodeOffset", "versions": [1] },
         ]),
     )
 }
@@ -876,7 +877,9 @@ fn handle(
                 b"no picture".to_vec(),
             ))
         })),
-        "stream" | "download" => stream(state, p, range),
+        "stream" => stream(state, p, range, true),
+        // A download is the song as it is, whatever was asked.
+        "download" => stream(state, p, range, false),
         "jukeboxControl" | "createUser" | "updateUser" | "deleteUser" | "changePassword" => {
             Err(fail(50, "Stash does not let devices do that"))
         }
@@ -1059,10 +1062,39 @@ fn serve_file(path: &str, range: Option<&str>) -> Result<Reply, Fail> {
 /// The bytes at `url` (the core's relay for a song an add-on or the cloud gives), with the range asked for.
 /// `Err(None)`: the address no longer answers for the song (it is to be found again).
 fn proxy(url: &str, range: Option<&str>) -> Result<Reply, Option<String>> {
+    Ok(Reply::Raw(match fetch(url, range, 0.0)? {
+        Fetched::Whole(out) => out,
+        Fetched::Pieces {
+            body, content_type, ..
+        } => Out {
+            status: 200,
+            headers: vec![("Content-Type".to_string(), content_type)],
+            length: None,
+            body,
+        },
+    }))
+}
+
+/// What a song's address gave: its bytes as they came, or its playlist of pieces played as one stream (from the piece
+/// `from` falls in: `left` is how far into that stream `from` is).
+enum Fetched {
+    Whole(Out),
+    Pieces {
+        body: Body,
+        content_type: String,
+        left: f64,
+    },
+}
+
+/// [`proxy`]'s fetch; a playlist of pieces starts at the piece `from` seconds falls in.
+fn fetch(url: &str, range: Option<&str>, from: f64) -> Result<Fetched, Option<String>> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_connect(Some(Duration::from_secs(10)))
         .timeout_recv_response(Some(Duration::from_secs(90)))
+        // A source that stops sending ends the song in an error, rather than holding what reads it (and the FFmpeg
+        // that makes it smaller) for ever.
+        .timeout_per_read(Some(SOURCE_SILENT))
         .build()
         .into();
     let mut asked = agent.get(url);
@@ -1099,9 +1131,9 @@ fn proxy(url: &str, range: Option<&str>) -> Result<Reply, Option<String>> {
         .unwrap_or_default();
     if crate::pieces::is_playlist(&bare_type, &landed_path) {
         if status == 206 && range.is_some() {
-            return proxy(url, None);
+            return fetch(url, None, from);
         }
-        return joined(&agent, response.into_body().into_reader(), &landed).map_err(Some);
+        return joined(&agent, response.into_body().into_reader(), &landed, from).map_err(Some);
     }
     let mut headers = vec![
         (
@@ -1115,13 +1147,16 @@ fn proxy(url: &str, range: Option<&str>) -> Result<Reply, Option<String>> {
     }
     let length = given("content-length").and_then(|l| l.parse::<u64>().ok());
     let body: Body = Box::new(response.into_body().into_reader());
-    Ok(Reply::Raw(Out {
+    Ok(Fetched::Whole(Out {
         status,
         headers,
         length,
         body,
     }))
 }
+
+/// How long a song's source may send nothing before the song ends.
+const SOURCE_SILENT: Duration = Duration::from_secs(60);
 
 /// The most a playlist of pieces may be.
 const PLAYLIST_MOST: u64 = 4 * 1024 * 1024;
@@ -1137,8 +1172,14 @@ fn playlist_text(body: impl Read) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "the playlist is not text".into())
 }
 
-/// The playlist of pieces in `body`, read from `landed`, played as one stream ([`crate::flat`]).
-fn joined(agent: &ureq::Agent, body: impl Read, landed: &str) -> Result<Reply, String> {
+/// The playlist of pieces in `body`, read from `landed`, played as one stream ([`crate::flat`]), from the piece `from`
+/// seconds falls in.
+fn joined(
+    agent: &ureq::Agent,
+    body: impl Read,
+    landed: &str,
+    from: f64,
+) -> Result<Fetched, String> {
     let mut at =
         url::Url::parse(landed).map_err(|_| "the playlist's address cannot be read".to_string())?;
     let mut text = playlist_text(body)?;
@@ -1150,13 +1191,15 @@ fn joined(agent: &ureq::Agent, body: impl Read, landed: &str) -> Result<Reply, S
             crate::flat::Flat::Pieces {
                 pieces,
                 content_type,
+                head,
+                starts,
             } => {
-                return Ok(Reply::Raw(Out {
-                    status: 200,
-                    headers: vec![("Content-Type".to_string(), content_type)],
-                    length: None,
+                let (pieces, left) = crate::flat::from_time(pieces, head, starts.as_deref(), from);
+                return Ok(Fetched::Pieces {
                     body: Box::new(crate::flat::Joined::new(agent.clone(), pieces)),
-                }));
+                    content_type,
+                    left,
+                });
             }
             crate::flat::Flat::Rendition(url) => {
                 let response = agent.get(url.as_str()).call().map_err(|e| e.to_string())?;
@@ -1194,8 +1237,16 @@ fn locate(state: &State, id: i64, fresh: bool) -> Result<stash_core::player::Loc
     Ok(located)
 }
 
-fn stream(state: &State, p: &Params, range: Option<&str>) -> Result<Reply, Fail> {
+fn stream(
+    state: &State,
+    p: &Params,
+    range: Option<&str>,
+    may_make_over: bool,
+) -> Result<Reply, Fail> {
     let id = id_of(p.need("id")?, "s-").ok_or_else(|| fail(70, "no such song"))?;
+    if may_make_over && let Some(reply) = made_over(state, p, id, range)? {
+        return Ok(reply);
+    }
     let file = lib(state.library.lock().unwrap().file_of(id))?;
     if let Some(path) = file {
         return serve_file(&path, range);
@@ -1217,6 +1268,128 @@ fn stream(state: &State, p: &Params, range: Option<&str>) -> Result<Reply, Fail>
         }
     }
     Err(fail(0, "the song could not be had"))
+}
+
+/// The song made smaller, as the app asked ([`crate::transcode`]); `None`: it goes as it is (nothing asked, already
+/// small enough, no FFmpeg, or too many songs being made over at once).
+fn made_over(
+    state: &State,
+    p: &Params,
+    id: i64,
+    range: Option<&str>,
+) -> Result<Option<Reply>, Fail> {
+    let format = p.one("format");
+    let max_kbps: u32 = p.num("maxBitRate").unwrap_or(0);
+    if format.is_none() && max_kbps == 0 {
+        return Ok(None);
+    }
+    let song = lib(state.library.lock().unwrap().served_songs(&[id]))?
+        .pop()
+        .ok_or_else(|| fail(70, "no such song"))?;
+    let seconds = (song.duration_ms + 500) / 1000;
+    let source_kbps = song
+        .size
+        .filter(|_| seconds > 0)
+        .map(|size| size * 8 / 1000 / seconds);
+    let Some(plan) = crate::transcode::plan(format, max_kbps, suffix_of(&song), source_kbps) else {
+        return Ok(None);
+    };
+    if !crate::transcode::room() {
+        return Ok(None);
+    }
+    let Some(ffmpeg) = state.ffmpeg() else {
+        return Ok(None);
+    };
+    // A player told the length of an MP3 made over seeks by asking for a range, which is a time.
+    let length = plan
+        .length(seconds)
+        .filter(|_| matches!(p.one("estimateContentLength"), Some("true")));
+    let asked = length.and_then(|l| range_of(range, l).map(|r| (r, l)));
+    let offset: f64 = p
+        .num::<f64>("timeOffset")
+        .filter(|t| *t > 0.0)
+        .unwrap_or(0.0);
+    let from = offset + asked.map_or(0.0, |((start, _), _)| plan.time_at(start));
+    let (source, from) = source_of(state, id, from)?;
+    let made = crate::transcode::start(&ffmpeg, source, plan, from).map_err(|why| fail(0, why))?;
+    let mut headers = vec![(
+        "Content-Type".to_string(),
+        plan.target.content_type().to_string(),
+    )];
+    let (status, body, length): (u16, Body, Option<u64>) = match (asked, length) {
+        (Some(((start, end), whole)), _) => {
+            headers.push(("Accept-Ranges".into(), "bytes".into()));
+            headers.push((
+                "Content-Range".into(),
+                format!("bytes {start}-{end}/{whole}"),
+            ));
+            let size = end - start + 1;
+            (
+                206,
+                Box::new(crate::transcode::Exactly::new(made, size)),
+                Some(size),
+            )
+        }
+        (None, Some(whole)) => {
+            headers.push(("Accept-Ranges".into(), "bytes".into()));
+            (
+                200,
+                Box::new(crate::transcode::Exactly::new(made, whole)),
+                Some(whole),
+            )
+        }
+        (None, None) => (200, made, None),
+    };
+    Ok(Some(Reply::Raw(Out {
+        status,
+        headers,
+        length,
+        body,
+    })))
+}
+
+/// The song, for making over from `from` seconds in, and how far into the source given `from` is: its file when it is
+/// here, else where the player finds it. FFmpeg finds the time itself in a file, and in a song at the core's relay
+/// (asking it for the bytes it needs); a song in pieces starts at the piece the time falls in.
+fn source_of(state: &State, id: i64, from: f64) -> Result<(crate::transcode::Source, f64), Fail> {
+    use crate::transcode::Source;
+    if let Some(path) = lib(state.library.lock().unwrap().file_of(id))? {
+        return Ok((Source::File(path), from));
+    }
+    for fresh in [false, true] {
+        let located = locate(state, id, fresh)?;
+        if !located.locator.starts_with("http://") && !located.locator.starts_with("https://") {
+            return Ok((Source::File(located.locator), from));
+        }
+        match fetch(&located.locator, None, from) {
+            Ok(Fetched::Whole(out)) => {
+                // From the middle: FFmpeg asks the core's relay for what it needs, rather than reading up to it.
+                if from > 0.0 && at_core_relay(&located.locator) {
+                    drop(out);
+                    return Ok((Source::Relay(located.locator), from));
+                }
+                return Ok((Source::Bytes(out.body), from));
+            }
+            Ok(Fetched::Pieces { body, left, .. }) => return Ok((Source::Bytes(body), left)),
+            Err(None) if !fresh => continue,
+            Err(why) => {
+                return Err(fail(
+                    0,
+                    why.unwrap_or_else(|| "the song could not be had".into()),
+                ));
+            }
+        }
+    }
+    Err(fail(0, "the song could not be had"))
+}
+
+/// Whether `locator` is the core's own relay on this computer (which holds every fetch to the add-on's reach).
+fn at_core_relay(locator: &str) -> bool {
+    url::Url::parse(locator).is_ok_and(|u| {
+        u.scheme() == "http"
+            && u.host() == Some(url::Host::Ipv4(std::net::Ipv4Addr::LOCALHOST))
+            && u.path().starts_with("/relay/")
+    })
 }
 
 #[cfg(test)]

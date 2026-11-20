@@ -776,12 +776,17 @@ impl Mornye {
             "refreshing": self.refreshing.load(Ordering::SeqCst),
             "verifying": *self.verifying.lock().unwrap(),
             "window": self.shell.get().is_some(),
-            "ffmpeg": {
-                "found": stash_mornye::ffmpeg::find(&self.tools).is_some(),
-                "can_fetch": stash_mornye::ffmpeg::can_fetch(),
-                "fetching": self.fetching.lock().unwrap().map(|(got, total)| json!({ "got": got, "total": total })),
-                "trouble": *self.ffmpeg_trouble.lock().unwrap(),
-            },
+            "ffmpeg": self.ffmpeg_told(),
+        })
+    }
+
+    /// Whether FFmpeg is here, can be fetched, is being fetched, or could not be.
+    pub(crate) fn ffmpeg_told(&self) -> Value {
+        json!({
+            "found": stash_mornye::ffmpeg::find(&self.tools).is_some(),
+            "can_fetch": stash_mornye::ffmpeg::can_fetch(),
+            "fetching": self.fetching.lock().unwrap().map(|(got, total)| json!({ "got": got, "total": total })),
+            "trouble": *self.ffmpeg_trouble.lock().unwrap(),
         })
     }
 

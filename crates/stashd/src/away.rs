@@ -12,6 +12,7 @@
 use std::io::{Read, Write};
 use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -540,19 +541,65 @@ fn answer_in_turn<'scope, 'env>(
         };
         // The body goes up in parts: Cloudflare hands the relay an upload only once all of it has arrived, so one
         // upload of a whole song would reach the phone only at its end. A small first part gets the phone its answer
-        // at once; each part is answered once the phone has taken it.
-        let mut buf = Vec::with_capacity(PART);
+        // at once; each part is answered once the phone has taken it. A part goes when it is full or, from a source
+        // slower than the upload (a song made smaller, a stream that comes at its own pace), with what came within
+        // `PART_WAIT`: the phone never waits for a part to fill.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<std::io::Result<Vec<u8>>>(8);
+        if head {
+            drop(tx);
+        } else {
+            // Read on a thread of its own, so the body is read while a part goes up. It ends with the body, or once
+            // the parts stop being taken (the phone stopped listening), which lets the body go.
+            scope.spawn(move || {
+                loop {
+                    let mut chunk = vec![0u8; READ_CHUNK];
+                    match body.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            chunk.truncate(n);
+                            if tx.send(Ok(chunk)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(e) => {
+                            let _ = tx.send(Err(e));
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+        let mut buf = Vec::with_capacity(PART + READ_CHUNK);
+        let (mut ended, mut broke) = (head, false);
         for n in 0u32.. {
             let size = if n == 0 { FIRST_PART } else { PART };
             buf.clear();
-            let (last, broke) = if head {
-                (true, false)
-            } else {
-                match (&mut body).take(size as u64).read_to_end(&mut buf) {
-                    Ok(read) => (read < size, false),
-                    Err(_) => (true, true),
+            // The part's first bytes, however long they take; then what more comes, until it is full or has waited.
+            let mut first = true;
+            let mut since = Instant::now();
+            while !ended && buf.len() < size {
+                let got = if first {
+                    rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
+                } else {
+                    match PART_WAIT.checked_sub(since.elapsed()) {
+                        Some(left) if !left.is_zero() => rx.recv_timeout(left),
+                        _ => break,
+                    }
+                };
+                match got {
+                    Ok(Ok(chunk)) => buf.extend_from_slice(&chunk),
+                    // The song could not be read on (a piece failed): the phone's answer ends in an error.
+                    Ok(Err(_)) => (ended, broke) = (true, true),
+                    Err(RecvTimeoutError::Timeout) => break,
+                    Err(RecvTimeoutError::Disconnected) => ended = true,
                 }
-            };
+                if first {
+                    first = false;
+                    since = Instant::now();
+                }
+            }
+            let last = ended;
             let mut post = agent
                 .post(&to)
                 .header("Authorization", &format!("Bearer {key}"))
@@ -566,7 +613,6 @@ fn answer_in_turn<'scope, 'env>(
                 }
             }
             if broke {
-                // The song could not be read on (a piece failed): the phone's answer ends in an error.
                 post = post.header("X-Stash-Abort", "1");
             } else if last {
                 post = post.header("X-Stash-Last", "1");
@@ -582,8 +628,12 @@ fn answer_in_turn<'scope, 'env>(
 
 /// The first part of an answer: small, so the phone has its answer at once.
 const FIRST_PART: usize = 64 * 1024;
-/// Each part after it.
+/// Each part after it, at most (give or take one read).
 const PART: usize = 512 * 1024;
+/// How long a part waits to fill once its first bytes are in.
+const PART_WAIT: Duration = Duration::from_millis(500);
+/// The most one read of the body takes.
+const READ_CHUNK: usize = 64 * 1024;
 
 /// A body that ends (with an error) once Stash stops, so quitting never waits for a song to finish streaming up.
 struct Stoppable<'a> {

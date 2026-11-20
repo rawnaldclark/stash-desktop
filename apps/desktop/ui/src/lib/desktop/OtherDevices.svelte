@@ -5,6 +5,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import * as core from '../core';
+	import { ui } from '../ui/state.svelte';
 
 	type Device = { id: string; name: string; user: string; password: string; added_ms: number; seen_ms: number | null };
 	type Lan = {
@@ -16,6 +17,8 @@
 		url: string | null;
 		tailscale: { name: string; url: string | null } | null;
 		devices: Device[];
+		/** For smaller songs on mobile data (the core's `transcode.rs`). */
+		ffmpeg: { found: boolean; can_fetch: boolean; fetching: { got: number; total: number | null } | null; trouble: string | null };
 	};
 	type Away = { available: boolean; can_claim: boolean; on: boolean; supporter: boolean; claiming: string | null; connected: boolean; trouble: string | null; url: string | null };
 
@@ -48,7 +51,7 @@
 		let timer: ReturnType<typeof setTimeout>;
 		const loop = async () => {
 			await ask();
-			const settling = !!away && away.on && away.supporter && !away.connected && !away.trouble;
+			const settling = (!!away && away.on && away.supporter && !away.connected && !away.trouble) || !!lan?.ffmpeg.fetching;
 			if (alive) timer = setTimeout(loop, settling ? 1500 : 5000);
 		};
 		void loop();
@@ -82,6 +85,7 @@
 	});
 	const cancelClaim = () => act(() => core.post('/api/away/claim/cancel', {}));
 	const newAddress = () => act(() => core.post('/api/away/new-address', {})).then(() => (renewing = false));
+	const fetchFfmpeg = () => act(() => core.mornyeFetchFfmpeg());
 
 	async function addDevice() {
 		const n = name.trim();
@@ -283,6 +287,24 @@
 						<span class="set-sub">{lan.devices.length ? 'Each device signs in with its own user name and password.' : 'Add a device to get the user name and password its app signs in with.'} In the app, add a server: an address above, then the user name and password.</span>
 					</div>
 					<div class="set-ctl"><button type="button" class="btn ghost" disabled={busy || lan.devices.length >= 32} onclick={() => (adding = true)}>Add device…</button></div>
+				{/if}
+			</div>
+
+			<!-- Smaller songs on mobile data: the app asks, FFmpeg makes them -->
+			<div class="set-row">
+				<div class="set-lab">
+					<span class="set-name">Smaller songs on mobile data</span>
+					{#if lan.ffmpeg.found}
+						<span class="set-sub">Ready. In your app, pick a smaller quality for mobile data (in Tempo and Symfonium, under transcoding).</span>
+					{:else if lan.ffmpeg.fetching}
+						<span class="set-sub" role="status">Downloading FFmpeg… {(lan.ffmpeg.fetching.got / 1048576).toFixed(0)}{lan.ffmpeg.fetching.total ? ` of ${(lan.ffmpeg.fetching.total / 1048576).toFixed(0)}` : ''} MB</span>
+					{:else}
+						<span class="set-sub">Apps can ask for smaller songs on mobile data. Stash needs FFmpeg to make them; until then songs go at full size.{lan.ffmpeg.can_fetch ? '' : ' Install FFmpeg on this computer.'}</span>
+					{/if}
+					{#if lan.ffmpeg.trouble}<span class="set-sub set-trouble" role="alert">{lan.ffmpeg.trouble}</span>{/if}
+				</div>
+				{#if !lan.ffmpeg.found && !lan.ffmpeg.fetching && lan.ffmpeg.can_fetch}
+					<div class="set-ctl"><button type="button" class="btn ghost" disabled={busy || ui.offline} onclick={fetchFfmpeg}>Download (160 MB)</button></div>
 				{/if}
 			</div>
 		{/if}

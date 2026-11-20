@@ -1209,6 +1209,20 @@ impl State {
         self.mornye.clone()
     }
 
+    /// Stash's tools folder, beside the library (its own FFmpeg and yt-dlp).
+    pub(crate) fn tools(&self) -> PathBuf {
+        self.options
+            .db
+            .parent()
+            .map(|folder| folder.join("tools"))
+            .unwrap_or_else(|| PathBuf::from("tools"))
+    }
+
+    /// FFmpeg: Stash's own, else the system's.
+    pub(crate) fn ffmpeg(&self) -> Option<PathBuf> {
+        stash_mornye::ffmpeg::find(&self.tools())
+    }
+
     /// The listener's cloud storage, when this build can connect any.
     pub(crate) fn cloud(&self) -> Option<Arc<crate::cloud::Cloud>> {
         self.cloud.clone()
@@ -1473,13 +1487,7 @@ impl Core {
             Arc::clone(&youtube),
         )));
         // Stash's own copy of yt-dlp lives beside the library.
-        let tools = self
-            .state
-            .options
-            .db
-            .parent()
-            .map(|folder| folder.join("tools"))
-            .unwrap_or_else(|| PathBuf::from("tools"));
+        let tools = self.state.tools();
         self.state.youtube_fallback = Some(Arc::new(crate::youtube_fallback::TubeFallback::new(
             Arc::clone(&self.state.library),
             Arc::clone(&youtube),
