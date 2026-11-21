@@ -49,6 +49,9 @@
 	async function askTidal() {
 		try {
 			tidal = await core.get<core.TidalStatus>('/api/tidal');
+			// The check's window is open: asked often until it closes. Passing it adds Tidal in the core.
+			if (tidal.checking) settleUntil = Math.max(settleUntil, Date.now() + 3_000);
+			if (tidal.added && !tidalAdded) await sources.reload();
 		} catch {
 			/* the core is not answering */
 		}
@@ -212,8 +215,13 @@
 					<span class="set-name">Tidal, by Stash</span>
 					<span class="set-sub">Lossless and Hi-Res. Free with a daily allowance, unlimited for supporters.</span>
 				</div>
-				<button type="button" class="btn" disabled={addingTidal || ui.offline} onclick={addTidal}>{addingTidal ? 'Adding…' : 'Add'}</button>
+				<button type="button" class="btn" disabled={addingTidal || tidal.checking || ui.offline} onclick={addTidal}>{addingTidal || tidal.checking ? 'Adding…' : 'Add'}</button>
 			</div>
+			{#if tidal.checking}
+				<p class="set-sub" role="status">Finish the quick check in the window that opened. It's asked once on this computer.</p>
+			{:else if tidal.check_trouble}
+				<p class="set-sub set-trouble" role="alert">{tidal.check_trouble}</p>
+			{/if}
 		{/if}
 		<div class="set-row set-col">
 			<form class="dev-rename" onsubmit={add}>

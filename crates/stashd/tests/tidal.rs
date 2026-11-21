@@ -16,7 +16,7 @@ use ring::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, KeyPair};
 use serde_json::{Value, json};
 use stash_core::Library;
 use stash_core::audio::Output;
-use stashd::serve::{Core, Options};
+use stashd::serve::{Core, Options, VerifyShell, VerifyWindow};
 
 fn engine() -> Option<PathBuf> {
     if let Some(path) = stash_core::audio::find_library() {
@@ -64,6 +64,9 @@ const FREE: u64 = 2;
 /// How far ahead of this computer the stand-in's clock is.
 const AHEAD: i64 = 1_000;
 const SONGS: &[&str] = &["Alpha", "Bravo", "Charlie", "Delta"];
+/// The pass the stand-in's check gives, and the token its page hands back when it is passed.
+const PASS_GIVEN: &str = "eyJ2IjoxfQ.cGFzcy1naXZlbi1ieS10aGUtY2hlY2s";
+const SOLVED: &str = "0.solved_turnstile-token";
 
 fn now() -> i64 {
     std::time::SystemTime::now()
@@ -93,6 +96,8 @@ struct Seen {
     quota_asked: usize,
     agents: Vec<String>,
     paths: Vec<String>,
+    /// What was posted to the check's /register.
+    registered: Vec<Value>,
 }
 
 /// Stash's servers, standing in: the config and its signature, and the Tidal add-on it names.
@@ -100,11 +105,18 @@ struct Servers {
     base: String,
     public_key: String,
     seen: Arc<Mutex<Seen>>,
+    /// The add-on refuses the pass it gave (as when it is withdrawn).
+    refuse_pass: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Servers {
     /// `tamper`: the config's signature is not its key's.
     fn start(tamper: bool) -> Self {
+        Self::start_with(tamper, false)
+    }
+
+    /// `check`: the add-on offers its check (`/register`), and takes the pass it gives in its link.
+    fn start_with(tamper: bool, check: bool) -> Self {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let port = server.server_addr().to_ip().unwrap().port();
         let base = format!("http://127.0.0.1:{port}");
@@ -130,9 +142,16 @@ impl Servers {
         let signature = STANDARD.encode(pair.sign(&rng, signed.as_bytes()).unwrap().as_ref());
         let seen = Arc::new(Mutex::new(Seen::default()));
         let kept = Arc::clone(&seen);
+        let refuse_pass = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let refusing = Arc::clone(&refuse_pass);
         let audio = wav();
         std::thread::spawn(move || {
-            for request in server.incoming_requests() {
+            for mut request in server.incoming_requests() {
+                let mut posted = String::new();
+                if *request.method() == tiny_http::Method::Post {
+                    let _ = std::io::Read::read_to_string(request.as_reader(), &mut posted);
+                }
+                let get = *request.method() == tiny_http::Method::Get;
                 let header = |name: &'static str| {
                     request
                         .headers()
@@ -161,7 +180,13 @@ impl Servers {
                 };
                 // The add-on's own clock, and whether a request is signed right over `what` by it.
                 let server_now = now() + AHEAD;
+                // A request in the pass's link: the pass names the install, nothing is signed.
+                let v1_pass = format!("/v1/{PASS_GIVEN}/");
+                let by_pass = check && path.starts_with(&v1_pass);
                 let signed = |what: &str| -> Result<String, &'static str> {
+                    if by_pass {
+                        return Ok("pass".to_string());
+                    }
                     let (Some(install), Some(ts), Some(auth)) = (
                         header("X-Stash-Install"),
                         header("X-Stash-Ts"),
@@ -193,7 +218,11 @@ impl Servers {
                         vec![],
                     ),
                 };
-                let v1 = format!("/v1/{}/", TOKEN.replace(' ', "%20"));
+                let v1 = if by_pass {
+                    v1_pass.clone()
+                } else {
+                    format!("/v1/{}/", TOKEN.replace(' ', "%20"))
+                };
                 let track = |title: &str, i: usize| json!({ "id": format!("td:{}", i + 1), "title": title, "artist": "Tester", "durationMs": 3000, "maxTier": "lossless" });
                 let response = match path.as_str() {
                     "/lossless.json" => tiny_http::Response::from_string(config.clone()),
@@ -207,6 +236,23 @@ impl Servers {
                             "resources": ["search", "stream"],
                             "stream": { "cors": false, "manifests": ["none"], "tiers": ["lossless"] }
                         }),
+                        vec![],
+                    ),
+                    "/register" if check && get => answer(200, json!("the check page"), vec![]),
+                    "/register" if check => {
+                        kept.lock()
+                            .unwrap()
+                            .registered
+                            .push(serde_json::from_str(&posted).unwrap_or(Value::Null));
+                        answer(
+                            200,
+                            json!({ "pass": PASS_GIVEN, "install": "picked-by-the-server" }),
+                            vec![],
+                        )
+                    }
+                    _ if by_pass && refusing.load(std::sync::atomic::Ordering::Relaxed) => answer(
+                        401,
+                        json!({ "error": { "code": "unauthorized", "message": "Missing or wrong token" } }),
                         vec![],
                     ),
                     p if !p.starts_with(&v1) => answer(
@@ -314,6 +360,7 @@ impl Servers {
             base,
             public_key: STANDARD.encode(spki),
             seen,
+            refuse_pass,
         }
     }
 
@@ -419,6 +466,17 @@ fn core(
     supporter: Option<&str>,
     engine: Option<&Path>,
 ) -> (Client, PathBuf) {
+    core_with(name, servers, supporter, engine, None)
+}
+
+/// [`core`], with `shell` opening the windows (the add-on's check) as the desktop app's shell does.
+fn core_with(
+    name: &str,
+    servers: Option<&Servers>,
+    supporter: Option<&str>,
+    engine: Option<&Path>,
+    shell: Option<VerifyShell>,
+) -> (Client, PathBuf) {
     let dir = std::env::temp_dir().join(format!("stash-tidal-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -443,6 +501,10 @@ fn core(
     .unwrap();
     let core = match servers {
         Some(s) => core.with_stash_config(&s.config_url(), &s.public_key),
+        None => core,
+    };
+    let core = match shell {
+        Some(shell) => core.with_verify(shell),
         None => core,
     };
     let base = format!("http://127.0.0.1:{}", core.port());
@@ -675,6 +737,130 @@ fn without_a_config_signed_by_stash_there_is_no_stash_tidal() {
             .iter()
             .any(|p| p.starts_with("/v1/")),
         "the add-on it names was never asked"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A shell that "passes" the add-on's check at once: it notes the page it was asked to open, and hands back the page's
+/// solved token, as the desktop app's window does when the listener passes it.
+fn passing_shell(opened: Arc<Mutex<Vec<String>>>) -> VerifyShell {
+    Arc::new(move |window: VerifyWindow| {
+        opened.lock().unwrap().push(window.url.clone());
+        let done = format!("{}/done#turnstile={SOLVED}", window.url);
+        assert!((window.catches)(&done));
+        assert!(!(window.catches)(&window.url), "the page itself loads");
+        assert!(!(window.catches)(
+            "https://challenges.cloudflare.com/register/done#turnstile=x"
+        ));
+        std::thread::spawn(move || {
+            (window.caught)(done);
+            (window.closed)();
+        });
+        true
+    })
+}
+
+#[test]
+fn where_the_add_on_offers_its_check_add_opens_it_and_the_pass_takes_the_token_s_place() {
+    let servers = Servers::start_with(false, true);
+    let opened = Arc::new(Mutex::new(Vec::new()));
+    let (client, dir) = core_with(
+        "pass",
+        Some(&servers),
+        None,
+        None,
+        Some(passing_shell(Arc::clone(&opened))),
+    );
+
+    // Add opens the check; once it is passed, Stash's Tidal is added, and asked in the pass's link.
+    client.post("/api/tidal/add", json!({}));
+    let tidal = client.until("/api/tidal", "added with this computer's pass", |t| {
+        t["added"] == true
+            && t["ready"] == true
+            && t["allowance"].is_object()
+            && t["checking"] == false
+    });
+    assert_eq!(tidal["needs_check"], false, "{tidal}");
+    assert_eq!(
+        *opened.lock().unwrap(),
+        [format!("{}/register", servers.base)]
+    );
+    let token_quota = format!("/v1/{}/quota", TOKEN.replace(' ', "%20"));
+    let pass_quota = format!("/v1/{PASS_GIVEN}/quota");
+    {
+        let seen = servers.seen.lock().unwrap();
+        assert_eq!(
+            seen.registered,
+            [json!({ "app": "desktop", "proof": { "kind": "turnstile", "token": SOLVED } })]
+        );
+        assert!(seen.paths.contains(&pass_quota), "{:?}", seen.paths);
+        assert!(
+            !seen.paths.contains(&token_quota),
+            "the access token is not used once there is a pass"
+        );
+        assert!(
+            seen.agents.iter().all(|a| a.starts_with("Stash/")),
+            "{:?}",
+            seen.agents
+        );
+    }
+
+    // The add-on refuses the pass (withdrawn): it is let go, the access token is used again, and Settings offers the
+    // check. Adding again asks the allowance, which is where the add-on says so.
+    servers
+        .refuse_pass
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    client.post("/api/tidal/add", json!({}));
+    let tidal = client.until("/api/tidal", "the check offered again", |t| {
+        t["needs_check"] == true
+    });
+    assert_eq!(tidal["added"], true);
+    client.until(
+        "/api/tidal",
+        "the allowance asked with the access token",
+        |_| servers.seen.lock().unwrap().paths.contains(&token_quota),
+    );
+
+    // Passing the check again gives a pass again.
+    servers
+        .refuse_pass
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    servers.seen.lock().unwrap().paths.clear();
+    client.post("/api/tidal/check", json!({}));
+    client.until(
+        "/api/tidal",
+        "a new pass, the check no longer offered",
+        |t| t["needs_check"] == false && t["checking"] == false,
+    );
+    assert_eq!(opened.lock().unwrap().len(), 2);
+    assert_eq!(servers.seen.lock().unwrap().registered.len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn where_the_add_on_does_not_offer_its_check_yet_add_uses_the_access_token_as_before() {
+    let servers = Servers::start_with(false, false);
+    let opened = Arc::new(Mutex::new(Vec::new()));
+    let (client, dir) = core_with(
+        "no-check",
+        Some(&servers),
+        None,
+        None,
+        Some(passing_shell(Arc::clone(&opened))),
+    );
+    let tidal = add(&client);
+    assert_eq!(tidal["checking"], false);
+    assert!(
+        opened.lock().unwrap().is_empty(),
+        "no window: the add-on gives no check"
+    );
+    assert!(
+        servers
+            .seen
+            .lock()
+            .unwrap()
+            .paths
+            .contains(&format!("/v1/{}/quota", TOKEN.replace(' ', "%20")))
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
