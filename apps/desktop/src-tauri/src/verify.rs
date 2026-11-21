@@ -2,7 +2,8 @@
 //! person passes the page on the service's own site; when the page sends the window to the extension's callback
 //! (`spotiflac://session-grant?…`, or a page that carries the grant), the window stops there, hands the address to
 //! the core (which exchanges the grant for the extension's session), and closes. A cloud provider's sign-in opens the
-//! same way, and stops at the provider's redirect (`db-<key>://…`, `com.stash.app://oauth/onedrive`).
+//! same way, and stops at the provider's redirect (`db-<key>://…`, `com.stash.app://oauth/onedrive`); so does Stash's
+//! Tidal's quick check, which stops at its page's hand-back (`<the add-on>/register/done#turnstile=…`).
 //!
 //! The window is the service's page and nothing else: it is given no script, no key to the core and no permission,
 //! opens only `https`, `about` and `data` addresses, and keeps its data in a folder apart from the main window's,
