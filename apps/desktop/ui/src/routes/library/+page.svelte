@@ -291,7 +291,7 @@
 			</form>
 		{/if}
 	{:else if tab === 'albums'}
-		{#key L.changed}<Albums {q} />{/key}
+		{#key L.changed}<Albums {q} here={ui.local} />{/key}
 	{:else if tab === 'artists'}
 		{#if L.followed.length}
 			<h2 class="vh2">Following</h2>
@@ -305,7 +305,7 @@
 			</div>
 			<h2 class="vh2">In your library</h2>
 		{/if}
-		{#key L.changed}<Artists {q} />{/key}
+		{#key L.changed}<Artists {q} here={ui.local} />{/key}
 	{:else if tab === 'genres'}
 		<Browse by="genre" {q} here={ui.local} />
 	{:else if tab === 'folders'}

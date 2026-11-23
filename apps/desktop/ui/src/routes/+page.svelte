@@ -9,6 +9,7 @@
 	import { L, ui } from '../lib/ui/state.svelte';
 	import { T } from '../lib/desktop/youtube.svelte';
 	import TubeShelves from '../lib/desktop/TubeShelves.svelte';
+	import LocalHome from '../lib/desktop/LocalHome.svelte';
 	import { songs } from '../lib/ui/format';
 	import { jumpBackIn } from '../lib/home/jump';
 	import { M } from '../lib/desktop/mixes.svelte';
@@ -87,7 +88,9 @@
 	{/if}
 {/snippet}
 
-{#if !L.loaded}
+{#if ui.local}
+	<LocalHome />
+{:else if !L.loaded}
 	<div class="view"></div>
 {:else if empty}
 	<section class="empty" aria-label="Get started">

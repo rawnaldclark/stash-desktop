@@ -248,7 +248,7 @@ pub(crate) use here;
 /// from the first that many matches, which is still more albums and artists than a row of results shows.
 const FOUND_CAP: usize = 20_000;
 
-const TRACK_COLUMNS: &str = concat!(
+pub(crate) const TRACK_COLUMNS: &str = concat!(
     "t.id, t.title, a.name, al.title, t.duration_ms, t.codec, t.sample_rate, t.bit_depth, t.origin, t.sort_key, t.liked_at_ms IS NOT NULL, ",
     art!(),
     ", t.album_id, t.artist_id, t.added_at * 1000, t.isrc, t.liked_at_ms, ",
@@ -258,7 +258,7 @@ const TRACK_COLUMNS: &str = concat!(
 );
 /// How many columns [`TRACK_COLUMNS`] has: a column a query adds after them is read from this place on.
 pub(crate) const TRACK_COLUMN_COUNT: usize = 19;
-const ALBUM_COLUMNS: &str = concat!(
+pub(crate) const ALBUM_COLUMNS: &str = concat!(
     "al.id, al.title, a.name, al.artist_id, al.year,
     (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id),
     (SELECT ",
@@ -268,7 +268,7 @@ const ALBUM_COLUMNS: &str = concat!(
     " IS NOT NULL ORDER BY t.art_url IS NULL, t.disc_no, t.track_no LIMIT 1)"
 );
 
-fn album_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AlbumRow> {
+pub(crate) fn album_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AlbumRow> {
     Ok(AlbumRow {
         id: r.get(0)?,
         title: r.get(1)?,
@@ -280,7 +280,7 @@ fn album_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AlbumRow> {
     })
 }
 
-const ARTIST_COLUMNS: &str = concat!(
+pub(crate) const ARTIST_COLUMNS: &str = concat!(
     "a.id, a.name,
     (SELECT COUNT(*) FROM tracks t WHERE t.artist_id = a.id),
     (SELECT COUNT(*) FROM albums al WHERE al.artist_id = a.id),
@@ -291,7 +291,7 @@ const ARTIST_COLUMNS: &str = concat!(
     " IS NOT NULL ORDER BY t.art_url IS NULL LIMIT 1)"
 );
 
-fn artist_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArtistRow> {
+pub(crate) fn artist_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArtistRow> {
     Ok(ArtistRow {
         id: r.get(0)?,
         name: r.get(1)?,
@@ -300,7 +300,7 @@ fn artist_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArtistRow> {
         art: r.get(4)?,
     })
 }
-const TRACK_JOINS: &str =
+pub(crate) const TRACK_JOINS: &str =
     "JOIN artists a ON a.id = t.artist_id LEFT JOIN albums al ON al.id = t.album_id";
 /// The same, for the lists kept in `lists.rs` ([`TRACK_COLUMN_COUNT`] columns, read by [`track_row_for_lists`]).
 pub(crate) const TRACK_COLUMNS_FOR_LISTS: &str = TRACK_COLUMNS;
@@ -309,7 +309,7 @@ pub(crate) fn track_row_for_lists(r: &rusqlite::Row<'_>) -> rusqlite::Result<Tra
     track_row(r)
 }
 
-fn track_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackRow> {
+pub(crate) fn track_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackRow> {
     Ok(TrackRow {
         id: r.get(0)?,
         title: r.get(1)?,

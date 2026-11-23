@@ -8,7 +8,7 @@
 	import { more } from './more';
 
 	/** What is typed in the library's search box: the grid shows only what matches it. */
-	let { q = '' }: { q?: string } = $props();
+	let { q = '', here = false }: { q?: string; here?: boolean } = $props();
 	const needle = $derived(fold(q));
 
 	const PAGE = 120;
@@ -23,7 +23,7 @@
 	async function read(): Promise<boolean> {
 		if (done) return false;
 		try {
-			const page = await core.artistsAt(rows.length, PAGE);
+			const page = await core.artistsAt(rows.length, PAGE, undefined, here);
 			rows = [...rows, ...page];
 			done = page.length < PAGE;
 			failure = null;

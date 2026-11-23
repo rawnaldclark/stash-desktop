@@ -222,9 +222,15 @@ export const heardAt = (offset: number, limit: number) => rows<HeardRow>(`/api/h
 export const playlists = () => rows<PlaylistRow>('/api/playlists');
 export const playlistTracksAt = (id: number, offset: number, limit: number, signal?: AbortSignal) =>
 	rows<TrackRow>(`/api/playlists/${id}/tracks?offset=${offset}&limit=${limit}`, signal);
-export const albumsAt = (offset: number, limit: number, signal?: AbortSignal) => rows<AlbumRow>(`/api/albums?offset=${offset}&limit=${limit}`, signal);
+/** `here`: only the albums with a file on this computer. */
+export const albumsAt = (offset: number, limit: number, signal?: AbortSignal, here = false) => rows<AlbumRow>(`/api/albums?offset=${offset}&limit=${limit}${here ? '&here=1' : ''}`, signal);
+
+/** How much music is on this computer, and Home's shelves for it (Stash run for local files only). */
+export type LocalStats = { songs: number; albums: number; artists: number; genres: number; duration_ms: number; bytes: number };
+export type LocalHome = { stats: LocalStats; added: AlbumRow[]; played: TrackRow[]; genres: { genre: string; songs: number }[] };
+export const localHome = () => get<LocalHome>('/api/local/home');
 export const album = (id: number) => get<{ album: AlbumRow; rows: TrackRow[] }>(`/api/albums/${id}`);
-export const artistsAt = (offset: number, limit: number, signal?: AbortSignal) => rows<ArtistRow>(`/api/artists?offset=${offset}&limit=${limit}`, signal);
+export const artistsAt = (offset: number, limit: number, signal?: AbortSignal, here = false) => rows<ArtistRow>(`/api/artists?offset=${offset}&limit=${limit}${here ? '&here=1' : ''}`, signal);
 /** `with`: the artist's songs with others ("A & B", "B feat. A"), credited apart. */
 export const artist = (id: number) => get<{ artist: ArtistRow; rows: TrackRow[]; albums: AlbumRow[]; with?: TrackRow[] }>(`/api/artists/${id}`);
 /** One artist a credit names: `before`, `name` and `after` give the credit back as written; `id` is their artist here,

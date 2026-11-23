@@ -24,6 +24,7 @@ pub mod lastfm;
 pub mod library;
 pub mod listenbrainz;
 pub mod lists;
+pub mod local;
 pub mod lyrics;
 pub mod matching;
 pub mod phone;
