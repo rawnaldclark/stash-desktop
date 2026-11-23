@@ -11,11 +11,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::json;
+use stash_core::edit::TagEdit;
 use stash_core::table::{SortBy, TableAsk, read_more};
 use tiny_http::{Method, Request};
 use url::Url;
 
-use crate::serve::{Reply, State, refuse, reply_json};
+use crate::serve::{Reply, State, body_json, refuse, reply_json};
 
 /// Files read between two looks at whether Stash is closing.
 const BATCH: usize = 40;
@@ -87,14 +88,44 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
 }
 
 pub(crate) fn route(state: &State, request: &mut Request, path: &str) -> Result<Option<Reply>> {
-    if !matches!(path, "/api/table" | "/api/table/ids" | "/api/genres") {
+    if !matches!(path, "/api/table" | "/api/table/ids" | "/api/genres" | "/api/tags") {
         return Ok(None);
+    }
+    // POST /api/tags {ids, set}: writes the fields of `set` into the files of those songs (a field left out stays, ""
+    // clears it), and answers how many were written, skipped (not files here) and failed, each failure with why.
+    if path == "/api/tags" && *request.method() == Method::Post {
+        let body = body_json(request)?;
+        let ids: Vec<i64> = body
+            .get("ids")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_i64()).collect())
+            .unwrap_or_default();
+        let Some(edit) = body.get("set").and_then(|v| serde_json::from_value::<TagEdit>(v.clone()).ok()) else {
+            return Ok(Some(refuse(400, "set names the fields to change")));
+        };
+        if ids.is_empty() || ids.len() > 5_000 || edit.is_empty() {
+            return Ok(Some(refuse(400, "ids are the songs (5,000 at most) and set the fields to change")));
+        }
+        if let Some(why) = edit.wrong() {
+            return Ok(Some(refuse(400, why)));
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        let report = state.library.lock().unwrap().edit_tags(&ids, &edit, now)?;
+        if report.written > 0 {
+            state.edited();
+        }
+        return Ok(Some(reply_json(200, json!(report))));
     }
     if *request.method() != Method::Get {
         return Ok(None);
     }
     let url = Url::parse(&format!("http://local{}", request.url())).context("the request's path")?;
     let param = |name: &str| url.query_pairs().find(|(k, _)| k == name).map(|(_, v)| v.into_owned());
+    // GET /api/tags?ids=1,2,3: what those songs say now, each field's value when they agree, for the form.
+    if path == "/api/tags" {
+        let ids: Vec<i64> = param("ids").unwrap_or_default().split(',').filter_map(|s| s.trim().parse().ok()).take(5_000).collect();
+        return Ok(Some(reply_json(200, json!(state.library.lock().unwrap().tags_now(&ids)?))));
+    }
     let number = |name: &str, default: usize| param(name).and_then(|v| v.parse::<usize>().ok()).unwrap_or(default);
     let here = param("here").as_deref() == Some("1");
     let library = state.library.lock().unwrap();
