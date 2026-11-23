@@ -391,6 +391,158 @@ impl Signer for Signing {
     }
 }
 
+// ---- This computer's own pass ----
+//
+// Stash's access token and signing key are the same in every copy of Stash, so the add-on also hands each install its
+// own pass, once, after a quick check that a person is adding it (Cloudflare Turnstile, on the add-on's own page). The
+// pass then takes the access token's place in the add-on's link; the add-on counts this computer by it. Until the
+// add-on offers the check, the access token is used as before.
+
+/// What the check page does when it is passed: it goes to `<its origin>/register/done#turnstile=<token>`. The window
+/// stops there before it loads (the token is in the fragment, which is never sent anywhere in any case).
+const HAND_BACK_PATH: &str = "/register/done";
+const TURNSTILE_FRAGMENT: &str = "turnstile=";
+/// What a pass may be: two base64url parts, at most this long.
+const PASS_MOST: usize = 400;
+
+/// The add-on's link as `/v1/<token>/manifest.json`, parsed; none for any other shape.
+fn v1_link(link: &str) -> Option<Url> {
+    let url = Url::parse(link).ok()?;
+    let shaped = {
+        let parts: Vec<&str> = url.path_segments()?.collect();
+        parts.len() == 3 && parts[0] == "v1" && !parts[1].is_empty() && parts[2] == "manifest.json"
+    };
+    (matches!(url.scheme(), "https" | "http") && shaped).then_some(url)
+}
+
+/// Where the add-on at `link` gives its check: `<its origin>/register`.
+pub fn register_page(link: &str) -> Option<String> {
+    let mut url = v1_link(link)?;
+    url.set_path("/register");
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.to_string())
+}
+
+/// Whether `pass` is shaped like one the add-on gives.
+pub fn pass_ok(pass: &str) -> bool {
+    let parts: Vec<&str> = pass.split('.').collect();
+    pass.len() <= PASS_MOST
+        && parts.len() == 2
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+}
+
+/// The add-on's link with `pass` where its access token was: `/v1/<pass>/manifest.json`.
+pub fn pass_link(link: &str, pass: &str) -> Option<String> {
+    if !pass_ok(pass) {
+        return None;
+    }
+    let mut url = v1_link(link)?;
+    url.path_segments_mut()
+        .ok()?
+        .clear()
+        .push("v1")
+        .push(pass)
+        .push("manifest.json");
+    Some(url.to_string())
+}
+
+/// Whether the check window, opened on `page`, is about to go to that page's hand-back (on the page's own origin).
+pub fn is_hand_back(page: &str, url: &str) -> bool {
+    let (Ok(page), Ok(url)) = (Url::parse(page), Url::parse(url)) else {
+        return false;
+    };
+    url.origin() == page.origin() && url.path() == HAND_BACK_PATH
+}
+
+/// The Turnstile token the check page (opened on `page`) handed back, or none.
+pub fn turnstile_token(page: &str, url: &str) -> Option<String> {
+    if !is_hand_back(page, url) {
+        return None;
+    }
+    let fragment = Url::parse(url).ok()?.fragment()?.to_string();
+    let token = percent_decoded(fragment.strip_prefix(TURNSTILE_FRAGMENT)?)?;
+    (!token.is_empty() && token.len() <= 2048 && token.bytes().all(|b| b.is_ascii_graphic()))
+        .then_some(token)
+}
+
+/// `text` with its `%XX` escapes undone; none when one is broken or the result is not text.
+fn percent_decoded(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = text.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn register_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(20)))
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .user_agent(USER_AGENT)
+        .build()
+        .into()
+}
+
+/// Whether the add-on gives the check (its page answers): when it does not yet, its access token is used as before.
+/// Err: it could not be asked.
+pub fn check_offered(page: &str) -> Result<bool, String> {
+    let answer = register_agent()
+        .get(page)
+        .call()
+        .map_err(|_| "Stash's servers could not be reached".to_string())?;
+    match answer.status().as_u16() {
+        200 => Ok(true),
+        404 | 503 => Ok(false),
+        status => Err(format!("Stash's servers answered {status}")),
+    }
+}
+
+/// Hands the add-on the solved check (`POST <page>`) and answers this computer's pass, or words for the listener.
+pub fn register(page: &str, token: &str) -> Result<String, String> {
+    let body =
+        serde_json::json!({ "app": "desktop", "proof": { "kind": "turnstile", "token": token } });
+    let mut answer = register_agent()
+        .post(page)
+        .header("Content-Type", "application/json")
+        .send(body.to_string())
+        .map_err(|_| "Stash's servers could not be reached".to_string())?;
+    let status = answer.status().as_u16();
+    let text = answer
+        .body_mut()
+        .with_config()
+        .limit(16 * 1024)
+        .read_to_string()
+        .unwrap_or_default();
+    match status {
+        200 => serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("pass")?.as_str().map(str::to_string))
+            .filter(|pass| pass_ok(pass))
+            .ok_or_else(|| "Stash's servers gave an answer Stash cannot read".to_string()),
+        403 => Err("The check didn't go through. Press Add to try again.".into()),
+        429 => {
+            Err("Too many computers were added from this network today. Try again tomorrow.".into())
+        }
+        503 => Err("Stash's Tidal can't add computers right now. Try again later.".into()),
+        status => Err(format!("Stash's servers answered {status}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,5 +726,189 @@ mod tests {
         // A token that could not go in a header is no token.
         assert!(signing.set_entitlement(Some("bad token".into())));
         assert!(!signing.entitled());
+    }
+
+    const PASS: &str = "eyJ2IjoxfQ.c2lnbmF0dXJlLW9mLXRoZS1hZGQtb24";
+
+    #[test]
+    fn the_pass_takes_the_access_token_s_place_in_the_add_on_s_link() {
+        let link = "https://tidal.example/v1/the-access-token/manifest.json";
+        assert_eq!(
+            register_page(link).as_deref(),
+            Some("https://tidal.example/register")
+        );
+        assert_eq!(
+            pass_link(link, PASS),
+            Some(format!("https://tidal.example/v1/{PASS}/manifest.json"))
+        );
+        // Only the add-on face's own shape, and only a pass-shaped pass.
+        for other in [
+            "https://tidal.example/manifest.json",
+            "https://tidal.example/v1/manifest.json",
+            "https://tidal.example/web/x/manifest.json",
+            "ftp://tidal.example/v1/t/manifest.json",
+            "not a link",
+        ] {
+            assert_eq!(register_page(other), None, "{other}");
+            assert_eq!(pass_link(other, PASS), None, "{other}");
+        }
+        for bad in ["", "one-part", "a.b.c", "a./b", "a b.c", &"a".repeat(401)] {
+            assert!(!pass_ok(bad), "{bad}");
+            assert_eq!(pass_link(link, bad), None);
+        }
+        assert!(pass_ok(PASS));
+    }
+
+    #[test]
+    fn the_check_page_s_hand_back_gives_its_token_and_nothing_else() {
+        let page = "https://tidal.example/register";
+        let back = |rest: &str| format!("https://tidal.example/register/done{rest}");
+        assert!(is_hand_back(page, &back("#turnstile=abc")));
+        assert!(
+            is_hand_back(page, &back("")),
+            "caught even without a token: the window stops there"
+        );
+        assert!(!is_hand_back(page, page));
+        assert!(
+            !is_hand_back(
+                page,
+                "https://challenges.cloudflare.com/register/done#turnstile=abc"
+            ),
+            "another origin"
+        );
+        assert!(
+            !is_hand_back(page, "http://tidal.example/register/done#turnstile=abc"),
+            "another scheme"
+        );
+        assert!(
+            !is_hand_back(
+                page,
+                "https://tidal.example:8443/register/done#turnstile=abc"
+            ),
+            "another port"
+        );
+        assert_eq!(
+            turnstile_token(page, &back("#turnstile=0.AbC_d-e.f")).as_deref(),
+            Some("0.AbC_d-e.f")
+        );
+        assert_eq!(
+            turnstile_token(page, &back("#turnstile=a%2Bb%3D")).as_deref(),
+            Some("a+b=")
+        );
+        for none in [
+            "",
+            "#",
+            "#turnstile=",
+            "#error=x",
+            "#turnstile=a%2",
+            "#turnstile=a%zz",
+            "#turnstile=a%20b",
+        ] {
+            assert_eq!(turnstile_token(page, &back(none)), None, "{none}");
+        }
+        let long = back(&format!("#turnstile={}", "a".repeat(2049)));
+        assert_eq!(turnstile_token(page, &long), None);
+        assert_eq!(
+            turnstile_token(page, "https://evil.example/register/done#turnstile=abc"),
+            None
+        );
+    }
+
+    /// Answers each request in `answers` in turn on 127.0.0.1 (status, body), and hands back what was asked.
+    fn server(answers: Vec<(u16, &'static str)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let handle = std::thread::spawn(move || {
+            let mut asked = Vec::new();
+            for (status, body) in answers {
+                let (mut conn, _) = listener.accept().unwrap();
+                let mut got = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = conn.read(&mut buf).unwrap();
+                    got.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&got).to_string();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if got.len() >= end + 4 + length || n == 0 {
+                            break;
+                        }
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                asked.push(String::from_utf8_lossy(&got).to_string());
+                let reply = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                conn.write_all(reply.as_bytes()).unwrap();
+            }
+            asked
+        });
+        (base, handle)
+    }
+
+    #[test]
+    fn registering_posts_the_token_as_stash_and_keeps_only_a_pass_shaped_answer() {
+        let (base, asked) = server(vec![
+            (200, "<html>"),
+            (503, "{}"),
+            (
+                200,
+                r#"{"pass":"eyJ2IjoxfQ.c2lnbmF0dXJlLW9mLXRoZS1hZGQtb24","install":"x"}"#,
+            ),
+            (200, r#"{"pass":"not a pass"}"#),
+            (403, r#"{"error":{"code":"proof_refused"}}"#),
+            (429, "{}"),
+        ]);
+        let page = format!("{base}/register");
+        assert_eq!(check_offered(&page), Ok(true));
+        assert_eq!(
+            check_offered(&page),
+            Ok(false),
+            "not offered yet: the access token as before"
+        );
+        assert_eq!(register(&page, "tok.en").as_deref(), Ok(PASS));
+        assert!(
+            register(&page, "tok.en").is_err(),
+            "a reply that is not a pass"
+        );
+        assert!(
+            register(&page, "tok.en")
+                .unwrap_err()
+                .contains("Press Add to try again")
+        );
+        assert!(
+            register(&page, "tok.en")
+                .unwrap_err()
+                .contains("Too many computers")
+        );
+        let asked = asked.join().unwrap();
+        let post = &asked[2];
+        assert!(post.starts_with("POST /register "), "{post}");
+        assert!(
+            post.to_ascii_lowercase()
+                .contains(&format!("user-agent: {}", USER_AGENT.to_ascii_lowercase()))
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(&post[post.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({ "app": "desktop", "proof": { "kind": "turnstile", "token": "tok.en" } })
+        );
+        assert_eq!(
+            check_offered("http://127.0.0.1:9/register").unwrap_err(),
+            "Stash's servers could not be reached"
+        );
     }
 }

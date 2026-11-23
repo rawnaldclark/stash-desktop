@@ -1561,6 +1561,8 @@ impl Core {
 
     /// Lets the listener pass a Mornye extension's verification page (or sign in to it) in a window `shell` opens.
     pub fn with_verify(self, shell: crate::mornye::VerifyShell) -> Self {
+        // Stash's Tidal's quick check opens the same way.
+        let _ = self.state.tidal.shell.set(Arc::clone(&shell));
         if let Some(cloud) = &self.state.cloud {
             let _ = cloud.shell.set(Arc::clone(&shell));
         }

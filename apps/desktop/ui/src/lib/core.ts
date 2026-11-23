@@ -455,7 +455,15 @@ export type TidalStatus = {
 	supporter: boolean;
 	can_claim: boolean;
 	claiming: string | null;
+	/** The add-on's quick check is open in its own window (Add opens it where the add-on offers it). */
+	checking: boolean;
+	/** Why the last check did not go through. */
+	check_trouble: string | null;
+	/** The add-on no longer takes this computer's pass: the check is offered again. */
+	needs_check: boolean;
 };
+/** Opens the add-on's quick check again (Settings › Tidal, when `needs_check`). */
+export const checkStashTidal = () => post<TidalStatus>('/api/tidal/check', {});
 export const removeAddon = (id: string) => post<Listed>('/api/addons/remove', { id }).then((r) => r.addons);
 export const setAddonEnabled = (id: string, enabled: boolean) => post<Listed>('/api/addons/enabled', { id, enabled }).then((r) => r.addons);
 export const orderAddons = (ids: string[]) => post<Listed>('/api/addons/order', { ids }).then((r) => r.addons);
