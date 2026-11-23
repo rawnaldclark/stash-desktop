@@ -1294,6 +1294,131 @@ impl Library {
         })
     }
 
+    /// What deleting the songs `ids` for good would touch: how many of them there are, how many sit in playlists (and
+    /// in how many playlists), how many are saved on this computer, and how many are files of the listener's own
+    /// music folders, each with the size of its files. For the question asked before anything is deleted.
+    pub fn delete_preview(&self, ids: &[i64]) -> Result<DeletePreview> {
+        let mut out = DeletePreview::default();
+        let mut playlists = std::collections::HashSet::new();
+        let mut read = self.conn.prepare_cached(
+            "SELECT t.origin, COALESCE(t.file_size, 0),
+                    EXISTS (SELECT 1 FROM downloads d WHERE d.track_id = t.id AND d.state = 'saved')
+             FROM tracks t WHERE t.id = ?1",
+        )?;
+        let mut lists = self
+            .conn
+            .prepare_cached("SELECT DISTINCT playlist_id FROM playlist_items WHERE track_id = ?1")?;
+        for &id in ids {
+            let Some((origin, bytes, saved)) = read
+                .query_row([id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, bool>(2)?))
+                })
+                .optional()?
+            else {
+                continue;
+            };
+            out.songs += 1;
+            let mine: Vec<i64> = lists.query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            if !mine.is_empty() {
+                out.in_playlists += 1;
+                playlists.extend(mine);
+            }
+            if saved {
+                out.saved_files += 1;
+                out.saved_bytes += bytes.max(0) as u64;
+            } else if origin == "file" {
+                out.folder_files += 1;
+                out.folder_bytes += bytes.max(0) as u64;
+            }
+        }
+        out.playlists = playlists.len();
+        Ok(out)
+    }
+
+    /// Every song credited to the artist `artist`: what "delete this artist" deletes.
+    pub fn artist_song_ids(&self, artist: i64) -> Result<Vec<i64>> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT id FROM tracks WHERE artist_id = ?1 ORDER BY id")?
+            .query_map([artist], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Takes the songs `ids` out of every playlist that holds them (each occurrence), keeping the order of the rest.
+    /// Answers how many playlists changed. So a song in playlists can then leave the library.
+    pub fn take_out_of_playlists(&mut self, ids: &[i64], now_ms: i64) -> Result<usize> {
+        let gone: std::collections::HashSet<i64> = ids.iter().copied().collect();
+        let tx = self.conn.transaction()?;
+        let mut changed = 0;
+        {
+            let mut touched = std::collections::BTreeSet::new();
+            {
+                let mut lists = tx.prepare("SELECT DISTINCT playlist_id FROM playlist_items WHERE track_id = ?1")?;
+                for id in ids {
+                    for list in lists.query_map([id], |r| r.get::<_, i64>(0))? {
+                        touched.insert(list?);
+                    }
+                }
+            }
+            let mut read = tx.prepare("SELECT track_id FROM playlist_items WHERE playlist_id = ?1 ORDER BY position")?;
+            let mut clear = tx.prepare("DELETE FROM playlist_items WHERE playlist_id = ?1")?;
+            let mut add = tx.prepare("INSERT INTO playlist_items(playlist_id, position, track_id) VALUES (?1, ?2, ?3)")?;
+            let mut stamp = tx.prepare("UPDATE playlists SET updated_at_ms = ?2 WHERE id = ?1")?;
+            for list in touched {
+                let items: Vec<i64> = read.query_map([list], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+                let kept: Vec<i64> = items.iter().copied().filter(|t| !gone.contains(t)).collect();
+                if kept.len() == items.len() {
+                    continue;
+                }
+                clear.execute([list])?;
+                for (position, track) in kept.iter().enumerate() {
+                    add.execute(params![list, position as i64, track])?;
+                }
+                stamp.execute(params![list, now_ms])?;
+                changed += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    /// Of the songs `ids`, the files of the listener's own music folders (not ones Stash saved): each with its path.
+    pub fn folder_files(&self, ids: &[i64]) -> Result<Vec<(i64, String)>> {
+        let mut read = self.conn.prepare_cached(
+            "SELECT t.locator FROM tracks t
+             WHERE t.id = ?1 AND t.origin = 'file' AND t.locator != ''
+               AND NOT EXISTS (SELECT 1 FROM downloads d WHERE d.track_id = t.id)",
+        )?;
+        let mut out = Vec::new();
+        for &id in ids {
+            if let Some(path) = read.query_row([id], |r| r.get::<_, String>(0)).optional()? {
+                out.push((id, path));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The files of the songs `ids` are gone from the music folders (the listener had them deleted): each is no
+    /// longer a file here, so [`Library::remove_songs`] lets it leave and a scan does not bring it back.
+    pub fn files_gone(&mut self, ids: &[i64]) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let mut n = 0;
+        {
+            let mut back = tx.prepare(
+                "UPDATE tracks SET origin = 'described', locator = '', codec = NULL, sample_rate = NULL,
+                                   bit_depth = NULL, file_size = NULL, file_mtime = NULL, missing_since = NULL,
+                                   cover = NULL
+                 WHERE id = ?1 AND origin = 'file'
+                   AND NOT EXISTS (SELECT 1 FROM downloads d WHERE d.track_id = tracks.id)",
+            )?;
+            for id in ids {
+                n += back.execute([id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
     /// Of the songs `ids`, the ones that can leave the library, and why the others cannot: a song in a playlist stays
     /// (taking it out would change the playlist), and so does a file in the listener's music folders (a scan would
     /// bring it back). A song saved to this computer can leave (its file goes with it).
@@ -1853,6 +1978,22 @@ impl Library {
     }
 }
 
+/// What deleting some songs for good would touch ([`Library::delete_preview`]).
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DeletePreview {
+    /// The songs that are in the library.
+    pub songs: usize,
+    /// How many of them are in at least one playlist, and how many playlists hold any of them.
+    pub in_playlists: usize,
+    pub playlists: usize,
+    /// Saved on this computer by Stash: their files go with them.
+    pub saved_files: usize,
+    pub saved_bytes: u64,
+    /// Files of the listener's own music folders.
+    pub folder_files: usize,
+    pub folder_bytes: u64,
+}
+
 /// Of some songs, the ones that can leave the library ([`Library::removable`]), and how many cannot.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Removable {
@@ -1920,6 +2061,77 @@ pub struct NewRelease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn songs_in_playlists_can_be_deleted_once_taken_out_of_them() {
+        let mut library = Library::open_in_memory().unwrap();
+        let song = |title: &str, artist: &str| Song {
+            title: title.into(),
+            artist: artist.into(),
+            album: Some("An album".into()),
+            duration_ms: Some(200_000),
+            refs: vec![("youtube".into(), format!("yt-{title}"))],
+            ..Default::default()
+        };
+        let a = library.adopt(&song("A", "One")).unwrap();
+        let b = library.adopt(&song("B", "One")).unwrap();
+        let c = library.adopt(&song("C", "Two")).unwrap();
+        let first = library.create_playlist("First", 5).unwrap();
+        let second = library.create_playlist("Second", 5).unwrap();
+        library.add_to_playlist(first, &[a, c, b, a], 6).unwrap();
+        library.add_to_playlist(second, &[c], 6).unwrap();
+
+        // The question asked first: three songs, two of them in the one playlist.
+        let asked = library.delete_preview(&[a, b, 999]).unwrap();
+        assert_eq!((asked.songs, asked.in_playlists, asked.playlists), (2, 2, 1));
+        assert_eq!((asked.saved_files, asked.folder_files), (0, 0));
+
+        // As it was: they stay.
+        assert_eq!(library.remove_songs(&[a, b]).unwrap(), 0);
+
+        // Taken out of every playlist (each place they held), the rest keeps its order.
+        assert_eq!(library.take_out_of_playlists(&[a, b], 9).unwrap(), 1);
+        let left = |library: &Library, list: i64| -> Vec<i64> {
+            library
+                .conn
+                .prepare("SELECT track_id FROM playlist_items WHERE playlist_id = ?1 ORDER BY position")
+                .unwrap()
+                .query_map([list], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(left(&library, first), vec![c]);
+        assert_eq!(left(&library, second), vec![c]);
+        assert_eq!(library.take_out_of_playlists(&[a, b], 10).unwrap(), 0);
+        assert_eq!(library.remove_songs(&[a, b]).unwrap(), 2);
+        assert!(library.describe(a).unwrap().is_none());
+        assert!(library.describe(c).unwrap().is_some());
+    }
+
+    #[test]
+    fn an_artists_songs_are_every_song_credited_to_them() {
+        let mut library = Library::open_in_memory().unwrap();
+        let song = |title: &str, artist: &str| Song {
+            title: title.into(),
+            artist: artist.into(),
+            refs: vec![("youtube".into(), format!("yt-{title}"))],
+            ..Default::default()
+        };
+        let a = library.adopt(&song("A", "One")).unwrap();
+        let b = library.adopt(&song("B", "Two")).unwrap();
+        let c = library.adopt(&song("C", "One")).unwrap();
+        let one: i64 = library
+            .conn
+            .query_row("SELECT artist_id FROM tracks WHERE id = ?1", [a], |r| r.get(0))
+            .unwrap();
+        assert_eq!(library.artist_song_ids(one).unwrap(), vec![a, c]);
+        assert_eq!(library.remove_songs(&library.artist_song_ids(one).unwrap()).unwrap(), 2);
+        assert!(library.describe(b).unwrap().is_some());
+        // The artist went with their last song.
+        let artists: i64 = library.conn.query_row("SELECT COUNT(*) FROM artists", [], |r| r.get(0)).unwrap();
+        assert_eq!(artists, 1);
+    }
 
     #[test]
     fn a_song_leaves_the_library_and_its_plays_stay_heard() {

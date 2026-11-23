@@ -652,6 +652,14 @@ pub(crate) fn remove_saved(file: &Path, root: &Path) {
     }
 }
 
+/// The songs a delete is about: the body's `ids`, or every song of its `artist`.
+fn delete_ids(library: &Library, body: &Value) -> anyhow::Result<Vec<i64>> {
+    Ok(match body.get("artist").and_then(Value::as_i64) {
+        Some(artist) => library.artist_song_ids(artist)?,
+        None => ids_of(body),
+    })
+}
+
 /// The downloads routes. `None`: the path is not one of them.
 /// A list kept on this computer (`/api/liked/download`, `/api/playlists/{id}/download`). GET: whether it is, and how
 /// far (its songs, how many play with no connection, how many wait to be saved, how many could not be). POST `{on}`:
@@ -745,13 +753,49 @@ pub(crate) fn route(
 ) -> anyhow::Result<Option<Reply>> {
     // Songs out of the library for good: a saved one's file goes first (as when it is taken off the saved songs).
     // A song in a playlist, and a file of the music folders, stay: the answer says how many.
+    // What a delete would touch, for the question asked first: `{ids}` or `{artist}` (every song of that artist).
+    if path == "/api/library/remove/preview" && *request.method() == Method::Post {
+        let body = body_json(request)?;
+        let library = state.library.lock().unwrap();
+        let ids = delete_ids(&library, &body)?;
+        return Ok(Some(reply_json(200, json!(library.delete_preview(&ids)?))));
+    }
+    // `{ids}` or `{artist}`. With `"playlists": true` the songs are first taken out of every playlist that holds
+    // them; with `"files": true` the files of the listener's own music folders are moved to the Recycle Bin (one
+    // that cannot be moved stays, and so does its song). Files Stash saved always go with their songs, to the
+    // Recycle Bin when there is one. Without the flags, what a flag would have covered stays and is counted.
     if path == "/api/library/remove" && *request.method() == Method::Post {
-        let ids = ids_of(&body_json(request)?);
+        let body = body_json(request)?;
+        let ids = delete_ids(&state.library.lock().unwrap(), &body)?;
+        let flag = |name: &str| body.get(name).and_then(Value::as_bool).unwrap_or(false);
+        let unlisted = if flag("playlists") {
+            state.library.lock().unwrap().take_out_of_playlists(&ids, now_ms())?
+        } else {
+            0
+        };
+        let mut binned = 0usize;
+        if flag("files") {
+            let files = state.library.lock().unwrap().folder_files(&ids)?;
+            let mut gone = Vec::new();
+            for (id, file) in files {
+                let file = Path::new(&file);
+                // Already gone counts as deleted; one that will not move is left, with its song.
+                if !file.exists() || trash::delete(file).is_ok() {
+                    gone.push(id);
+                    binned += 1;
+                }
+            }
+            state.library.lock().unwrap().files_gone(&gone)?;
+        }
         let can = state.library.lock().unwrap().removable(&ids)?;
         let files = state.library.lock().unwrap().forget_downloads(&can.ids)?;
         let root = folder(&state.library.lock().unwrap());
         for file in &files {
             let file = Path::new(file);
+            if file.exists() && trash::delete(file).is_ok() {
+                binned += 1;
+            }
+            // Deletes it outright where there is no bin, and clears the folders it leaves empty.
             remove_saved(
                 file,
                 file.parent()
@@ -760,9 +804,16 @@ pub(crate) fn route(
             );
         }
         let removed = state.library.lock().unwrap().remove_songs(&can.ids)?;
+        // Nothing deleted goes on playing from the queue.
+        let left: std::collections::HashSet<i64> = can.ids.iter().copied().collect();
+        if removed > 0 && let Ok(player) = &state.player {
+            player.retain(|item| item.id.is_none_or(|id| !left.contains(&id)));
+        }
         let library = state.library.lock().unwrap();
         let mut answer = json!({
             "removed": removed,
+            "unlisted": unlisted,
+            "binned": binned,
             "in_playlists": can.in_playlists,
             "in_folders": can.in_folders,
             "playlists": library.playlists()?,
