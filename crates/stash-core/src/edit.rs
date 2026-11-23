@@ -19,16 +19,25 @@ use crate::table::read_more;
 
 /// What to change. A field left out stays as it is in every file; a field given as "" is cleared; anything else is
 /// written (trimmed). So one edit can set the genre of a hundred songs and leave their titles alone.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct TagEdit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artist: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub album: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub album_artist: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub genre: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub track_no: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disc_no: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub composer: Option<String>,
 }
 
