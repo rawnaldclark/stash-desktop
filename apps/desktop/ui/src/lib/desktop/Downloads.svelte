@@ -6,6 +6,7 @@
 	import * as core from '../core';
 	import Icon from '../ui/Icon.svelte';
 	import TrackRow from '../ui/TrackRow.svelte';
+	import WindowRows from '../ui/WindowRows.svelte';
 	import { P, type PickList } from '../ui/pick.svelte';
 	import type { LibraryItem } from '../api';
 	import { songs } from '../ui/format';
@@ -141,9 +142,11 @@
 			</ul>
 		{/if}
 		<div class="trk-list">
-			{#each rows as r, i (r.id)}
-				<TrackRow item={items[i]} num={i + 1} album tag={status(r)} {pick} at={i} onplay={() => play(i)} extra={extra(r)} />
-			{/each}
+			<WindowRows items={rows} key={(r) => r.id}>
+				{#snippet row(r, i)}
+					<TrackRow item={items[i]} num={i + 1} album tag={status(r)} {pick} at={i} onplay={() => play(i)} extra={extra(r)} />
+				{/snippet}
+			</WindowRows>
 		</div>
 		{#if total > rows.length && rows.length >= shown}
 			<button type="button" class="btn ghost hist-more" onclick={() => { shown += PAGE; void read(); }}>Show more</button>

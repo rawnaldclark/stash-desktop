@@ -23,6 +23,7 @@
 	import { atEvent, deleteFolder, folderHref, folderMenu, playlistMenu, playlistsWord } from '../../lib/desktop/playlist-folders';
 	import Icon from '../../lib/ui/Icon.svelte';
 	import TrackRow from '../../lib/ui/TrackRow.svelte';
+	import WindowRows from '../../lib/ui/WindowRows.svelte';
 	import { L, LS, ui } from '../../lib/ui/state.svelte';
 	import { dayLabel, songs } from '../../lib/ui/format';
 
@@ -210,9 +211,12 @@
 				<span class="lib-count">{needle ? `${likes.length} of ${songs(L.likes.length)}` : songs(L.likes.length)}</span>
 			</div>
 			<div class="trk-list">
-				{#each likes as it, i (it.refs.lib ?? it.key)}
-					<TrackRow item={it} num={i + 1} album pick={likesPick} at={i} onplay={() => play(likes, i)} />
-				{/each}
+				<!-- Thousands of likes: only the rows on screen are built. -->
+				<WindowRows items={likes} key={(it) => it.refs.lib ?? it.key}>
+					{#snippet row(it, i)}
+						<TrackRow item={it} num={i + 1} album pick={likesPick} at={i} onplay={() => play(likes, i)} />
+					{/snippet}
+				</WindowRows>
 			</div>
 			{#if !likes.length}<p class="s-hint">Nothing in your likes matches “{q.trim()}”.</p>{/if}
 		{:else if L.loaded}

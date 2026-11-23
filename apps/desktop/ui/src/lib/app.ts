@@ -816,8 +816,10 @@ const library: LibraryAPI = {
 		change(async () => {
 			const c = await core.removeSongs(what, opts);
 			await took(c);
-			await Promise.all([loadLibrary(), loadLikes(), loadHistory()]).catch(() => {});
-			relisted();
+			// The question closes as soon as the songs are gone; the lists are read again behind it.
+			void Promise.all([loadLibrary(), loadLikes(), loadHistory()])
+				.catch(() => {})
+				.then(relisted);
 			return c;
 		}),
 	removeSongs: (items) =>
