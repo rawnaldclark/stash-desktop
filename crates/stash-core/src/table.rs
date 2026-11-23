@@ -332,6 +332,58 @@ mod tests {
         rows.iter().map(|r| r.title.as_str()).collect()
     }
 
+    /// A second of silence as a WAV file: enough for a tag to be written into and read from.
+    fn wav(path: &std::path::Path) {
+        let (rate, seconds) = (8_000u32, 1u32);
+        let data = vec![0u8; (rate * seconds * 2) as usize];
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        out.extend_from_slice(&1u16.to_le_bytes()); // one channel
+        out.extend_from_slice(&rate.to_le_bytes());
+        out.extend_from_slice(&(rate * 2).to_le_bytes());
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&data);
+        std::fs::write(path, out).unwrap();
+    }
+
+    #[test]
+    fn a_files_genre_year_and_composer_are_read_from_its_tags() {
+        use lofty::config::WriteOptions;
+        use lofty::tag::{Tag, TagType};
+        let dir = std::env::temp_dir().join(format!("stash-table-tags-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tagged = dir.join("tagged.wav");
+        let bare = dir.join("bare.wav");
+        wav(&tagged);
+        wav(&bare);
+        let mut tag = Tag::new(TagType::Id3v2);
+        tag.set_title("So What".to_string());
+        tag.set_genre("  Jazz ".to_string());
+        tag.insert_text(ItemKey::Composer, "Miles Davis".to_string());
+        tag.insert_text(ItemKey::RecordingDate, "1959-08-17".to_string());
+        tag.save_to_path(&tagged, WriteOptions::default()).unwrap();
+
+        let read = read_more(&tagged).unwrap();
+        assert_eq!(read.genre.as_deref(), Some("Jazz"));
+        assert_eq!(read.composer.as_deref(), Some("Miles Davis"));
+        assert_eq!(read.year, Some(1959));
+        assert!(read.bitrate.is_some());
+
+        // No tags: nothing to say, and no error.
+        let none = read_more(&bare).unwrap();
+        assert_eq!((none.genre, none.year, none.composer), (None, None, None));
+        // Not there: an error the pass can note and move on from.
+        assert!(read_more(&dir.join("gone.wav")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_tags_wait_to_be_read_once_and_are_kept() {
         let (mut library, ids) = library();
