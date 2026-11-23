@@ -792,7 +792,7 @@ const library: LibraryAPI = {
 			}
 			if (last) await took(last);
 		}),
-	removeSongs: (items) =>
+	songRows: (items) =>
 		change(async () => {
 			// The library's rows: a song's own, or (a song shown as a source's) the row that source's name for it has.
 			const ids = new Set<number>();
@@ -810,8 +810,21 @@ const library: LibraryAPI = {
 				const { rows } = await core.knownRows(source, refs);
 				for (const r of rows) if (r !== null) ids.add(r);
 			}
-			if (!ids.size) return 'Not in your library';
-			const c = await core.removeSongs([...ids]);
+			return [...ids];
+		}),
+	deleteSongs: (what, opts) =>
+		change(async () => {
+			const c = await core.removeSongs(what, opts);
+			await took(c);
+			await Promise.all([loadLibrary(), loadLikes(), loadHistory()]).catch(() => {});
+			relisted();
+			return c;
+		}),
+	removeSongs: (items) =>
+		change(async () => {
+			const ids = await library.songRows(items);
+			if (!ids.length) return 'Not in your library';
+			const c = await core.removeSongs({ ids });
 			await took(c);
 			await Promise.all([loadLibrary(), loadLikes(), loadHistory()]).catch(() => {});
 			relisted();

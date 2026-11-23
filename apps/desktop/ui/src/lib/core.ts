@@ -201,7 +201,15 @@ export const keepFound = (addon: string, track: KeptTrack) => post<Changed>('/ap
 /** Which of a source's songs (by what it calls them) the library has: each one's row, or null. */
 export const knownRows = (addon: string, ids: string[]) => post<{ rows: (number | null)[] }>('/api/tracks/known', { addon, ids });
 /** Takes songs out of the library (a saved one's file goes too). A song in a playlist, and a file of the music folders, stay: the answer counts them. */
-export const removeSongs = (ids: number[]) => post<Changed & { removed: number; in_playlists: number; in_folders: number }>('/api/library/remove', { ids });
+/** The songs a delete is about: these rows of the library, or every song of an artist. */
+export type DeleteWhat = { ids: number[] } | { artist: number };
+/** What a delete would touch (asked first). */
+export type DeletePreview = { songs: number; in_playlists: number; playlists: number; saved_files: number; saved_bytes: number; folder_files: number; folder_bytes: number };
+/** What a delete did: how many left, how many stayed and why, the playlists changed and the files put in the bin. */
+export type Removed = Changed & { removed: number; in_playlists: number; in_folders: number; unlisted: number; binned: number };
+export const removePreview = (what: DeleteWhat) => post<DeletePreview>('/api/library/remove/preview', what);
+/** `playlists`: taken out of their playlists first. `files`: the listener's own files go to the Recycle Bin too. */
+export const removeSongs = (what: DeleteWhat, opts: { playlists?: boolean; files?: boolean } = {}) => post<Removed>('/api/library/remove', { ...what, ...opts });
 export const createPlaylist = (name: string) => post<Changed>('/api/playlists', { name });
 /** Follows the YouTube Music playlist `id` ("VL…"), or reads it again: the answer's `id` is the playlist that follows it. */
 export const followTube = (id: string) => post<Changed & { changed?: boolean }>('/api/youtube/follow', { id });

@@ -3,7 +3,7 @@
      holding the focus, the one songs are picked in, or the page's first. -->
 <script lang="ts">
 	import { afterNavigate } from '$app/navigation';
-	import { player } from '../app';
+	import { library, player } from '../app';
 	import Icon from './Icon.svelte';
 	import { P, pickedMenu, rowLists, type PickList } from './pick.svelte';
 	import { ui } from './state.svelte';
@@ -33,7 +33,7 @@
 	}
 
 	function onkey(e: KeyboardEvent) {
-		if (e.defaultPrevented || ui.menu || ui.palette || ui.smart) return;
+		if (e.defaultPrevented || ui.menu || ui.palette || ui.smart || ui.deleting) return;
 		const t = e.target as HTMLElement | null;
 		if (t?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
 		if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'a') {
@@ -44,6 +44,9 @@
 		} else if (e.key === 'Escape' && shown) {
 			e.preventDefault();
 			P.clear();
+		} else if (e.key === 'Delete' && shown && !e.ctrlKey && !e.altKey && !e.metaKey) {
+			e.preventDefault();
+			void remove();
 		}
 	}
 
@@ -51,6 +54,18 @@
 		const list = P.list;
 		if (!list) return;
 		void player.playItems(P.sorted().items, 0, { from: list.from });
+	}
+	/** Delete: the question first, about the picked songs that are in the library. */
+	async function remove() {
+		const { items } = P.sorted();
+		if (!items.length) return;
+		const ids = await library.songRows(items).catch(() => null);
+		if (ids === null) return;
+		if (!ids.length) {
+			ui.toast(items.length === 1 ? 'That song is not in your library' : 'None of those are in your library');
+			return;
+		}
+		ui.deleting = { what: { ids }, title: items.length === 1 ? items[0].title : '' };
 	}
 	function toPlaylist(btn: HTMLElement) {
 		const menu = pickedMenu();
@@ -74,6 +89,7 @@
 			<span class="pick-n" aria-live="polite">{P.count.toLocaleString()} selected</span>
 			<button type="button" class="pick-b" onclick={play}><Icon name="play_arrow" /><span>Play</span></button>
 			<button type="button" class="pick-b" aria-haspopup="menu" onclick={(e) => toPlaylist(e.currentTarget)}><Icon name="playlist_add" /><span>Add to playlist</span></button>
+			<button type="button" class="pick-b pick-del" title="Delete from your library (Del)" onclick={() => void remove()}><Icon name="delete" /><span>Delete</span></button>
 			<button type="button" class="pick-b pick-i" aria-label="More for the selected songs" aria-haspopup="menu" title="More" onclick={(e) => more(e.currentTarget)}><Icon name="more_horiz" /></button>
 			<button type="button" class="pick-b pick-i" aria-label="Clear the selection" title="Clear (Esc)" onclick={() => P.clear()}><Icon name="close" /></button>
 		</div>
@@ -89,6 +105,7 @@
 	.pick-b { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 12px; border-radius: 999px; color: var(--wp-text); white-space: nowrap; transition: background-color var(--dur-short); }
 	.pick-b :global(.ic) { width: 20px; height: 20px; flex: none; }
 	.pick-i { width: 36px; padding: 0; justify-content: center; color: var(--wp-text-2); }
+	.pick-del { color: #d84343; }
 	@media (hover: hover) and (pointer: fine) { .pick-b:hover { background: var(--wp-hover); color: var(--wp-text); } }
 	@media (max-width: 520px) { .pick-b:not(.pick-i) span { display: none; } .pick-b:not(.pick-i) { width: 36px; padding: 0; justify-content: center; } }
 </style>
