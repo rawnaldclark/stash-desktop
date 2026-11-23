@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Stash",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "identifier": "app.stashfm.desktop",
   "build": {
     "frontendDist": "../ui/dist"
@@ -13,7 +13,29 @@
     }
   },
   "bundle": {
-    "active": false,
-    "icon": ["icons/icon.ico"]
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "publisher": "Stash",
+    "shortDescription": "Stash, a music player for your own library",
+    "longDescription": "Stash plays the music on your computer and the sources you add, gapless, with its quality shown as decoded.",
+    "license": "GPL-3.0-or-later",
+    "homepage": "https://github.com/rawnaldclark/stash-desktop",
+    "resources": {
+      "../../../third_party/mpv/libmpv-2.dll": "libmpv-2.dll"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    }
   }
 }

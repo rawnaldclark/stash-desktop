@@ -7,7 +7,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
-stash-core = { version = "0.0.1", path = "../../../crates/stash-core" }
+stash-core = { version = "0.1.0", path = "../../../crates/stash-core" }
 stashd = { path = "../../../crates/stashd" }
 tauri = { version = "2.12.5", features = ["tray-icon"] }
 tauri-plugin-window-state = "2"
@@ -20,7 +20,7 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-opener = "2"
 
 [build-dependencies]
-tauri-build = "2.7.4"
+tauri-build = { version = "2.7.4", features = [] }
 
 [features]
 # Serve the built UI from inside the program (no dev server).
