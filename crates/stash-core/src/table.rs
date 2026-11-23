@@ -102,6 +102,10 @@ pub struct TableAsk {
     pub genre: Option<String>,
     /// Only songs that play with no connection: files that are here.
     pub here: bool,
+    /// Only songs of this decade (1990 is 1990 to 1999).
+    pub decade: Option<i32>,
+    /// Only files in this folder or the folders inside it.
+    pub folder: Option<String>,
 }
 
 /// A song as a row of the table.
@@ -145,6 +149,20 @@ impl Library {
                 binds.push(genre.clone());
                 parts.push(format!("t.genre = ?{} COLLATE NOCASE", binds.len()));
             }
+        }
+        if let Some(decade) = ask.decade {
+            let from = decade - decade.rem_euclid(10);
+            parts.push(format!("COALESCE(t.year, al.year) BETWEEN {from} AND {}", from + 9));
+        }
+        if let Some(folder) = ask.folder.as_deref().map(|f| f.trim_end_matches(['/', '\\'])).filter(|f| !f.is_empty()) {
+            // Files below the folder: its path, a separator, then anything. LIKE's own wildcards are plain characters
+            // (`!` is the escape, as a backslash is part of every Windows path).
+            let plain = folder.replace('!', "!!").replace('%', "!%").replace('_', "!_");
+            binds.push(format!("{plain}\\%"));
+            let back = binds.len();
+            binds.push(format!("{plain}/%"));
+            let forward = binds.len();
+            parts.push(format!("(t.origin = 'file' AND (t.locator LIKE ?{back} ESCAPE '!' OR t.locator LIKE ?{forward} ESCAPE '!'))"));
         }
         if let Some(text) = ask.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
             // LIKE, with its own wildcards taken as plain characters.
@@ -244,6 +262,36 @@ impl Library {
             .query_map([], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)? as usize)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// The decades the library's songs are from, the newest first, each with how many songs; `None` counts the songs
+    /// with no year.
+    pub fn decades(&self, here: bool) -> Result<Vec<(Option<i32>, usize)>> {
+        let only = if here { " WHERE t.origin = 'file' AND t.missing_since IS NULL" } else { "" };
+        let mut read = self.conn.prepare(&format!(
+            "SELECT COALESCE(t.year, al.year) / 10 * 10 AS decade, COUNT(*)
+             FROM tracks t LEFT JOIN albums al ON al.id = t.album_id{only}
+             GROUP BY decade ORDER BY decade IS NULL, decade DESC"
+        ))?;
+        let rows = read
+            .query_map([], |r| Ok((r.get::<_, Option<i32>>(0)?, r.get::<_, i64>(1)? as usize)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The folders that hold the library's files, each with how many songs sit directly in it, in path order.
+    pub fn file_folders(&self) -> Result<Vec<(String, usize)>> {
+        let mut read = self
+            .conn
+            .prepare("SELECT locator FROM tracks WHERE origin = 'file' AND locator != '' AND missing_since IS NULL")?;
+        let mut counts = std::collections::BTreeMap::<String, usize>::new();
+        for locator in read.query_map([], |r| r.get::<_, String>(0))? {
+            let locator = locator?;
+            if let Some(dir) = Path::new(&locator).parent().map(|d| d.to_string_lossy().into_owned()).filter(|d| !d.is_empty()) {
+                *counts.entry(dir).or_default() += 1;
+            }
+        }
+        Ok(counts.into_iter().collect())
     }
 
     /// Files whose extra tags have not been read yet (at most `limit`): each with where it is.
@@ -459,7 +507,7 @@ mod tests {
         library
             .set_more_tags(&[(ids[0], tags("Alternative")), (ids[1], tags("Alternative")), (ids[2], tags("Electronic")), (ids[3], None)])
             .unwrap();
-        let ask = |text: Option<&str>, genre: Option<&str>| TableAsk { text: text.map(String::from), genre: genre.map(String::from), here: false };
+        let ask = |text: Option<&str>, genre: Option<&str>| TableAsk { text: text.map(String::from), genre: genre.map(String::from), ..Default::default() };
 
         assert_eq!(library.table_count(&ask(None, None)).unwrap(), 4);
         assert_eq!(library.table_count(&ask(Some("rainbows"), None)).unwrap(), 2);
@@ -471,6 +519,23 @@ mod tests {
 
         let page = library.table_at(&ask(None, None), SortBy::Title, false, 1, 2).unwrap();
         assert_eq!(titles(&page), ["Reckoner", "So What"]);
+        // By decade, and by folder (the folder's own files and those below it; a folder whose name only starts the
+        // same is another folder).
+        library.set_more_tags(&[(ids[2], Some(MoreTags { year: Some(1992), ..Default::default() })), (ids[0], Some(MoreTags { year: Some(2007), ..Default::default() }))]).unwrap();
+        let decade = |d: i32| TableAsk { decade: Some(d), ..Default::default() };
+        assert_eq!(library.table_count(&decade(1990)).unwrap(), 1);
+        assert_eq!(library.table_count(&decade(1995)).unwrap(), 1);
+        assert_eq!(library.table_count(&decade(2000)).unwrap(), 1);
+        assert_eq!(library.decades(false).unwrap(), vec![(Some(2000), 1), (Some(1990), 1), (None, 2)]);
+        let folder = |f: &str| TableAsk { folder: Some(f.into()), ..Default::default() };
+        assert_eq!(library.table_count(&folder("C:/music/Radiohead")).unwrap(), 2);
+        assert_eq!(library.table_count(&folder("C:/music/Radiohead/")).unwrap(), 2);
+        assert_eq!(library.table_count(&folder("C:/music/Radio")).unwrap(), 0);
+        assert_eq!(library.table_count(&folder("C:/music")).unwrap(), 4);
+        let folders = library.file_folders().unwrap();
+        assert_eq!(folders.len(), 3);
+        assert!(folders.iter().any(|(dir, n)| dir.replace('\\', "/") == "C:/music/Radiohead/In Rainbows" && *n == 2));
+
         // What plays from the third row on, in the same order.
         let from_third = library.table_ids(&ask(None, None), SortBy::Title, false, 2, 100).unwrap();
         assert_eq!(from_third.len(), 2);

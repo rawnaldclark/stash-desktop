@@ -3,7 +3,9 @@
 //! - `GET /api/table?sort=&down=&q=&genre=&here=&offset=&limit=`: a page of songs in the order asked, with how many
 //!   there are in all for that question, and how many files still wait to have their tags read.
 //! - `GET /api/table/ids?...&offset=&limit=`: the ids from a place on, in the same order (what plays from a row).
-//! - `GET /api/genres?here=`: every genre with its count.
+//! - `GET /api/genres?here=`: every genre with its count. `GET /api/decades?here=`: every decade with its count.
+//!   `GET /api/places`: the folders that hold the library's files, with how many songs sit in each.
+//!   The table takes `decade=` and `folder=` to show only those.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -88,7 +90,7 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
 }
 
 pub(crate) fn route(state: &State, request: &mut Request, path: &str) -> Result<Option<Reply>> {
-    if !matches!(path, "/api/table" | "/api/table/ids" | "/api/genres" | "/api/tags") {
+    if !matches!(path, "/api/table" | "/api/table/ids" | "/api/genres" | "/api/decades" | "/api/places" | "/api/tags") {
         return Ok(None);
     }
     // POST /api/tags {ids, set}: writes the fields of `set` into the files of those songs (a field left out stays, ""
@@ -137,6 +139,23 @@ pub(crate) fn route(state: &State, request: &mut Request, path: &str) -> Result<
             .collect();
         return Ok(Some(reply_json(200, json!({ "rows": rows, "waiting": library.tags_waiting()? }))));
     }
+    // The decades the songs are from, and the folders that hold the files, each with its count.
+    if path == "/api/decades" {
+        let rows: Vec<_> = library
+            .decades(here)?
+            .into_iter()
+            .map(|(decade, songs)| json!({ "decade": decade, "songs": songs }))
+            .collect();
+        return Ok(Some(reply_json(200, json!({ "rows": rows }))));
+    }
+    if path == "/api/places" {
+        let rows: Vec<_> = library
+            .file_folders()?
+            .into_iter()
+            .map(|(folder, songs)| json!({ "folder": folder, "songs": songs }))
+            .collect();
+        return Ok(Some(reply_json(200, json!({ "rows": rows, "roots": library.folders()? }))));
+    }
     let by = match param("sort") {
         None => SortBy::Title,
         Some(s) => match SortBy::parse(&s) {
@@ -145,7 +164,13 @@ pub(crate) fn route(state: &State, request: &mut Request, path: &str) -> Result<
         },
     };
     let down = param("down").as_deref() == Some("1");
-    let ask = TableAsk { text: param("q").filter(|q| !q.trim().is_empty()), genre: param("genre"), here };
+    let ask = TableAsk {
+        text: param("q").filter(|q| !q.trim().is_empty()),
+        genre: param("genre"),
+        here,
+        decade: param("decade").and_then(|d| d.parse().ok()),
+        folder: param("folder").filter(|f| !f.trim().is_empty()),
+    };
     let offset = number("offset", 0);
     if path == "/api/table/ids" {
         let ids = library.table_ids(&ask, by, down, offset, number("limit", 1_000).clamp(1, 5_000))?;

@@ -13,6 +13,9 @@
 	import { P, type PickList } from '../ui/pick.svelte';
 	import { songMenu } from '../ui/song-menu';
 	import { L, S } from '../ui/state.svelte';
+	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
+	import { decadeName } from './browse';
 	import { COLUMNS, formatOf, gridOf, readColumns, type ColumnId } from './song-table';
 
 	let { query = '', here = false }: { query?: string; here?: boolean } = $props();
@@ -22,7 +25,22 @@
 
 	let sort = $state<core.TableSort>((localStorage.getItem('stash.table.sort') as core.TableSort) || 'artist');
 	let down = $state(localStorage.getItem('stash.table.down') === '1');
-	let genre = $state<string | null>(null);
+	// The genre, decade and folder shown are in the address, so Library > Genres and Folders open the table on theirs,
+	// and Back returns to what was shown.
+	const genre = $derived(page.url.searchParams.get('genre'));
+	const decade = $derived.by(() => {
+		const d = page.url.searchParams.get('decade');
+		return d !== null && /^\d{4}$/.test(d) ? Number(d) : null;
+	});
+	const folder = $derived(page.url.searchParams.get('folder'));
+	function show(name: 'genre' | 'decade' | 'folder', value: string | null) {
+		const url = new URL(page.url.href);
+		if (value === null) url.searchParams.delete(name);
+		else url.searchParams.set(name, value);
+		url.searchParams.set('tab', 'songs');
+		void goto(`${url.pathname}${url.search}`, { replaceState: true });
+	}
+	let decades = $state.raw<core.DecadeRow[]>([]);
 	let shown = $state<ColumnId[]>(readColumns(localStorage.getItem('stash.table.cols.2')));
 	let choosing = $state(false);
 	$effect(() => {
@@ -31,7 +49,7 @@
 		localStorage.setItem('stash.table.cols.2', shown.join(','));
 	});
 
-	const ask = $derived<core.TableAsk>({ sort, down, q: query.trim() || undefined, genre: genre ?? undefined, here });
+	const ask = $derived<core.TableAsk>({ sort, down, q: query.trim() || undefined, genre: genre ?? undefined, here, decade: decade ?? undefined, folder: folder ?? undefined });
 	const askKey = $derived(JSON.stringify(ask));
 
 	let count = $state<number | null>(null);
@@ -67,6 +85,12 @@
 			},
 			() => {}
 		);
+		core.decades(a.here ?? false).then(
+			(d) => {
+				if (!gone) decades = d;
+			},
+			() => {}
+		);
 		return () => {
 			gone = true;
 		};
@@ -90,7 +114,7 @@
 		return () => clearInterval(timer);
 	});
 
-	const page = (offset: number, limit: number, signal: AbortSignal) => core.table(ask, offset, limit, signal).then((t) => t.rows);
+	const readPage = (offset: number, limit: number, signal: AbortSignal) => core.table(ask, offset, limit, signal).then((t) => t.rows);
 
 	/** A table row as the rest of the window knows a song (its menu, the picks, the player). */
 	const itemOf = (r: core.TableRow): LibraryItem =>
@@ -157,13 +181,27 @@
 <div class="tb-tools">
 	<label class="tb-genre">
 		<span class="vh">Genre</span>
-		<select bind:value={genre} aria-label="Genre">
-			<option value={null}>All genres</option>
+		<select aria-label="Genre" value={genre ?? '\u0000'} onchange={(e) => show('genre', e.currentTarget.value === '\u0000' ? null : e.currentTarget.value)}>
+			<option value={'\u0000'}>All genres</option>
 			{#each genres as g (g.genre ?? '')}
 				<option value={g.genre ?? ''}>{g.genre ?? 'No genre'} ({g.songs.toLocaleString()})</option>
 			{/each}
 		</select>
 	</label>
+	{#if decades.some((d) => d.decade !== null)}
+		<label class="tb-genre">
+			<span class="vh">Decade</span>
+			<select aria-label="Decade" value={decade === null ? '' : String(decade)} onchange={(e) => show('decade', e.currentTarget.value || null)}>
+				<option value="">All years</option>
+				{#each decades.filter((d) => d.decade !== null) as d (d.decade)}
+					<option value={String(d.decade)}>{decadeName(d.decade)} ({d.songs.toLocaleString()})</option>
+				{/each}
+			</select>
+		</label>
+	{/if}
+	{#if folder}
+		<button type="button" class="chip on tb-in" title="{folder}: click to show every folder" onclick={() => show('folder', null)}><Icon name="folder" /><span>{folder.split(/[\\/]+/).pop()}</span><Icon name="close" /></button>
+	{/if}
 	<span class="tb-count">
 		{#if count !== null}{count.toLocaleString()} {count === 1 ? 'song' : 'songs'}{/if}
 		{#if waiting > 0}<i> · reading tags, {waiting.toLocaleString()} to go</i>{/if}
@@ -183,7 +221,7 @@
 {#if failure}
 	<p class="s-hint" role="alert">{failure}</p>
 {:else if count === 0}
-	<p class="s-hint">{query.trim() || genre !== null ? 'No song matches.' : here ? 'No music on this computer yet. Add a music folder in Settings › Library.' : 'No songs yet.'}</p>
+	<p class="s-hint">{query.trim() || genre !== null || decade !== null || folder ? 'No song matches.' : here ? 'No music on this computer yet. Add a music folder in Settings › Library.' : 'No songs yet.'}</p>
 {:else if count !== null && scroller}
 	<div class="tb" role="table" aria-label="Songs" aria-rowcount={count} style:--tb-grid={grid}>
 		<div class="tb-h" role="row">
@@ -224,13 +262,16 @@
 				<div class="tb-r tb-ph" role="row"><span class="tb-c"><i></i></span></div>
 			{/if}
 		{/snippet}
-		<VirtualList bind:this={list} {count} rowHeight={ROW_HEIGHT} fetchPage={page} row={songRow} {scroller} />
+		<VirtualList bind:this={list} {count} rowHeight={ROW_HEIGHT} fetchPage={readPage} row={songRow} {scroller} />
 	</div>
 {/if}
 
 <style>
 	.tb-tools { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 4px 0 8px; }
 	.tb-genre select { height: 34px; max-width: 260px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--wp-line-2); background: var(--wp-field, transparent); color: var(--wp-text); font: 400 14px/1 var(--font-body); }
+	.tb-in { display: inline-flex; align-items: center; gap: 6px; max-width: 260px; }
+	.tb-in span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.tb-in :global(svg) { width: 16px; height: 16px; flex: none; }
 	.tb-count { color: var(--wp-text-2); font: 400 13px/1 var(--font-body); font-variant-numeric: tabular-nums; }
 	.tb-count i { font-style: normal; }
 	.tb-cols { position: relative; margin-left: auto; }

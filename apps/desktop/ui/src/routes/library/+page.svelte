@@ -16,6 +16,7 @@
 	import NotFound from '../../lib/desktop/NotFound.svelte';
 	import { NF } from '../../lib/desktop/unfound.svelte';
 	import Songs from '../../lib/desktop/Songs.svelte';
+	import Browse from '../../lib/desktop/Browse.svelte';
 	import SongTable from '../../lib/desktop/SongTable.svelte';
 	import TubeLibrary from '../../lib/desktop/TubeLibrary.svelte';
 	import { T } from '../../lib/desktop/youtube.svelte';
@@ -28,7 +29,7 @@
 	import { L, LS, ui } from '../../lib/ui/state.svelte';
 	import { dayLabel, songs } from '../../lib/ui/format';
 
-	const TABS = ['songs', 'likes', 'playlists', 'albums', 'artists', 'youtube', 'downloads', 'notfound', 'history'] as const;
+	const TABS = ['songs', 'likes', 'playlists', 'albums', 'artists', 'genres', 'folders', 'youtube', 'downloads', 'notfound', 'history'] as const;
 	type Tab = (typeof TABS)[number];
 	const tab = $derived<Tab>(TABS.find((t) => t === page.url.searchParams.get('tab')) ?? 'songs');
 
@@ -38,6 +39,8 @@
 		['playlists', 'Playlists'],
 		['albums', 'Albums'],
 		['artists', 'Artists'],
+		['genres', 'Genres'],
+		['folders', 'Folders'],
 		['youtube', 'YouTube Music'],
 		['downloads', 'Downloads'],
 		['notfound', 'Not found'],
@@ -183,10 +186,10 @@
 	let hereTotal = $state<number | null>(null);
 	/** The tabs that are searched from here: Songs asks the core; Liked, Playlists and History filter what is listed. */
 	const findable = $derived(
-		tab === 'songs' || tab === 'albums' || tab === 'artists' ? (L.counts?.tracks ?? 0) > 0 : tab === 'likes' ? L.likes.length > 0 : tab === 'playlists' || tab === 'downloads' ? true : tab === 'history' ? L.history.length > 0 : false
+		tab === 'songs' || tab === 'albums' || tab === 'artists' || tab === 'genres' || tab === 'folders' ? (L.counts?.tracks ?? 0) > 0 : tab === 'likes' ? L.likes.length > 0 : tab === 'playlists' || tab === 'downloads' ? true : tab === 'history' ? L.history.length > 0 : false
 	);
 	/** What the box looks through, said in it. */
-	const findWord = $derived(({ songs: 'Search your songs', likes: 'Search your likes', playlists: 'Search your playlists', albums: 'Search your albums', artists: 'Search your artists', downloads: 'Search your downloads', history: 'Search your history' } as Record<string, string>)[tab] ?? 'Search your library');
+	const findWord = $derived(({ songs: 'Search your songs', likes: 'Search your likes', playlists: 'Search your playlists', albums: 'Search your albums', artists: 'Search your artists', genres: 'Search your genres', folders: 'Search your folders', downloads: 'Search your downloads', history: 'Search your history' } as Record<string, string>)[tab] ?? 'Search your library');
 </script>
 
 <div class="view view-in view-library">
@@ -303,6 +306,10 @@
 			<h2 class="vh2">In your library</h2>
 		{/if}
 		{#key L.changed}<Artists {q} />{/key}
+	{:else if tab === 'genres'}
+		<Browse by="genre" {q} here={ui.local} />
+	{:else if tab === 'folders'}
+		<Browse by="folder" {q} />
 	{:else if tab === 'youtube'}
 		<TubeLibrary />
 	{:else if tab === 'downloads'}
