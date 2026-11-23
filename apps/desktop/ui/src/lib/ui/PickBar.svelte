@@ -33,7 +33,7 @@
 	}
 
 	function onkey(e: KeyboardEvent) {
-		if (e.defaultPrevented || ui.menu || ui.palette || ui.smart || ui.deleting) return;
+		if (e.defaultPrevented || ui.menu || ui.palette || ui.smart || ui.deleting || ui.editing) return;
 		const t = e.target as HTMLElement | null;
 		if (t?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
 		if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'a') {
@@ -67,6 +67,15 @@
 		}
 		ui.deleting = { what: { ids }, title: items.length === 1 ? items[0].title : '' };
 	}
+	/** Edit tags, for the picked songs that are in the library. */
+	async function editTags() {
+		const { items } = P.sorted();
+		if (!items.length) return;
+		const ids = await library.songRows(items).catch(() => null);
+		if (ids === null) return;
+		if (!ids.length) ui.toast('Those are not in your library');
+		else ui.editing = { ids };
+	}
 	function toPlaylist(btn: HTMLElement) {
 		const menu = pickedMenu();
 		if (!menu) return;
@@ -89,6 +98,7 @@
 			<span class="pick-n" aria-live="polite">{P.count.toLocaleString()} selected</span>
 			<button type="button" class="pick-b" onclick={play}><Icon name="play_arrow" /><span>Play</span></button>
 			<button type="button" class="pick-b" aria-haspopup="menu" onclick={(e) => toPlaylist(e.currentTarget)}><Icon name="playlist_add" /><span>Add to playlist</span></button>
+			<button type="button" class="pick-b" title="Edit their tags" onclick={() => void editTags()}><Icon name="edit" /><span>Edit tags</span></button>
 			<button type="button" class="pick-b pick-del" title="Delete from your library (Del)" onclick={() => void remove()}><Icon name="delete" /><span>Delete</span></button>
 			<button type="button" class="pick-b pick-i" aria-label="More for the selected songs" aria-haspopup="menu" title="More" onclick={(e) => more(e.currentTarget)}><Icon name="more_horiz" /></button>
 			<button type="button" class="pick-b pick-i" aria-label="Clear the selection" title="Clear (Esc)" onclick={() => P.clear()}><Icon name="close" /></button>
