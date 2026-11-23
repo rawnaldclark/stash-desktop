@@ -110,14 +110,17 @@
 			</ul>
 		{/if}
 		<div class="ft-b">
-			{#if found.length && !now.running}
+			{#if found.length}
 				<button type="button" class="ft-no" onclick={() => (off = off.size ? new Set() : new Set(found.map((f) => f.id)))} disabled={busy}>{off.size ? 'Tick all' : 'Untick all'}</button>
 			{/if}
 			<span class="ft-gap"></span>
 			{#if now.running}
 				<button type="button" class="ft-no" onclick={stop} disabled={busy}>Stop looking</button>
-			{:else if found.length}
+			{/if}
+			{#if found.length}
 				<button type="button" class="ft-go" onclick={write} disabled={busy || !ticked.length}>{busy ? 'Writing…' : `Write to ${ticked.length.toLocaleString()} ${ticked.length === 1 ? 'file' : 'files'}`}</button>
+			{:else if now.running}
+				<span></span>
 			{:else if now.blanks}
 				<button type="button" class="ft-go" onclick={start} disabled={busy}>{now.total ? 'Look again' : `Look up ${now.blanks.toLocaleString()} ${now.blanks === 1 ? 'file' : 'files'}`}</button>
 			{:else}

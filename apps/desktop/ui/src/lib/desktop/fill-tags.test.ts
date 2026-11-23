@@ -13,7 +13,7 @@ describe('where the lookup is', () => {
 	});
 
 	it('counts as it goes, and sums up at the end', () => {
-		expect(fillLine(now({ running: true, total: 254, done: 12, found: [offer(1), offer(2)] }))).toBe('Looking up 254 files: 12 done, 2 found so far.');
+		expect(fillLine(now({ running: true, total: 254, done: 12, found: [offer(1), offer(2)] }))).toBe('Looking up 254 files: 12 done, about 13 minutes left. You can write what is found as it comes, and close this while it works.');
 		expect(fillLine(now({ total: 254, done: 254, missed: 30, found: [offer(1)] }))).toBe('Found tags for 1 file. Untick any that look wrong, then write the rest. The catalogue had nothing new for 30.');
 		expect(fillLine(now({ blanks: 30, total: 30, done: 30, missed: 30 }))).toBe('The catalogue had nothing new for the 30 files still missing tags. Edit tags fills those by hand.');
 	});

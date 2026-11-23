@@ -18,7 +18,7 @@ use anyhow::Result;
 use serde::Serialize;
 use serde_json::json;
 use stash_core::edit::{EditReport, TagEdit};
-use stash_core::fill::{CATALOGUE, look_up};
+use stash_core::fill::{CATALOGUE, Found, artist_songs, first_artist, look_up, pick};
 use tiny_http::{Method, Request};
 
 use crate::serve::{Reply, State, body_json, refuse, reply_json};
@@ -67,6 +67,32 @@ fn pace() -> Duration {
     std::env::var("STASH_FILL_PACE_MS").ok().and_then(|ms| ms.parse().ok()).map_or(PACE, Duration::from_millis)
 }
 
+/// One question at the catalogue's pace, asked once more after a while if it could not be reached (it turns away a
+/// client that asks too fast). `None`: the lookup is over (stopped, or the catalogue stays away, which is noted).
+fn paced<T>(
+    asked: &mut bool,
+    wait: &impl Fn(Duration, &Fill) -> bool,
+    pace: Duration,
+    fill: &Fill,
+    ask: impl Fn() -> std::result::Result<T, stash_core::lyrics::Unreachable>,
+) -> Option<T> {
+    if *asked && !wait(pace, fill) {
+        return None;
+    }
+    *asked = true;
+    match ask() {
+        Ok(answer) => Some(answer),
+        Err(_) if wait(AGAIN, fill) => match ask() {
+            Ok(answer) => Some(answer),
+            Err(why) => {
+                fill.job.lock().unwrap().problem = Some(format!("The catalogue could not be reached ({}). What was found so far is kept.", why.0));
+                None
+            }
+        },
+        Err(_) => None,
+    }
+}
+
 /// The thread that looks songs up when asked to.
 pub(crate) fn run(state: &State, stop: &AtomicBool) {
     let fill = &state.fill;
@@ -92,28 +118,42 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
         let songs = state.library.lock().unwrap().files_with_blanks().unwrap_or_default();
         *fill.job.lock().unwrap() = Job { running: true, total: songs.len(), ..Default::default() };
         let (base, pace) = (catalogue(), pace());
-        for (i, song) in songs.iter().enumerate() {
-            if i > 0 && !wait(pace, fill) {
-                break;
-            }
-            let found = match look_up(&base, song) {
-                Ok(found) => found,
-                // Once more after a while: the catalogue turns away a client that asks too fast.
-                Err(_) if wait(AGAIN, fill) => match look_up(&base, song) {
-                    Ok(found) => found,
-                    Err(why) => {
-                        fill.job.lock().unwrap().problem = Some(format!("The catalogue could not be reached ({}). What was found so far is kept.", why.0));
-                        break;
-                    }
-                },
-                Err(_) => break,
-            };
+        let mut asked = false;
+        let settle = |song: &stash_core::fill::FillSong, found: Option<Found>| {
             let set = found.and_then(|found| state.library.lock().unwrap().fill_edit(song.id, &found).ok().flatten());
             let mut job = fill.job.lock().unwrap();
             job.done += 1;
             match set {
                 Some(set) => job.found.push(Offer { id: song.id, title: song.title.clone(), artist: song.artist.clone(), set }),
                 None => job.missed += 1,
+            }
+        };
+        // The songs come in artist order. An artist with several is asked for once, by name: the catalogue's two
+        // hundred songs by them usually hold most of the files. What that misses is asked for song by song.
+        let mut at = 0;
+        'songs: while at < songs.len() {
+            let artist = first_artist(&songs[at]);
+            let end = at + songs[at..].iter().take_while(|s| first_artist(s) == artist).count();
+            let group = &songs[at..end];
+            at = end;
+            let mut left: Vec<&stash_core::fill::FillSong> = group.iter().collect();
+            if group.len() > 1 && !artist.is_empty() {
+                let Some(body) = paced(&mut asked, &wait, pace, fill, || artist_songs(&base, &artist)) else {
+                    break 'songs;
+                };
+                left.retain(|song| match pick(song, &body) {
+                    Some(found) => {
+                        settle(song, Some(found));
+                        false
+                    }
+                    None => true,
+                });
+            }
+            for song in left {
+                let Some(found) = paced(&mut asked, &wait, pace, fill, || look_up(&base, song)) else {
+                    break 'songs;
+                };
+                settle(song, found);
             }
         }
         fill.job.lock().unwrap().running = false;

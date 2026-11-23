@@ -5,7 +5,11 @@ const files = (n: number) => `${n.toLocaleString()} ${n === 1 ? 'file' : 'files'
 
 /** Where the lookup is, in one line. */
 export function fillLine(now: FillNow): string {
-	if (now.running) return `Looking up ${files(now.total)}: ${now.done.toLocaleString()} done, ${now.found.length.toLocaleString()} found so far.`;
+	if (now.running) {
+		// The catalogue allows about twenty questions a minute, so the time left is known.
+		const minutes = Math.max(1, Math.ceil(((now.total - now.done) * 3.2) / 60));
+		return `Looking up ${files(now.total)}: ${now.done.toLocaleString()} done, about ${minutes} ${minutes === 1 ? 'minute' : 'minutes'} left. You can write what is found as it comes, and close this while it works.`;
+	}
 	if (now.found.length) {
 		const missed = now.missed ? ` The catalogue had nothing new for ${now.missed.toLocaleString()}.` : '';
 		return `Found tags for ${files(now.found.length)}. Untick any that look wrong, then write the rest.${missed}`;

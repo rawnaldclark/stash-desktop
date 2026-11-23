@@ -134,8 +134,8 @@ pub fn pick(song: &FillSong, body: &str) -> Option<Found> {
     })
 }
 
-/// Asks the catalogue at `base` for this song. `Ok(None)`: the catalogue has no recording that is it.
-pub fn look_up(base: &str, song: &FillSong) -> std::result::Result<Option<Found>, Unreachable> {
+/// One question to the catalogue at `base`: its answer as it came.
+fn ask(base: &str, pairs: &[(&str, &str)]) -> std::result::Result<String, Unreachable> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(15)))
@@ -143,25 +143,35 @@ pub fn look_up(base: &str, song: &FillSong) -> std::result::Result<Option<Found>
         .build()
         .into();
     let mut url = url::Url::parse(&format!("{base}/search")).map_err(|e| Unreachable(e.to_string()))?;
-    // The first artist and the title without a bracketed part find more than the whole credit does.
-    let artist = artists(&song.artist).into_iter().next().unwrap_or_else(|| fold(&song.artist));
-    url.query_pairs_mut()
-        .append_pair("term", &format!("{artist} {}", fold(&song.title)))
-        .append_pair("entity", "song")
-        .append_pair("limit", "50");
+    url.query_pairs_mut().extend_pairs(pairs).append_pair("entity", "song");
     let mut answer = agent.get(url.as_str()).call().map_err(|e| Unreachable(e.to_string()))?;
     match answer.status().as_u16() {
-        200..=299 => {
-            let body = answer
-                .body_mut()
-                .with_config()
-                .limit(8 << 20)
-                .read_to_string()
-                .map_err(|e| Unreachable(e.to_string()))?;
-            Ok(pick(song, &body))
-        }
+        200..=299 => answer
+            .body_mut()
+            .with_config()
+            .limit(16 << 20)
+            .read_to_string()
+            .map_err(|e| Unreachable(e.to_string())),
         status => Err(Unreachable(format!("the catalogue answered {status}"))),
     }
+}
+
+/// The artist a song is looked up under: the first its credit names.
+pub fn first_artist(song: &FillSong) -> String {
+    artists(&song.artist).into_iter().next().unwrap_or_else(|| fold(&song.artist))
+}
+
+/// Asks the catalogue at `base` for this song. `Ok(None)`: the catalogue has no recording that is it.
+pub fn look_up(base: &str, song: &FillSong) -> std::result::Result<Option<Found>, Unreachable> {
+    // The first artist and the title without a bracketed part find more than the whole credit does.
+    let term = format!("{} {}", first_artist(song), fold(&song.title));
+    Ok(pick(song, &ask(base, &[("term", &term), ("limit", "50")])?))
+}
+
+/// The catalogue's songs by one artist (the two hundred it puts first), as its answer came: several of an artist's
+/// files are then found in it with [`pick`], for one question in place of one each.
+pub fn artist_songs(base: &str, artist: &str) -> std::result::Result<String, Unreachable> {
+    ask(base, &[("term", artist), ("attribute", "artistTerm"), ("limit", "200")])
 }
 
 impl Library {
