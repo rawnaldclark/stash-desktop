@@ -4,7 +4,7 @@
 	import * as core from '../core';
 	import Icon from '../ui/Icon.svelte';
 	import { fold } from '../identity';
-	import { L } from '../ui/state.svelte';
+	import { L, ui } from '../ui/state.svelte';
 	import { folderRows } from './browse';
 
 	let { by, q = '', here = false }: { by: 'genre' | 'folder'; q?: string; here?: boolean } = $props();
@@ -59,8 +59,8 @@
 				</li>
 			{/each}
 		</ul>
-		{#if genres.length === 1 && genres[0].genre === null}
-			<p class="s-hint">None of your files has a genre in its tags yet. Select songs in the table and use Edit tags to give them one.</p>
+		{#if here && genres.some((g) => g.genre === null) && !needle}
+			<p class="s-hint br-fill">Songs with no genre say none in their tags. <button type="button" class="br-link" onclick={() => (ui.filling = true)}>Fill in missing tags…</button></p>
 		{/if}
 	{/if}
 {:else if places === null}
@@ -88,9 +88,11 @@
 	.br-n { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 	.br-n.none { color: var(--wp-text-2); font-weight: 400; font-style: italic; }
 	.br-bar { flex: 1 1 120px; height: 6px; border-radius: 3px; background: var(--wp-hover); overflow: hidden; }
-	.br-bar i { display: block; height: 100%; border-radius: 3px; background: var(--wp-accent); opacity: .7; }
+	.br-bar i { display: block; height: 100%; border-radius: 3px; background: var(--acc); opacity: .7; }
 	.br-c { margin-left: auto; flex: none; color: var(--wp-text-2); font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 	.br-bar + .br-c { margin-left: 0; min-width: 84px; text-align: right; }
 	@media (hover: hover) and (pointer: fine) { .br-r:hover { background: var(--wp-hover); } }
-	.br-r:focus-visible { outline: 2px solid var(--wp-accent); outline-offset: -2px; }
+	.br-fill { margin-top: 14px; }
+	.br-link { padding: 0; color: var(--acc-text); font: inherit; font-weight: 600; }
+	.br-r:focus-visible { outline: 2px solid var(--acc); outline-offset: -2px; }
 </style>

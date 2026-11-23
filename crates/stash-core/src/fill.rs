@@ -265,6 +265,16 @@ mod tests {
         assert_eq!(album_name("Kid A - EP"), "Kid A");
     }
 
+    /// Asks the real catalogue: `cargo test -p stash-core --lib fill::tests::live -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn live() {
+        for (title, artist, ms) in [("Nude", "Radiohead", 255_000), ("So What", "Miles Davis", 562_000), ("HUMBLE.", "Kendrick Lamar", 177_000), ("Dreams - 2004 Remaster", "Fleetwood Mac", 257_000), ("No Such Song Zzqx", "Radiohead", 100_000)] {
+            println!("{title} / {artist}: {:?}", look_up(CATALOGUE, &song(title, artist, ms)).map_err(|e| e.0));
+            std::thread::sleep(Duration::from_secs(3));
+        }
+    }
+
     #[test]
     fn only_blanks_are_filled_and_track_numbers_only_for_the_same_album() {
         let mut library = Library::open_in_memory().unwrap();

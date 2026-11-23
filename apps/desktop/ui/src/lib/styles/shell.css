@@ -365,7 +365,7 @@ body.carrying, body.carrying * { cursor: grabbing !important; user-select: none;
 .trk-ck { position: absolute; z-index: 2; left: 6px; top: 50%; translate: 0 -50%; display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border-radius: 6px; border: 1.5px solid var(--wp-text-2); background: var(--wp-main); color: #fff; opacity: 0; transition: opacity 120ms, background var(--dur-short), border-color var(--dur-short); }
 .trk-row.has-rd .trk-ck { left: 28px; }
 .trk-ck .ic { width: 18px; height: 18px; }
-.trk-ck.on { background: var(--wp-accent); border-color: var(--wp-accent); }
+.trk-ck.on { background: var(--acc); border-color: var(--acc); }
 .trk-row:hover .trk-ck, .trk-row.picking .trk-ck, .trk-row.pk .trk-ck, .trk-ck:focus-visible { opacity: 1; }
 @media (hover: none) { .trk-row .trk-ck { opacity: 0; } .trk-row.picking .trk-ck, .trk-row.pk .trk-ck { opacity: 1; } }
 .trk-main { position: relative; display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; height: 100%; text-align: left; }

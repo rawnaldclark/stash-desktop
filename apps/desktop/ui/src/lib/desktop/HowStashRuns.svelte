@@ -56,11 +56,11 @@
 	.how p { margin: 0; color: var(--wp-text-2); font: 400 15px/1.5 var(--font-body); }
 	.how-c { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
 	.how-o { display: grid; gap: 8px; align-content: start; justify-items: start; padding: 18px; border-radius: 16px; border: 1.5px solid var(--wp-line-2); background: var(--wp-main); color: var(--wp-text); text-align: left; transition: border-color var(--dur-short), background var(--dur-short); }
-	.how-o :global(.ic) { width: 28px; height: 28px; color: var(--wp-accent); }
+	.how-o :global(.ic) { width: 28px; height: 28px; color: var(--acc-text); }
 	.how-o b { font: 600 17px/1.3 var(--font-display, var(--font-body)); }
 	.how-o span { color: var(--wp-text-2); font: 400 14px/1.5 var(--font-body); }
-	.how-o.on { border-color: var(--wp-accent); background: var(--wp-hover); }
+	.how-o.on { border-color: var(--acc); background: var(--wp-hover); }
 	.how-o:disabled { opacity: .6; }
-	.how-o:focus-visible { outline: 2px solid var(--wp-accent); outline-offset: 2px; }
-	@media (hover: hover) and (pointer: fine) { .how-o:not(:disabled):hover { border-color: var(--wp-accent); } }
+	.how-o:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
+	@media (hover: hover) and (pointer: fine) { .how-o:not(:disabled):hover { border-color: var(--acc); } }
 </style>

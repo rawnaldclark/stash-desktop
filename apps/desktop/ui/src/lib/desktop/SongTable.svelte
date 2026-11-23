@@ -277,7 +277,7 @@
 	.tb-cols { position: relative; margin-left: auto; }
 	.tb-pop { position: absolute; z-index: 30; right: 0; top: calc(100% + 6px); display: grid; gap: 2px; min-width: 170px; padding: 8px; border-radius: 12px; background: var(--wp-main); border: 1px solid var(--wp-line-2); box-shadow: 0 12px 32px rgb(0 0 0 / .18); }
 	.tb-pop label { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; font: 400 14px/1.2 var(--font-body); cursor: pointer; }
-	.tb-pop input { accent-color: var(--wp-accent); }
+	.tb-pop input { accent-color: var(--acc); }
 	.vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 	.tb { margin: 0 -8px; font: 400 13.5px/1 var(--font-body); }
 	.tb-h, .tb-r { display: grid; grid-template-columns: var(--tb-grid); align-items: center; column-gap: 12px; padding: 0 10px; }
@@ -294,9 +294,9 @@
 	.tb-c.strong { color: var(--wp-text); font-weight: 500; }
 	.tb-c.num { text-align: right; font-variant-numeric: tabular-nums; }
 	.tb-r.away .tb-c { opacity: .55; }
-	.tb-r.cur .tb-c.strong { color: var(--wp-accent); }
-	.tb-r.pk, .tb-r.pk:hover { background: color-mix(in oklab, var(--np-vib, var(--wp-accent)) 30%, transparent); }
+	.tb-r.cur .tb-c.strong { color: var(--acc-text); }
+	.tb-r.pk, .tb-r.pk:hover { background: color-mix(in oklab, var(--np-vib) 30%, transparent); }
 	.tb-ph i { display: block; width: min(240px, 60%); height: 10px; border-radius: 5px; background: var(--wp-hover); }
 	@media (hover: hover) and (pointer: fine) { .tb-r:hover { background: var(--wp-hover); } button.tb-hc:hover { color: var(--wp-text); } .tb-pop label:hover { background: var(--wp-hover); } }
-	button.tb-hc:focus-visible { outline: 2px solid var(--wp-accent); outline-offset: -2px; border-radius: 4px; }
+	button.tb-hc:focus-visible { outline: 2px solid var(--acc); outline-offset: -2px; border-radius: 4px; }
 </style>
