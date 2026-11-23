@@ -1952,15 +1952,47 @@ fn plays_here(item: &QueueItem, here: &std::collections::HashSet<i64>) -> bool {
     item.addon.is_none() && item.id.is_some_and(|id| here.contains(&id))
 }
 
-/// /api/offline: whether Stash is offline; POST {offline} says so, and it holds next time.
+/// How Stash was set to run when it was first opened (the `mode` setting): `local` is the listener's own music files
+/// and nothing from the internet, `everything` is streaming and discovery too. Unset until they choose.
+const MODE_SETTING: &str = "mode";
+fn mode(state: &State) -> Option<String> {
+    state
+        .library
+        .lock()
+        .unwrap()
+        .setting(MODE_SETTING)
+        .ok()
+        .flatten()
+        .filter(|m| m == "local" || m == "everything")
+}
+
+/// /api/offline: whether Stash is offline; POST {offline} says so, and it holds next time. POST {mode} chooses how
+/// Stash runs: `local` is offline for good (the window leaves out what needs the internet), `everything` is online.
 fn offline_route(state: &State, request: &mut Request, path: &str) -> Result<Option<Reply>> {
     if path != "/api/offline" {
         return Ok(None);
     }
     if *request.method() == Method::Post {
-        let Some(on) = body_json(request)?.get("offline").and_then(Value::as_bool) else {
+        let body = body_json(request)?;
+        let chosen = body.get("mode").and_then(Value::as_str);
+        if let Some(chosen) = chosen {
+            if chosen != "local" && chosen != "everything" {
+                return Ok(Some(refuse(400, "mode is local or everything")));
+            }
+            state
+                .library
+                .lock()
+                .unwrap()
+                .set_setting(MODE_SETTING, chosen)?;
+        }
+        let asked = chosen.map(|m| m == "local").or_else(|| body.get("offline").and_then(Value::as_bool));
+        let Some(mut on) = asked else {
             return Ok(Some(refuse(400, "offline is true or false")));
         };
+        // Local files only stays offline: it is what the mode means.
+        if mode(state).as_deref() == Some("local") {
+            on = true;
+        }
         state
             .library
             .lock()
@@ -1989,7 +2021,10 @@ fn offline_route(state: &State, request: &mut Request, path: &str) -> Result<Opt
     } else if *request.method() != Method::Get {
         return Ok(None);
     }
-    Ok(Some(reply_json(200, json!({ "offline": offline(state) }))))
+    Ok(Some(reply_json(
+        200,
+        json!({ "offline": offline(state), "mode": mode(state) }),
+    )))
 }
 
 /// One of the player's routes. `None`: the path is not one of them.

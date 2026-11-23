@@ -50,5 +50,6 @@
 			onkeydown={(e) => { if (e.key === 'Escape') { ui.q = ''; go('', true); input?.blur(); } }}
 		/>
 	</form>
-	{#if ui.offline}<button type="button" class="hd-dev hd-off" aria-label="Offline: only what is on this computer plays. Go back online" title="Offline: only what is on this computer plays. Click to go back online" onclick={() => void goOffline(false)}><Icon name="download" /><span class="hd-dt">Offline</span></button>{/if}
+	{#if ui.local}<a class="hd-dev hd-off" href="/settings?c=general" aria-label="Stash plays only your own music files. Change it in Settings" title="Only your own music files: Stash stays off the internet. Click to change"><Icon name="folder" /><span class="hd-dt">My files</span></a>
+	{:else if ui.offline}<button type="button" class="hd-dev hd-off" aria-label="Offline: only what is on this computer plays. Go back online" title="Offline: only what is on this computer plays. Click to go back online" onclick={() => void goOffline(false)}><Icon name="download" /><span class="hd-dt">Offline</span></button>{/if}
 </header>

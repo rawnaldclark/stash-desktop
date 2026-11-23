@@ -43,7 +43,11 @@
 		['history', 'History']
 	];
 	// Not found shows only while songs wait on it; YouTube Music, once the listener signed in to it.
-	const shownTabs = $derived(tabs.filter(([id]) => (id !== 'notfound' || NF.open > 0 || tab === 'notfound') && (id !== 'youtube' || (T.on && T.signedIn) || tab === 'youtube')));
+	// On the listener's own files only, what comes from the internet is not there: YouTube Music, downloads from add-ons, songs not found.
+	const LOCAL_OUT: Tab[] = ['youtube', 'downloads', 'notfound'];
+	const shownTabs = $derived(
+		tabs.filter(([id]) => (!ui.local || !LOCAL_OUT.includes(id)) && (id !== 'notfound' || NF.open > 0 || tab === 'notfound') && (id !== 'youtube' || (T.on && T.signedIn) || tab === 'youtube'))
+	);
 	$effect(() => {
 		void NF.refresh();
 	});
@@ -71,7 +75,8 @@
 		return m;
 	});
 	const likes = $derived.by(() => {
-		const l = L.likes.filter(hit);
+		// On the listener's own files only, a like whose song is not on this computer is not listed.
+		const l = L.likes.filter((i) => hit(i) && (!ui.local || i.here !== false));
 		if (likeSort === 'title') return [...l].sort((a, b) => byText(a.title, b.title));
 		if (likeSort === 'artist') return [...l].sort((a, b) => byText(a.artist, b.artist) || byText(a.title, b.title));
 		if (likeSort === 'duration') return [...l].sort((a, b) => (b.durationMs ?? 0) - (a.durationMs ?? 0));

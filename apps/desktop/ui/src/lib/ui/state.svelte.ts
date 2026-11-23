@@ -3,7 +3,7 @@
  * Components read `S.v` (PlayerState), `L.likes` etc.; they never touch audio or storage.
  */
 import { fromStore, get } from 'svelte/store';
-import { blockedNow as blockedNowStore, blockedOf, library, likedKept as likedKeptStore, offline as offlineStore, player, sources as sourcesApi } from '../app';
+import { blockedNow as blockedNowStore, blockedOf, library, likedKept as likedKeptStore, mode as modeStore, offline as offlineStore, player, sources as sourcesApi } from '../app';
 import { LIB_REF, songIndex } from '../identity';
 import type { Counts, Descriptor, FollowedArtist, HistoryEntry, LibraryItem, NewRelease, Playlist, PlaylistFolder, SourceStatus } from '../api';
 import type { IconName } from './icons';
@@ -47,6 +47,7 @@ const loaded = fromStore<boolean>(library.loaded);
 const changed = fromStore<number>(library.changed);
 const sources = fromStore<SourceStatus[]>(sourcesApi.status);
 const offlineNow = fromStore<boolean>(offlineStore);
+const modeNow = fromStore(modeStore);
 const likedKeptNow = fromStore<boolean>(likedKeptStore);
 const blockedNow = fromStore(blockedNowStore);
 
@@ -211,6 +212,14 @@ class UIState {
 	/** The text in the header search box (shared with the Search page). */
 	q = $state('');
 	/** Stash is offline: only what is on this computer plays (Settings › Your library, Ctrl+K, the header's chip). */
+	/** How Stash runs: undefined until the core has said, null when the listener has not chosen yet. */
+	get mode() {
+		return modeNow.current;
+	}
+	/** Stash runs on the listener's own music files only: nothing that needs the internet is shown. */
+	get local() {
+		return modeNow.current === 'local';
+	}
 	get offline() {
 		return offlineNow.current;
 	}

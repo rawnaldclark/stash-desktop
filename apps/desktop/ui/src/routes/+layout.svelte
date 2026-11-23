@@ -18,6 +18,7 @@
 	import CommandPalette from '../lib/ui/CommandPalette.svelte';
 	import SmartEditor from '../lib/desktop/SmartEditor.svelte';
 	import DeleteSongs from '../lib/desktop/DeleteSongs.svelte';
+	import HowStashRuns from '../lib/desktop/HowStashRuns.svelte';
 	import Toast from '../lib/ui/Toast.svelte';
 	import { R } from '../lib/desktop/radio.svelte';
 	import PickBar from '../lib/ui/PickBar.svelte';
@@ -229,5 +230,7 @@
 	{#if ui.palette}<CommandPalette />{/if}
 	{#if ui.smart}<SmartEditor />{/if}
 	{#if ui.deleting}<DeleteSongs />{/if}
+	<!-- The first time Stash opens: how it is to run. -->
+	{#if ui.mode === null}<HowStashRuns first />{/if}
 </div>
 {/if}
