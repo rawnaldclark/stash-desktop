@@ -11,8 +11,11 @@ export function sizeText(bytes: number): string {
 
 const n = (count: number, one: string, many: string) => (count === 1 ? one : many.replace('#', count.toLocaleString()));
 
-/** What the delete touches, one line each; nothing for songs that are only entries in the library. */
-export function deleteLines(p: DeletePreview, files: boolean): { icon: IconName; text: string }[] {
+/**
+ * What the delete touches, one line each; nothing for songs that are only entries in the library. The files of the
+ * listener's own music folders are not a line: the question has its own switch for them, which says the same.
+ */
+export function deleteLines(p: DeletePreview): { icon: IconName; text: string }[] {
 	const out: { icon: IconName; text: string }[] = [];
 	if (p.in_playlists) {
 		const where = n(p.playlists, '1 playlist', '# playlists');
@@ -20,9 +23,6 @@ export function deleteLines(p: DeletePreview, files: boolean): { icon: IconName;
 	}
 	if (p.saved_files) {
 		out.push({ icon: 'download', text: `${n(p.saved_files, '1 download is', '# downloads are')} deleted from this computer (${sizeText(p.saved_bytes)})` });
-	}
-	if (p.folder_files && files) {
-		out.push({ icon: 'folder', text: `${n(p.folder_files, '1 file is', '# files are')} deleted from your music folders (${sizeText(p.folder_bytes)})` });
 	}
 	return out;
 }

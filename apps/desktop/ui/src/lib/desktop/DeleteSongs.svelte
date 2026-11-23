@@ -36,7 +36,7 @@
 		if (preview) box?.querySelector<HTMLElement>('.del-go')?.focus();
 	});
 
-	const lines = $derived(preview ? deleteLines(preview, files) : []);
+	const lines = $derived(preview ? deleteLines(preview) : []);
 	/** How many songs really go: a folder file kept keeps its song. */
 	const going = $derived(preview ? preview.songs - (files ? 0 : preview.folder_files) : 0);
 

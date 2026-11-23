@@ -189,6 +189,18 @@
 				{/if}
 			{/if}
 			<button type="button" class="act-ib" aria-label="Save {album.title} as a playlist" title="Save as a playlist" disabled={!items.length} onclick={() => void save()}><Icon name="playlist_add" /></button>
+			{#if sid === LIBRARY_SOURCE && items.length}
+				<button
+					type="button"
+					class="act-ib"
+					aria-label="Delete {album.title} from your library"
+					title="Delete from your library"
+					onclick={() => {
+						const ids = items.map((it) => Number(it.refs[LIB_REF])).filter((n) => Number.isFinite(n));
+						if (ids.length) ui.deleting = { what: { ids }, title: ids.length === 1 ? items[0].title : '', then: (removed) => { if (removed >= ids.length) history.back(); } };
+					}}
+				><Icon name="delete" /></button>
+			{/if}
 		</div>
 		{#if items.length}
 			<div class="trk-list">

@@ -1648,8 +1648,10 @@ impl Core {
                 let (state, stop) = (&state, &stop);
                 scope.spawn(move || crate::discover::run(state, stop));
             }
-            // A phone plugged in with songs sent from Stash for Android: taken into the library.
-            {
+            // A phone plugged in with songs sent from Stash for Android: taken into the library. Not with
+            // STASH_NO_PHONE set: a core run on a test library must never take a real phone's songs (it deletes
+            // them from the phone as it goes).
+            if std::env::var_os("STASH_NO_PHONE").is_none() {
                 let (state, stop) = (&state, &stop);
                 scope.spawn(move || crate::phone_transfer::run(state, stop));
             }

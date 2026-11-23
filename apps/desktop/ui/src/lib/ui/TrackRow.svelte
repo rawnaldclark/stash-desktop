@@ -36,6 +36,15 @@
 	/** The row is in a list whose songs can be picked, and is picked. */
 	const pickable = $derived(!!pick && at !== undefined && !hit);
 	const picked = $derived(pickable && P.has(pick!, at!, item));
+	/** Songs are being picked in this row's list: every row shows its box, so more are a click away. */
+	const picking = $derived(pickable && P.count > 0 && P.list === pick);
+	/** The row's box: picks the song or lets it go; with Shift, every song from the last one picked. */
+	function boxClick(e: MouseEvent) {
+		e.stopPropagation();
+		if (!pickable) return;
+		if (e.shiftKey) void P.range(pick!, at!, true);
+		else P.toggle(pick!, at!, item);
+	}
 	/** A picked song's menu acts on every song picked (two or more), read as it opens. */
 	const menuArgs = $derived<SongMenuArgs>(picked && P.count > 1 ? { load: async () => pickedMenu() ?? { item, extra } } : { item, extra });
 	let rowEl = $state<HTMLElement>();
@@ -89,11 +98,14 @@
 	}
 </script>
 
-<div class="trk-row" class:cur={current} class:off class:away class:blk={!!blocked} class:pk={picked} class:has-num={num !== undefined} class:has-cv={cover} class:has-al={album} class:has-rd={handle} use:songMenu={menuArgs} bind:this={rowEl} role="presentation" title={off ? 'Not found on your add-ons' : away ? 'Not on this computer: Stash is offline' : blocked ? 'You chose not to play this' : undefined}>
+<div class="trk-row" class:cur={current} class:off class:away class:blk={!!blocked} class:pk={picked} class:picking class:has-num={num !== undefined} class:has-cv={cover} class:has-al={album} class:has-rd={handle} use:songMenu={menuArgs} bind:this={rowEl} role="presentation" title={off ? 'Not found on your add-ons' : away ? 'Not on this computer: Stash is offline' : blocked ? 'You chose not to play this' : undefined}>
 	{#if handle}<button type="button" class="rd-h" aria-label="Reorder {item.title}" title="Drag to reorder, or press Arrow Up or Down" aria-keyshortcuts="ArrowUp ArrowDown"><Icon name="drag_indicator" /></button>{/if}
 	<!-- A click anywhere on the row plays it (except on the names that link away); the button inside is the keyboard and screen-reader way in: its Enter or Space click bubbles to the row. -->
 	<!-- svelte-ignore a11y_click_events_have_key_events -->
 	<!-- A click with Shift or Ctrl picks songs: the text between is not selected. -->
+	{#if pickable}
+		<button type="button" class="trk-ck" class:on={picked} role="checkbox" aria-checked={picked} aria-label="Select {item.title}" title={picked ? 'Selected' : 'Select'} onclick={boxClick}>{#if picked}<Icon name="check" />{/if}</button>
+	{/if}
 	<div class="trk-main" role="presentation" onclick={rowClick} onmousedown={(e) => pickable && (e.shiftKey || e.ctrlKey || e.metaKey) && e.preventDefault()}>
 		<button type="button" class="trk-hit" onkeydown={hitKeyDown} onkeyup={hitKeyUp} aria-label={hit ?? `Play ${item.title} by ${item.artist}${off ? ' (not found on your add-ons)' : away ? ' (not on this computer)' : blocked ? ' (you chose not to play it)' : ''}${picked ? ' (selected)' : ''}`}></button>
 		{#if num !== undefined}
