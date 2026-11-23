@@ -173,7 +173,11 @@
 	});
 	let hereTotal = $state<number | null>(null);
 	/** The tabs that are searched from here: Songs asks the core; Liked, Playlists and History filter what is listed. */
-	const findable = $derived(tab === 'songs' ? (L.counts?.tracks ?? 0) > 0 : tab === 'likes' ? L.likes.length > 0 : tab === 'playlists' ? true : tab === 'history' ? L.history.length > 0 : false);
+	const findable = $derived(
+		tab === 'songs' || tab === 'albums' || tab === 'artists' ? (L.counts?.tracks ?? 0) > 0 : tab === 'likes' ? L.likes.length > 0 : tab === 'playlists' || tab === 'downloads' ? true : tab === 'history' ? L.history.length > 0 : false
+	);
+	/** What the box looks through, said in it. */
+	const findWord = $derived(({ songs: 'Search your songs', likes: 'Search your likes', playlists: 'Search your playlists', albums: 'Search your albums', artists: 'Search your artists', downloads: 'Search your downloads', history: 'Search your history' } as Record<string, string>)[tab] ?? 'Search your library');
 </script>
 
 <div class="view view-in view-library">
@@ -186,7 +190,7 @@
 
 	{#if findable && !measuring}
 		<div class="lib-tools">
-			<label class="lib-find"><Icon name="search" /><input type="search" placeholder="Search your library" aria-label="Search your library" bind:value={q} maxlength="100" /></label>
+			<label class="lib-find"><Icon name="search" /><input type="search" placeholder={findWord} aria-label={findWord} bind:value={q} maxlength="100" /></label>
 			{#if tab === 'likes'}
 				<div class="lib-sort" role="group" aria-label="Sort your likes">{#each Object.entries(LIKE_SORTS) as [k, v] (k)}<button type="button" class="chip" class:on={likeSort === k} aria-pressed={likeSort === k} onclick={() => (likeSort = k as LikeSort)}>{v}</button>{/each}</div>
 			{:else if tab === 'playlists'}
@@ -271,7 +275,7 @@
 			</form>
 		{/if}
 	{:else if tab === 'albums'}
-		{#key L.changed}<Albums />{/key}
+		{#key L.changed}<Albums {q} />{/key}
 	{:else if tab === 'artists'}
 		{#if L.followed.length}
 			<h2 class="vh2">Following</h2>
@@ -285,11 +289,11 @@
 			</div>
 			<h2 class="vh2">In your library</h2>
 		{/if}
-		{#key L.changed}<Artists />{/key}
+		{#key L.changed}<Artists {q} />{/key}
 	{:else if tab === 'youtube'}
 		<TubeLibrary />
 	{:else if tab === 'downloads'}
-		<Downloads />
+		<Downloads {q} />
 	{:else if tab === 'notfound'}
 		{#key page.url.search}<NotFound />{/key}
 	{:else if groups.length}
