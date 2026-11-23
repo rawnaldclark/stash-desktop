@@ -177,7 +177,7 @@ export type TableAsk = { sort: TableSort; down: boolean; q?: string; genre?: str
 export type TableRow = {
 	id: number; title: string; artist: string; artist_id: number; album: string | null; album_id: number | null; genre: string | null; year: number | null;
 	track_no: number; duration_ms: number; codec: string | null; sample_rate: number | null; bit_depth: number | null; bitrate: number | null;
-	added_at_ms: number; plays: number; liked: boolean; here: boolean;
+	added_at_ms: number; plays: number; liked: boolean; here: boolean; art: string | null;
 };
 export type GenreRow = { genre: string | null; songs: number };
 const tableQuery = (a: TableAsk) =>

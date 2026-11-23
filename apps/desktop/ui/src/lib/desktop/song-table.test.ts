@@ -10,7 +10,7 @@ describe('the table’s columns', () => {
 	});
 
 	it('keep the table’s own order, whatever order they were chosen in', () => {
-		expect(readColumns('plays,year,title,track')).toEqual(['track', 'title', 'year', 'plays']);
+		expect(readColumns('plays,year,title,track,cover')).toEqual(['cover', 'track', 'title', 'year', 'plays']);
 	});
 
 	it('make one grid track a column', () => {

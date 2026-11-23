@@ -34,6 +34,26 @@ type Kept = (String, Arc<Vec<u8>>);
 static KEPT: LazyLock<Mutex<VecDeque<Kept>>> = LazyLock::new(Default::default);
 static FETCHING: AtomicUsize = AtomicUsize::new(0);
 
+/// Where covers are kept on this computer once fetched (a `Covers` folder beside the library): a cover seen once
+/// shows again with no connection, and after Stash is opened again.
+static FOLDER: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Says where covers are kept. Once, as the core starts; without it they are kept in memory only.
+pub(crate) fn keep_in(folder: std::path::PathBuf) {
+    let _ = std::fs::create_dir_all(&folder);
+    let _ = FOLDER.set(folder);
+}
+
+/// The file a cover at `url` is kept in: named by the address's SHA-256, so nothing of the address is a path.
+fn kept_file(url: &str) -> Option<std::path::PathBuf> {
+    use sha2::Digest as _;
+    let name: String = sha2::Sha256::digest(url.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    Some(FOLDER.get()?.join(name))
+}
+
 /// An add-on of `reach` named the cover at `url`.
 pub(crate) fn note(url: &str, reach: Reach) {
     let mut noted = NOTED.lock().unwrap();
@@ -44,16 +64,16 @@ pub(crate) fn note(url: &str, reach: Reach) {
 }
 
 /// Answers a request for a cover, on a thread of its own. `origin` is the window's, when it may read the picture.
-pub(crate) fn answer(request: Request, origin: Option<String>) {
+pub(crate) fn answer(request: Request, origin: Option<String>, offline: bool) {
     let spawned = std::thread::Builder::new()
         .name("stash-cover".into())
-        .spawn(move || respond(request, origin));
+        .spawn(move || respond(request, origin, offline));
     if let Err(e) = spawned {
         eprintln!("a cover could not be fetched: {e}");
     }
 }
 
-fn respond(request: Request, origin: Option<String>) {
+fn respond(request: Request, origin: Option<String>, offline: bool) {
     let url = request
         .url()
         .strip_prefix(ROUTE)
@@ -63,7 +83,7 @@ fn respond(request: Request, origin: Option<String>) {
                 .map(|(_, value)| value.into_owned())
         })
         .unwrap_or_default();
-    let mut response = match picture(&url) {
+    let mut response = match picture(&url, offline) {
         Ok(bytes) => {
             let kind = if bytes.starts_with(b"\x89PNG") {
                 "image/png"
@@ -87,12 +107,21 @@ fn respond(request: Request, origin: Option<String>) {
 }
 
 /// The cover at `url`: kept, or fetched held to the reach of the add-on that named it.
-fn picture(url: &str) -> Result<Arc<Vec<u8>>, u16> {
+fn picture(url: &str, offline: bool) -> Result<Arc<Vec<u8>>, u16> {
     if url.is_empty() {
         return Err(400);
     }
     if let Some((_, bytes)) = KEPT.lock().unwrap().iter().find(|(u, _)| u == url) {
         return Ok(Arc::clone(bytes));
+    }
+    // Kept on this computer from an earlier look: no connection is needed for it.
+    let file = kept_file(url);
+    if let Some(bytes) = file.as_ref().and_then(|f| std::fs::read(f).ok()).filter(|b| !b.is_empty()) {
+        return Ok(remember(url, bytes));
+    }
+    // Offline (and on the listener's own files only, which is offline for good), nothing is asked of the internet.
+    if offline {
+        return Err(404);
     }
     if FETCHING.fetch_add(1, Ordering::AcqRel) >= MOST_AT_ONCE {
         FETCHING.fetch_sub(1, Ordering::AcqRel);
@@ -106,11 +135,34 @@ fn picture(url: &str) -> Result<Arc<Vec<u8>>, u16> {
         .unwrap_or(Reach::Internet);
     let fetched = downloads::fetch_cover(url, reach);
     FETCHING.fetch_sub(1, Ordering::AcqRel);
-    let bytes = Arc::new(fetched.ok_or(404u16)?);
+    let bytes = fetched.ok_or(404u16)?;
+    // Written beside its final name first, so a cover half-written is never read as one.
+    if let Some(file) = file {
+        let part = file.with_extension("part");
+        if std::fs::write(&part, &bytes).is_ok() {
+            let _ = std::fs::rename(&part, &file);
+        }
+    }
+    Ok(remember(url, bytes))
+}
+
+/// Whether the cover at `url` is kept on this computer already.
+pub(crate) fn is_kept(url: &str) -> bool {
+    kept_file(url).is_some_and(|f| f.is_file())
+}
+
+/// Fetches the cover at `url` and keeps it on this computer, unless it is kept already. Whether it is kept now.
+pub(crate) fn keep(url: &str) -> bool {
+    is_kept(url) || (picture(url, false).is_ok() && is_kept(url))
+}
+
+/// Keeps a cover in memory among the last ones asked for.
+fn remember(url: &str, bytes: Vec<u8>) -> Arc<Vec<u8>> {
+    let bytes = Arc::new(bytes);
     let mut kept = KEPT.lock().unwrap();
     if kept.len() >= MOST_KEPT {
         kept.pop_front();
     }
     kept.push_back((url.to_string(), Arc::clone(&bytes)));
-    Ok(bytes)
+    bytes
 }

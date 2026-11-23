@@ -1,7 +1,7 @@
 /** The song table's columns and what they show (SongTable.svelte), apart from the screen so they are tested. */
 import type { TableRow, TableSort } from '../core';
 
-export type ColumnId = 'track' | 'title' | 'artist' | 'album' | 'genre' | 'year' | 'length' | 'format' | 'added' | 'plays';
+export type ColumnId = 'cover' | 'track' | 'title' | 'artist' | 'album' | 'genre' | 'year' | 'length' | 'format' | 'added' | 'plays';
 
 export type Column = {
 	id: ColumnId;
@@ -16,6 +16,7 @@ export type Column = {
 };
 
 export const COLUMNS: Column[] = [
+	{ id: 'cover', name: '', width: '30px' },
 	{ id: 'track', name: '#', width: '36px', num: true },
 	{ id: 'title', name: 'Title', width: 'minmax(140px, 3fr)', sort: 'title', fixed: true },
 	{ id: 'artist', name: 'Artist', width: 'minmax(100px, 2fr)', sort: 'artist' },
@@ -29,7 +30,7 @@ export const COLUMNS: Column[] = [
 ];
 
 /** The columns shown until the listener chooses. */
-export const DEFAULT_COLUMNS: ColumnId[] = ['title', 'artist', 'album', 'genre', 'year', 'length', 'format'];
+export const DEFAULT_COLUMNS: ColumnId[] = ['cover', 'title', 'artist', 'album', 'genre', 'year', 'length', 'format'];
 
 /** The listener's kept choice of columns, in the table's own order; the default when there is none or it is nonsense. */
 export function readColumns(kept: string | null): ColumnId[] {

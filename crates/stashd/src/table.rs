@@ -63,6 +63,23 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
         if read_any {
             state.edited();
         }
+        // With a connection, the covers of files that carry none of their own are fetched and kept, a few a second,
+        // so the listener's own music has its covers with no connection too. Never offline.
+        if !state.offline.load(Ordering::Relaxed) {
+            let wanted = state.library.lock().unwrap().file_cover_addresses().unwrap_or_default();
+            for url in wanted {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                if state.offline.load(Ordering::Relaxed) {
+                    break;
+                }
+                if !crate::remote_art::is_kept(&url) {
+                    crate::remote_art::keep(&url);
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+            }
+        }
         if !wait(60) {
             return;
         }
