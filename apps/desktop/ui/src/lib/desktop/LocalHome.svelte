@@ -64,7 +64,7 @@
 	</section>
 {:else}
 	<div class="view view-in">
-		<h1 class="lh-h">Your music</h1>
+		<h1 class="lh-h">Your music <a class="vh2-more" href="/stats">Statistics</a></h1>
 		<ul class="lh-stats" aria-label="On this computer">
 			{#each statTiles(home.stats) as t (t.label)}
 				<li>
@@ -133,7 +133,7 @@
 {/if}
 
 <style>
-	.lh-h { margin: 0 0 14px; font: 700 28px/1.2 var(--font-display, var(--font-body)); color: var(--wp-text); }
+	.lh-h { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 0 0 14px; font: 700 28px/1.2 var(--font-display, var(--font-body)); color: var(--wp-text); }
 	.lh-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 10px; margin: 0 0 26px; padding: 0; list-style: none; }
 	.lh-stat { display: grid; gap: 4px; padding: 14px 16px; border-radius: 14px; background: var(--wp-hover); border: 1px solid var(--wp-line); color: var(--wp-text); text-decoration: none; }
 	.lh-stat b { font: 700 20px/1.15 var(--font-display, var(--font-body)); font-variant-numeric: tabular-nums; }

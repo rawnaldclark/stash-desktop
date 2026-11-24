@@ -3447,6 +3447,8 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         ),
         // Home's shelves for the files on this computer: how much there is, what came lately, what is played most.
         (Method::Get, "/api/local/home") => reply_json(200, json!(library().local_home(12)?)),
+        // The library in numbers (Library > Statistics).
+        (Method::Get, "/api/stats") => reply_json(200, json!(library().library_stats(12)?)),
         (Method::Get, "/api/lyrics") => reply_json(200, lyrics_for(state, &param)?),
         // Whether lyrics are looked up on LRCLIB (on unless switched off).
         // Whether songs like the last ones are added when the queue ends (on unless switched off).

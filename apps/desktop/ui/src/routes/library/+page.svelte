@@ -198,6 +198,7 @@
 		{#each shownTabs as [id, label] (id)}
 			<a class="chip" class:on={tab === id} href="/library?tab={id}" aria-current={tab === id ? 'page' : undefined}>{label}</a>
 		{/each}
+		<a class="chip" href="/stats">Statistics</a>
 	</nav>
 
 	{#if findable && !measuring}

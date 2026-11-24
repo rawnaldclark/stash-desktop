@@ -38,6 +38,7 @@ pub mod served;
 pub mod shuffle;
 pub mod similar;
 pub mod smart;
+pub mod stats;
 pub mod station;
 pub mod synth;
 pub mod table;
