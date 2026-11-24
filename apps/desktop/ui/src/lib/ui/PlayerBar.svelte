@@ -34,7 +34,7 @@
 		</div>
 		<div class="bar-c">
 			<Transport kind="bar" />
-			<ProgressBar />
+			<ProgressBar wave />
 		</div>
 		<div class="bar-r">
 			<button type="button" class="bar-ib b-lyr" class:open={ui.panelOpen && ui.panelTab === 'lyrics'} aria-pressed={ui.panelOpen && ui.panelTab === 'lyrics'} aria-label="Lyrics" title="Lyrics" onclick={() => ui.toggleTab('lyrics')}><Icon name="lyrics" /></button>

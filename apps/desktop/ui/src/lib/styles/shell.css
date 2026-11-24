@@ -236,6 +236,13 @@ body.carrying, body.carrying * { cursor: grabbing !important; user-select: none;
 .trk-bg { position: absolute; left: 0; right: 0; top: 6px; height: 4px; border-radius: 2px; background: var(--wp-line-2); }
 .pf { position: absolute; left: 0; right: 0; top: 6px; height: 4px; border-radius: 2px; transform-origin: 0 50%; transform: scaleX(0); background: linear-gradient(90deg, color-mix(in srgb, var(--acc) 60%, transparent), var(--acc)); }
 .knob-w { position: absolute; inset: 0; pointer-events: none; }
+/* The track in the song's shape (ProgressBar `wave`): the plain track and fill, cut by the waveform's mask; the knob
+   becomes a thin playhead. */
+.trk-in { position: absolute; inset: 0; }
+.prg.wv .trk-in { -webkit-mask: var(--wave) center / 100% 100% no-repeat; mask: var(--wave) center / 100% 100% no-repeat; }
+.prg.wv .trk-bg, .prg.wv .pf { top: 0; height: 100%; border-radius: 0; }
+.prg.wv .trk-bg { background: color-mix(in srgb, var(--wp-text) 24%, transparent); }
+.prg.wv .pd::after { left: -1px; top: 0; width: 2px; height: 100%; border-radius: 1px; }
 .pd { position: absolute; left: 0; right: 0; top: 0; height: 16px; }
 .pd::after { content: ""; position: absolute; left: -5px; top: 3px; width: 10px; height: 10px; border-radius: 50%; background: var(--wp-text); opacity: 0; transition: opacity var(--dur-short); }
 .trk:hover .pd::after, .trk:focus-visible .pd::after, .trk.drag .pd::after { opacity: 1; }

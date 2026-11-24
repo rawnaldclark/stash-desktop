@@ -31,6 +31,7 @@ mod table;
 mod tidal;
 mod transcode;
 mod unfound;
+mod waveform;
 mod youtube_account;
 mod youtube_fallback;
 mod youtube_pages;

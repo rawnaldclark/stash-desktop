@@ -67,7 +67,7 @@
 			{/if}
 		</div>
 		<div class="fs-b">
-			<ProgressBar class="fs-prog" />
+			<ProgressBar class="fs-prog" wave />
 			<Transport kind="fs" />
 		</div>
 	{:else}

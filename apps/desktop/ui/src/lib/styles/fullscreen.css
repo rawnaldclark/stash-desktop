@@ -41,6 +41,7 @@
 .fs-next .caps { letter-spacing: .12em; }
 .fs-nx { margin-top: 2px; font: 400 13px/1.3 var(--font-body); color: var(--wp-text); overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
 .fs-b .prg.fs-prog { width: var(--art, 360px); }
+.fs-b .prg.fs-prog.wv, .fs-b .prg.fs-prog.wv .trk, .fs-b .prg.fs-prog.wv .pd { height: 40px; }
 .tr-fs { gap: 12px; height: auto; }
 .tr-fs .ib { width: 40px; height: 40px; }
 .tr-fs .ib:first-child, .tr-fs .ib:last-child { width: 36px; height: 36px; }
