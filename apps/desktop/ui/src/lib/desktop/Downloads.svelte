@@ -1,11 +1,13 @@
 <!-- Library › Downloads: songs saved to this computer, and those on their way. What is saved plays with no connection; the
      rest plays through the add-ons until it is saved. A song is saved from its menu, or a whole list from Liked or a playlist. -->
 <script lang="ts">
+	import { fold } from '../identity';
 	import { onMount, untrack } from 'svelte';
 	import { itemOfRow, library, player } from '../app';
 	import * as core from '../core';
 	import Icon from '../ui/Icon.svelte';
 	import TrackRow from '../ui/TrackRow.svelte';
+	import WindowRows from '../ui/WindowRows.svelte';
 	import { P, type PickList } from '../ui/pick.svelte';
 	import type { LibraryItem } from '../api';
 	import { songs } from '../ui/format';
@@ -20,9 +22,23 @@
 	let savedBefore = -1;
 	let failedBefore = 0;
 
+	/** What is typed in the library's search box: only the downloads that match are listed. */
+	let { q = '' }: { q?: string } = $props();
+	const needle = $derived(fold(q));
+
 	async function read() {
 		try {
-			const next = await core.downloads(0, shown);
+			let next = await core.downloads(0, needle ? 500 : shown);
+			// Searching looks through every download, not only the ones shown so far: the rest are read too.
+			if (needle) {
+				const all = [...next.rows];
+				while (all.length % 500 === 0 && all.length > 0) {
+					const more = await core.downloads(all.length, 500);
+					if (!more.rows.length) break;
+					all.push(...more.rows);
+				}
+				next = { ...next, rows: all };
+			}
 			// Songs that became files: the library's lists show them as files from now on.
 			if (savedBefore >= 0 && next.counts.saved > savedBefore) void library.reload();
 			savedBefore = next.counts.saved;
@@ -52,7 +68,13 @@
 		};
 	});
 
-	const rows = $derived(d?.rows ?? []);
+	const every = $derived(d?.rows ?? []);
+	const rows = $derived(needle ? every.filter((r) => fold(`${r.title} ${r.artist} ${r.album ?? ''}`).includes(needle)) : every);
+	// A new search reads the list at once, not at the next tick.
+	$effect(() => {
+		void needle;
+		untrack(() => void read());
+	});
 	const items = $derived(rows.map((r) => itemOfRow(r)));
 	const total = $derived(d ? d.counts.queued + d.counts.saving + d.counts.saved + d.counts.failed : 0);
 	const failed = $derived(rows.filter((r) => r.state === 'failed'));
@@ -141,11 +163,14 @@
 			</ul>
 		{/if}
 		<div class="trk-list">
-			{#each rows as r, i (r.id)}
-				<TrackRow item={items[i]} num={i + 1} album tag={status(r)} {pick} at={i} onplay={() => play(i)} extra={extra(r)} />
-			{/each}
+			<WindowRows items={rows} key={(r) => r.id}>
+				{#snippet row(r, i)}
+					<TrackRow item={items[i]} num={i + 1} album tag={status(r)} {pick} at={i} onplay={() => play(i)} extra={extra(r)} />
+				{/snippet}
+			</WindowRows>
 		</div>
-		{#if total > rows.length && rows.length >= shown}
+		{#if needle && !rows.length}<p class="s-hint">No download matches “{q.trim()}”.</p>{/if}
+		{#if !needle && total > rows.length && rows.length >= shown}
 			<button type="button" class="btn ghost hist-more" onclick={() => { shown += PAGE; void read(); }}>Show more</button>
 		{/if}
 	{:else}

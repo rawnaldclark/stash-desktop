@@ -310,6 +310,10 @@ export const setShortcuts = (change: { on?: boolean; keys?: Record<string, strin
 
 // ---- Offline: Stash plays only what is on this computer, and asks no add-on
 
+/** How Stash runs: the listener's own files only, or streaming and discovery too. Null until they have chosen. */
+export type Mode = 'local' | 'everything';
+export const running = () => get<{ offline: boolean; mode: Mode | null }>('/api/offline');
+export const setMode = (mode: Mode) => post<{ offline: boolean; mode: Mode | null }>('/api/offline', { mode });
 export const offline = () => get<{ offline: boolean }>('/api/offline').then((r) => r.offline);
 export const setOffline = (on: boolean) => post<{ offline: boolean }>('/api/offline', { offline: on }).then((r) => r.offline);
 

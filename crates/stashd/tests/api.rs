@@ -3686,10 +3686,10 @@ fn offline_plays_only_what_is_here_and_asks_no_add_on() {
     );
 
     // Offline, and it holds from one run to the next.
-    assert_eq!(client.get("/api/offline").1, json!({ "offline": false }));
+    assert_eq!(client.get("/api/offline").1, json!({ "offline": false, "mode": null }));
     assert_eq!(
         client.post("/api/offline", json!({ "offline": true })),
-        json!({ "offline": true })
+        json!({ "offline": true, "mode": null })
     );
     assert_eq!(
         Library::open(&db)
@@ -3762,7 +3762,26 @@ fn offline_plays_only_what_is_here_and_asks_no_add_on() {
     // Back online, the add-on's songs play again.
     assert_eq!(
         client.post("/api/offline", json!({ "offline": false })),
-        json!({ "offline": false })
+        json!({ "offline": false, "mode": null })
+    );
+
+    // How Stash runs, chosen once: on the listener's own files only it is offline, and stays so until they choose
+    // otherwise (going back online by the switch alone does nothing).
+    assert_eq!(
+        client.post("/api/offline", json!({ "mode": "local" })),
+        json!({ "offline": true, "mode": "local" })
+    );
+    assert_eq!(
+        client.post("/api/offline", json!({ "offline": false })),
+        json!({ "offline": true, "mode": "local" })
+    );
+    assert_eq!(
+        client.get("/api/offline").1,
+        json!({ "offline": true, "mode": "local" })
+    );
+    assert_eq!(
+        client.post("/api/offline", json!({ "mode": "everything" })),
+        json!({ "offline": false, "mode": "everything" })
     );
     client.post("/api/player/play", json!({ "playlist": mix, "offset": 0 }));
     let online = client.player_until("bravo from the add-on", |s| {

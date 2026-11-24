@@ -23,6 +23,7 @@
 	import { atEvent, deleteFolder, folderHref, folderMenu, playlistMenu, playlistsWord } from '../../lib/desktop/playlist-folders';
 	import Icon from '../../lib/ui/Icon.svelte';
 	import TrackRow from '../../lib/ui/TrackRow.svelte';
+	import WindowRows from '../../lib/ui/WindowRows.svelte';
 	import { L, LS, ui } from '../../lib/ui/state.svelte';
 	import { dayLabel, songs } from '../../lib/ui/format';
 
@@ -42,7 +43,11 @@
 		['history', 'History']
 	];
 	// Not found shows only while songs wait on it; YouTube Music, once the listener signed in to it.
-	const shownTabs = $derived(tabs.filter(([id]) => (id !== 'notfound' || NF.open > 0 || tab === 'notfound') && (id !== 'youtube' || (T.on && T.signedIn) || tab === 'youtube')));
+	// On the listener's own files only, what comes from the internet is not there: YouTube Music, downloads from add-ons, songs not found.
+	const LOCAL_OUT: Tab[] = ['youtube', 'downloads', 'notfound'];
+	const shownTabs = $derived(
+		tabs.filter(([id]) => (!ui.local || !LOCAL_OUT.includes(id)) && (id !== 'notfound' || NF.open > 0 || tab === 'notfound') && (id !== 'youtube' || (T.on && T.signedIn) || tab === 'youtube'))
+	);
 	$effect(() => {
 		void NF.refresh();
 	});
@@ -70,7 +75,8 @@
 		return m;
 	});
 	const likes = $derived.by(() => {
-		const l = L.likes.filter(hit);
+		// On the listener's own files only, a like whose song is not on this computer is not listed.
+		const l = L.likes.filter((i) => hit(i) && (!ui.local || i.here !== false));
 		if (likeSort === 'title') return [...l].sort((a, b) => byText(a.title, b.title));
 		if (likeSort === 'artist') return [...l].sort((a, b) => byText(a.artist, b.artist) || byText(a.title, b.title));
 		if (likeSort === 'duration') return [...l].sort((a, b) => (b.durationMs ?? 0) - (a.durationMs ?? 0));
@@ -172,7 +178,11 @@
 	});
 	let hereTotal = $state<number | null>(null);
 	/** The tabs that are searched from here: Songs asks the core; Liked, Playlists and History filter what is listed. */
-	const findable = $derived(tab === 'songs' ? (L.counts?.tracks ?? 0) > 0 : tab === 'likes' ? L.likes.length > 0 : tab === 'playlists' ? true : tab === 'history' ? L.history.length > 0 : false);
+	const findable = $derived(
+		tab === 'songs' || tab === 'albums' || tab === 'artists' ? (L.counts?.tracks ?? 0) > 0 : tab === 'likes' ? L.likes.length > 0 : tab === 'playlists' || tab === 'downloads' ? true : tab === 'history' ? L.history.length > 0 : false
+	);
+	/** What the box looks through, said in it. */
+	const findWord = $derived(({ songs: 'Search your songs', likes: 'Search your likes', playlists: 'Search your playlists', albums: 'Search your albums', artists: 'Search your artists', downloads: 'Search your downloads', history: 'Search your history' } as Record<string, string>)[tab] ?? 'Search your library');
 </script>
 
 <div class="view view-in view-library">
@@ -185,7 +195,7 @@
 
 	{#if findable && !measuring}
 		<div class="lib-tools">
-			<label class="lib-find"><Icon name="search" /><input type="search" placeholder="Search your library" aria-label="Search your library" bind:value={q} maxlength="100" /></label>
+			<label class="lib-find"><Icon name="search" /><input type="search" placeholder={findWord} aria-label={findWord} bind:value={q} maxlength="100" /></label>
 			{#if tab === 'likes'}
 				<div class="lib-sort" role="group" aria-label="Sort your likes">{#each Object.entries(LIKE_SORTS) as [k, v] (k)}<button type="button" class="chip" class:on={likeSort === k} aria-pressed={likeSort === k} onclick={() => (likeSort = k as LikeSort)}>{v}</button>{/each}</div>
 			{:else if tab === 'playlists'}
@@ -210,9 +220,12 @@
 				<span class="lib-count">{needle ? `${likes.length} of ${songs(L.likes.length)}` : songs(L.likes.length)}</span>
 			</div>
 			<div class="trk-list">
-				{#each likes as it, i (it.refs.lib ?? it.key)}
-					<TrackRow item={it} num={i + 1} album pick={likesPick} at={i} onplay={() => play(likes, i)} />
-				{/each}
+				<!-- Thousands of likes: only the rows on screen are built. -->
+				<WindowRows items={likes} key={(it) => it.refs.lib ?? it.key}>
+					{#snippet row(it, i)}
+						<TrackRow item={it} num={i + 1} album pick={likesPick} at={i} onplay={() => play(likes, i)} />
+					{/snippet}
+				</WindowRows>
 			</div>
 			{#if !likes.length}<p class="s-hint">Nothing in your likes matches “{q.trim()}”.</p>{/if}
 		{:else if L.loaded}
@@ -267,7 +280,7 @@
 			</form>
 		{/if}
 	{:else if tab === 'albums'}
-		{#key L.changed}<Albums />{/key}
+		{#key L.changed}<Albums {q} />{/key}
 	{:else if tab === 'artists'}
 		{#if L.followed.length}
 			<h2 class="vh2">Following</h2>
@@ -281,11 +294,11 @@
 			</div>
 			<h2 class="vh2">In your library</h2>
 		{/if}
-		{#key L.changed}<Artists />{/key}
+		{#key L.changed}<Artists {q} />{/key}
 	{:else if tab === 'youtube'}
 		<TubeLibrary />
 	{:else if tab === 'downloads'}
-		<Downloads />
+		<Downloads {q} />
 	{:else if tab === 'notfound'}
 		{#key page.url.search}<NotFound />{/key}
 	{:else if groups.length}

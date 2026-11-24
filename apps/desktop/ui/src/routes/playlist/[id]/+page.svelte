@@ -9,6 +9,7 @@
 	import Icon from '../../../lib/ui/Icon.svelte';
 	import Tile from '../../../lib/ui/Tile.svelte';
 	import TrackRow from '../../../lib/ui/TrackRow.svelte';
+	import WindowRows from '../../../lib/ui/WindowRows.svelte';
 	import { untrack } from 'svelte';
 	import { P, type PickList } from '../../../lib/ui/pick.svelte';
 	import { reorder } from '../../../lib/ui/reorder';
@@ -111,9 +112,11 @@
 		{#if pl.items.length}
 			{#if followed || smart}
 				<div class="trk-list">
-					{#each pl.items as it, i (it.key + i)}
-						<TrackRow item={it} num={i + 1} album {pick} at={i} onplay={() => play(pl.items, i)} />
-					{/each}
+					<WindowRows items={pl.items} key={(it, i) => it.key + i}>
+						{#snippet row(it, i)}
+							<TrackRow item={it} num={i + 1} album {pick} at={i} onplay={() => play(pl.items, i)} />
+						{/snippet}
+					</WindowRows>
 				</div>
 			{:else}
 				<div class="trk-list" use:reorder={{ row: '.trk-row', handle: '.rd-h', onmove: (a, b) => void library.moveInPlaylist(pl.id, a, b) }}>

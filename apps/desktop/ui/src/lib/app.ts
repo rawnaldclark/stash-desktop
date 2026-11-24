@@ -101,10 +101,20 @@ function itemOfFound(addon: string, t: core.FoundTrack): LibraryItem {
 
 /** Stash is offline: it plays only what is on this computer, and asks no add-on (the core keeps it from one run to the next). */
 export const offline = writable(false);
+/** How Stash runs (chosen on first opening, Settings changes it): undefined until read, null until chosen. */
+export const mode = writable<core.Mode | null | undefined>(undefined);
+/** Chooses how Stash runs. Local files only is offline for good; everything is back online. */
+export async function setMode(next: core.Mode): Promise<void> {
+	const now = await core.setMode(next);
+	mode.set(now.mode);
+	offline.set(now.offline);
+}
 /** Reads whether Stash is offline. */
 export async function readOffline(): Promise<void> {
 	try {
-		offline.set(await core.offline());
+		const now = await core.running();
+		offline.set(now.offline);
+		mode.set(now.mode);
 	} catch {
 		/* the core is not answering: as it was */
 	}
@@ -816,8 +826,10 @@ const library: LibraryAPI = {
 		change(async () => {
 			const c = await core.removeSongs(what, opts);
 			await took(c);
-			await Promise.all([loadLibrary(), loadLikes(), loadHistory()]).catch(() => {});
-			relisted();
+			// The question closes as soon as the songs are gone; the lists are read again behind it.
+			void Promise.all([loadLibrary(), loadLikes(), loadHistory()])
+				.catch(() => {})
+				.then(relisted);
 			return c;
 		}),
 	removeSongs: (items) =>
