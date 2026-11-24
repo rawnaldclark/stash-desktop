@@ -151,6 +151,26 @@ export type SmartRule = { field: SmartField; op: SmartOp; value?: string | numbe
 export type SmartRules = { any: boolean; rules: SmartRule[]; order?: SmartOrder; limit?: number };
 
 export type AlbumRow = { id: number; title: string; artist: string; artist_id: number; year: number | null; tracks: number; art: string | null };
+/** Settings › Your phone: this computer linked with the listener's phone (`/api/link`). */
+export type LinkStep =
+	| { step: 'idle' }
+	| { step: 'opening' }
+	| { step: 'code'; link: string; expiresAt: number; renewals: number }
+	| { step: 'stale' }
+	| { step: 'confirm'; code: string; phoneName: string }
+	| { step: 'linking'; phoneName: string }
+	| { step: 'done'; phoneName: string }
+	| { step: 'error'; message: string };
+export type LinkDevice = { id: string; type: 'phone' | 'web' | 'desktop'; name: string; me: boolean; status: 'ok' | 'unverified' | 'keyChanged'; lastSeenAt: number };
+export type LinkView = { linked: boolean; name: string; hasPhone: boolean; devices: LinkDevice[]; pair: LinkStep; problem: string | null; busy: boolean };
+export const linkNow = () => get<LinkView>('/api/link');
+export const linkPair = () => post<LinkView>('/api/link/pair', {});
+export const linkStop = () => post<LinkView>('/api/link/pair/stop', {});
+export const linkConfirm = () => post<LinkView>('/api/link/confirm', {});
+export const linkCancel = () => post<LinkView>('/api/link/cancel', {});
+export const linkRefresh = () => post<LinkView>('/api/link/refresh', {});
+export const linkUnlink = () => post<LinkView>('/api/link/unlink', {});
+
 /** An album as the grid groups it (Library › Albums). */
 export type AlbumCard = AlbumRow & { genre: string | null; added_ms: number; songs_here: number };
 export const albumCards = (here: boolean) => rows<AlbumCard>(`/api/albums/cards${here ? '?here=1' : ''}`);
