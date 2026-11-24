@@ -229,6 +229,23 @@ export const albumsAt = (offset: number, limit: number, signal?: AbortSignal, he
 export type LocalStats = { songs: number; albums: number; artists: number; genres: number; duration_ms: number; bytes: number };
 export type LocalHome = { stats: LocalStats; added: AlbumRow[]; played: TrackRow[]; genres: { genre: string; songs: number }[] };
 export const localHome = () => get<LocalHome>('/api/local/home');
+
+/** Library › Statistics. A bar is a row of a list: `key` is what it opens (a genre, decade or artist id). */
+export type StatBar = { label: string; value: number; bytes?: number; key?: string | null; detail?: string };
+export type LibraryStats = {
+	totals: { songs: number; albums: number; artists: number; genres: number; duration_ms: number; bytes: number; lossless: number; hi_res: number; plays: number; played_ms: number };
+	formats: StatBar[];
+	quality: StatBar[];
+	decades: StatBar[];
+	genres: StatBar[];
+	no_genre: number;
+	artists_by_songs: StatBar[];
+	artists_by_plays: StatBar[];
+	most_played: StatBar[];
+	months: StatBar[];
+	tags: { label: string; have: number; of: number }[];
+};
+export const libraryStats = () => get<LibraryStats>('/api/stats');
 export const album = (id: number) => get<{ album: AlbumRow; rows: TrackRow[] }>(`/api/albums/${id}`);
 export const artistsAt = (offset: number, limit: number, signal?: AbortSignal, here = false) => rows<ArtistRow>(`/api/artists?offset=${offset}&limit=${limit}${here ? '&here=1' : ''}`, signal);
 /** `with`: the artist's songs with others ("A & B", "B feat. A"), credited apart. */
