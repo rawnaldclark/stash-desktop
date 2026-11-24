@@ -4,7 +4,9 @@
 //!
 //! It lives in the library's settings as two values. `queue` holds the tracks and is written when the queue
 //! changes; `queue.place` is small and is written as the place moves (every few seconds while a track plays). A
-//! song of the library is kept by its row; an add-on's track is kept whole, as the add-on told it.
+//! song of the library is kept by its row; an add-on's track is kept whole, as the add-on told it; a song known only
+//! by its description (one the phone sent that this computer doesn't hold) is kept by its words, and found through
+//! the add-ons again when it plays, as it was the first time.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -31,9 +33,38 @@ fn kept_item(item: &QueueItem) -> Value {
             "art": item.art,
             "duration_ms": item.duration_ms,
         }),
-        // Not a song of the library and not an add-on's: nothing to find it by next time.
+        // A song known by its words alone (the phone's remote sent it): kept by them, so it is found again as it was.
+        (None, None) if !item.title.trim().is_empty() && !item.artist.trim().is_empty() => json!({
+            "song": {
+                "title": item.title,
+                "artist": item.artist,
+                "album": item.album,
+                "art": item.art,
+                "duration_ms": item.duration_ms,
+            }
+        }),
+        // Nothing to find it by next time.
         (None, None) => Value::Null,
     }
+}
+
+/// A song kept by its words ([`kept_item`]): played as a described song, found through the add-ons when its turn comes.
+fn described_item(value: &Value) -> Option<QueueItem> {
+    let song = value.get("song")?;
+    let text = |name: &str| song.get(name).and_then(Value::as_str).map(str::to_string);
+    let title = text("title").filter(|t| !t.trim().is_empty())?;
+    let artist = text("artist").filter(|a| !a.trim().is_empty())?;
+    Some(QueueItem {
+        id: None,
+        title,
+        artist,
+        album: text("album"),
+        addon: None,
+        art: text("art"),
+        duration_ms: song.get("duration_ms").and_then(Value::as_u64),
+        qid: 0,
+        locator: String::new(),
+    })
 }
 
 fn addon_item(value: &Value) -> Option<QueueItem> {
@@ -149,7 +180,7 @@ pub fn restore(library: &Mutex<Library>, player: &Player) {
     for entry in &entries {
         let item = match entry.as_i64() {
             Some(id) => found.get(&id).cloned(),
-            None => addon_item(entry),
+            None => addon_item(entry).or_else(|| described_item(entry)),
         };
         now_at.push(items.len());
         here.push(item.is_some());
@@ -186,4 +217,46 @@ pub fn restore(library: &Mutex<Library>, player: &Player) {
         repeat,
         items,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(id: Option<i64>, addon: Option<(&str, &str)>, title: &str, artist: &str) -> QueueItem {
+        QueueItem {
+            id,
+            title: title.into(),
+            artist: artist.into(),
+            album: Some("Selected Ambient Works 85-92".into()),
+            addon: addon.map(|(a, t)| AddonTrack { addon: a.into(), track: t.into() }),
+            art: Some("https://x/a.jpg".into()),
+            duration_ms: Some(611_000),
+            qid: 7,
+            locator: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_song_known_by_its_words_is_kept_by_them_and_comes_back_described() {
+        let kept = kept_item(&item(None, None, "Tha", "Aphex Twin"));
+        assert!(kept.get("song").is_some(), "{kept}");
+        // It isn't taken for an add-on's track, and comes back as the same described song.
+        assert!(addon_item(&kept).is_none());
+        let back = described_item(&kept).expect("described");
+        assert_eq!((back.id, back.addon.is_none()), (None, true));
+        assert_eq!((back.title.as_str(), back.artist.as_str()), ("Tha", "Aphex Twin"));
+        assert_eq!(back.album.as_deref(), Some("Selected Ambient Works 85-92"));
+        assert_eq!(back.duration_ms, Some(611_000));
+        assert!(back.locator.is_empty());
+    }
+
+    #[test]
+    fn library_rows_and_add_on_tracks_are_kept_as_before_and_a_nameless_song_is_not() {
+        assert_eq!(kept_item(&item(Some(42), None, "Tha", "Aphex Twin")), json!(42));
+        let addon = kept_item(&item(None, Some(("stash.tidal", "t1")), "Tha", "Aphex Twin"));
+        assert_eq!(addon_item(&addon).and_then(|i| i.addon).map(|a| a.track), Some("t1".to_string()));
+        assert!(described_item(&addon).is_none());
+        assert_eq!(kept_item(&item(None, None, " ", "Aphex Twin")), Value::Null);
+    }
 }
