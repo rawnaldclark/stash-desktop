@@ -22,6 +22,7 @@ pub mod identity;
 pub mod import;
 pub mod lastfm;
 pub mod library;
+pub mod link;
 pub mod listenbrainz;
 pub mod lists;
 pub mod local;

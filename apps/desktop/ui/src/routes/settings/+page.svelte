@@ -19,6 +19,7 @@
 	import Playback from './Playback.svelte';
 	import Sound from './Sound.svelte';
 	import HowStashRuns from '../../lib/desktop/HowStashRuns.svelte';
+	import YourPhone from '../../lib/desktop/YourPhone.svelte';
 	import { ui } from '../../lib/ui/state.svelte';
 	import Sources from './Sources.svelte';
 	import { prefs, readOuts, readUse } from './prefs.svelte';
@@ -26,9 +27,10 @@
 
 	// ---- The categories, and the one shown
 
-	type Cat = 'general' | 'sound' | 'playback' | 'sources' | 'library' | 'scrobbling' | 'shortcuts' | 'appearance' | 'about';
+	type Cat = 'general' | 'phone' | 'sound' | 'playback' | 'sources' | 'library' | 'scrobbling' | 'shortcuts' | 'appearance' | 'about';
 	const CATS: [Cat, string, IconName][] = [
 		['general', 'General', 'settings'],
+		['phone', 'Your phone', 'smartphone'],
 		['sound', 'Sound', 'volume_up'],
 		['playback', 'Playback', 'play_arrow'],
 		['sources', 'Sources', 'extension'],
@@ -45,7 +47,7 @@
 	/** Whether this computer can hold keys system-wide (null until the core says): Shortcuts is listed only where it can. */
 	let shortcutsOk = $state<boolean | null>(null);
 	// On the listener's own files only, there are no sources to set up and nothing to scrobble to.
-	const cats = $derived(CATS.filter(([id]) => (id !== 'shortcuts' || shortcutsOk === true) && (!ui.local || (id !== 'sources' && id !== 'scrobbling'))));
+	const cats = $derived(CATS.filter(([id]) => (id !== 'shortcuts' || shortcutsOk === true) && (!ui.local || (id !== 'sources' && id !== 'scrobbling' && id !== 'phone'))));
 
 	function idOf(hash: string): string {
 		try {
@@ -205,6 +207,8 @@
 								<p class="set-name" style="margin: 0 0 10px">How Stash runs</p>
 								<HowStashRuns />
 							</section>
+						{:else if cat === 'phone'}
+							<YourPhone />
 						{:else if cat === 'sound'}
 							<Sound />
 						{:else if cat === 'playback'}

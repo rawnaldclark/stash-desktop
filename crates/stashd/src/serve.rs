@@ -949,6 +949,35 @@ fn resolver(
             };
         }
         let Some(id) = item.id else {
+            // A song known only by its description (the phone's, handed over by its remote, `crate::remote`): asked of the
+            // listener's add-ons in their order, like a song of the library, but nothing of it is kept.
+            if item.locator.is_empty() && !item.title.is_empty() && !item.artist.is_empty() && !offline {
+                let described = stash_core::library::Described::of(
+                    stash_core::addons::Wanted {
+                        title: item.title.clone(),
+                        artist: item.artist.clone(),
+                        album: item.album.clone(),
+                        duration_ms: item.duration_ms,
+                        isrc: None,
+                        explicit: None,
+                    },
+                    Vec::new(),
+                );
+                return through_addons(
+                    &registry,
+                    &library,
+                    &lacks,
+                    Asked::Found(Box::new(described)),
+                    "there is no add-on to play it from",
+                    |addon| addon.offers_resource("stream"),
+                    |addon, addon_id, track| {
+                        let stream = stream_from(addon, addon_id, track)?;
+                        hand_over(&relays, port, None, stream, addon.reach())
+                            .map_err(|why| AddonError::host(stash_core::addons::Code::Refused, why))
+                    },
+                )
+                .map(|(located, _)| located);
+            }
             return Err(gone("it has nowhere to play from"));
         };
         if let Some(located) = relays.copy_of(&library, id) {
@@ -1080,6 +1109,8 @@ pub(crate) struct State {
     pub(crate) saving: crate::saving::Saving,
     /// Missing tags being looked up, and what was found (see [`crate::fill`]).
     pub(crate) fill: crate::fill::Fill,
+    /// This computer linked with the listener's phone (see [`crate::link`]).
+    pub(crate) link: Arc<crate::link::Link>,
     /// Add-on streams the engine reads through the core, and the copies kept of them.
     pub(crate) relays: Arc<crate::relay::Relays>,
     /// Plays on their way to the listener's scrobbling services.
@@ -1318,6 +1349,9 @@ impl Core {
         )?));
         // Waveforms of the songs played are kept beside the library: a file is decoded once.
         crate::waveform::keep_in(options.db.parent().unwrap_or_else(|| Path::new(".")).join("Waveforms"));
+        // The link with the listener's phone is kept beside the library too.
+        let link: Arc<crate::link::Link> = Arc::default();
+        link.keep_in(options.db.parent().unwrap_or_else(|| Path::new(".")).to_path_buf());
         // Covers fetched from a server are kept beside the library: seen once, they show with no connection.
         crate::remote_art::keep_in(
             options
@@ -1444,6 +1478,7 @@ impl Core {
                 lacks,
                 saving: crate::saving::Saving::default(),
                 fill: crate::fill::Fill::default(),
+                link,
                 relays,
                 scrobbling,
                 offline,
@@ -1640,6 +1675,11 @@ impl Core {
             {
                 let (state, stop) = (&state, &stop);
                 scope.spawn(move || crate::fill::run(state, stop));
+            }
+            // The listener's phone as the remote, while this computer is linked with it.
+            {
+                let (state, stop) = (&state, &stop);
+                scope.spawn(move || crate::remote::run(state, stop));
             }
             // Plays on their way to the listener's scrobbling services.
             {
@@ -3312,6 +3352,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::table::route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::link::route(state, request, &path)? {
         return Ok((response, false));
     }
     if let Some(response) = crate::fill::route(state, request, &path)? {
