@@ -7,7 +7,7 @@
 	import { more } from './more';
 
 	/** What is typed in the library's search box: the grid shows only what matches it. */
-	let { q = '' }: { q?: string } = $props();
+	let { q = '', here = false }: { q?: string; here?: boolean } = $props();
 	const needle = $derived(fold(q));
 
 	const PAGE = 120;
@@ -22,7 +22,7 @@
 	async function read(): Promise<boolean> {
 		if (done) return false;
 		try {
-			const page = await core.albumsAt(rows.length, PAGE);
+			const page = await core.albumsAt(rows.length, PAGE, undefined, here);
 			rows = [...rows, ...page];
 			done = page.length < PAGE;
 			failure = null;
@@ -78,7 +78,7 @@
 {:else if needle && rows.length}
 	<p class="s-hint">{done ? `No album in your library matches “${q.trim()}”.` : 'Looking…'}</p>
 {:else if done}
-	<p class="s-hint">No albums yet. Albums show up here once your library has songs.</p>
+	<p class="s-hint">{here ? 'No albums on this computer yet. They show up here once your music folder has files with an album in their tags.' : 'No albums yet. Albums show up here once your library has songs.'}</p>
 {/if}
 {#if failure}
 	<p class="s-hint" role="alert">{failure} <button type="button" class="lnk" onclick={() => void load()}>Try again</button></p>

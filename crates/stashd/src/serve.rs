@@ -3428,14 +3428,25 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
             200,
             json!({ "rows": library().heard_at(number("offset", 0), limit(200))? }),
         ),
+        // `here=1`: only the artists and albums with a file on this computer (Stash run for local files only).
+        (Method::Get, "/api/artists") if param("here").as_deref() == Some("1") => reply_json(
+            200,
+            json!({ "rows": library().artists_here_at(number("offset", 0), limit(200))? }),
+        ),
         (Method::Get, "/api/artists") => reply_json(
             200,
             json!({ "rows": library().artists_at(number("offset", 0), limit(200))? }),
+        ),
+        (Method::Get, "/api/albums") if param("here").as_deref() == Some("1") => reply_json(
+            200,
+            json!({ "rows": library().albums_here_at(number("offset", 0), limit(120))? }),
         ),
         (Method::Get, "/api/albums") => reply_json(
             200,
             json!({ "rows": library().albums_at(number("offset", 0), limit(120))? }),
         ),
+        // Home's shelves for the files on this computer: how much there is, what came lately, what is played most.
+        (Method::Get, "/api/local/home") => reply_json(200, json!(library().local_home(12)?)),
         (Method::Get, "/api/lyrics") => reply_json(200, lyrics_for(state, &param)?),
         // Whether lyrics are looked up on LRCLIB (on unless switched off).
         // Whether songs like the last ones are added when the queue ends (on unless switched off).
