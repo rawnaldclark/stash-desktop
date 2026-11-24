@@ -5,6 +5,8 @@
 //!
 //! - [`crypto`]: base64url, HKDF, AES-GCM, gzip and envelopes.
 //! - [`keys`]: device keys, labels, the QR link, Kpair and the code, key envelopes.
+//! - [`remote`]: what this computer says it plays, and the phone's commands.
 
 pub mod crypto;
 pub mod keys;
+pub mod remote;

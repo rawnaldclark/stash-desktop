@@ -55,6 +55,34 @@ pub struct AlbumCard {
 }
 
 impl Library {
+    /// The library's row for a song another device describes (the phone's remote, `crate::link::remote`), by the identity
+    /// rule the web player and the app share: its ISRC first; else its words (title and artist, folded) with no ISRC that
+    /// says otherwise. A file on this computer is preferred, then a liked song, then the oldest row.
+    pub fn same_song(&self, title: &str, artist: &str, isrc: Option<&str>) -> Result<Option<i64>> {
+        let here = "(t.origin = 'file' AND t.locator != '' AND t.missing_since IS NULL) DESC, (t.liked_at_ms IS NOT NULL) DESC, t.id";
+        if let Some(isrc) = isrc.and_then(crate::identity::isrc) {
+            let by_isrc: Option<i64> = self
+                .conn
+                .prepare_cached(&format!("SELECT t.id FROM tracks t WHERE t.isrc = ?1 ORDER BY {here} LIMIT 1"))?
+                .query_map(params![isrc], |r| r.get(0))?
+                .next()
+                .transpose()?;
+            if by_isrc.is_some() {
+                return Ok(by_isrc);
+            }
+        }
+        let key = crate::identity::words_key(title, artist);
+        let wanted = isrc.and_then(crate::identity::isrc);
+        let mut stmt = self
+            .conn
+            .prepare_cached(&format!("SELECT t.id, t.isrc FROM tracks t WHERE t.words_key = ?1 ORDER BY {here} LIMIT 20"))?;
+        let rows: Vec<(i64, Option<String>)> = stmt.query_map(params![key], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        Ok(rows
+            .into_iter()
+            .find(|(_, theirs)| crate::identity::isrcs_agree(wanted.as_deref(), theirs.as_deref()))
+            .map(|(id, _)| id))
+    }
+
     /// Every album (`here`: only those with a file here), in the library's order, each with its main genre, the newest
     /// of its songs' arrival and how many of its songs are files here, for a grid grouped by any of them. An album that
     /// names no year takes its songs' latest.

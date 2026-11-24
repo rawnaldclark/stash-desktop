@@ -949,6 +949,35 @@ fn resolver(
             };
         }
         let Some(id) = item.id else {
+            // A song known only by its description (the phone's, handed over by its remote, `crate::remote`): asked of the
+            // listener's add-ons in their order, like a song of the library, but nothing of it is kept.
+            if item.locator.is_empty() && !item.title.is_empty() && !item.artist.is_empty() && !offline {
+                let described = stash_core::library::Described::of(
+                    stash_core::addons::Wanted {
+                        title: item.title.clone(),
+                        artist: item.artist.clone(),
+                        album: item.album.clone(),
+                        duration_ms: item.duration_ms,
+                        isrc: None,
+                        explicit: None,
+                    },
+                    Vec::new(),
+                );
+                return through_addons(
+                    &registry,
+                    &library,
+                    &lacks,
+                    Asked::Found(Box::new(described)),
+                    "there is no add-on to play it from",
+                    |addon| addon.offers_resource("stream"),
+                    |addon, addon_id, track| {
+                        let stream = stream_from(addon, addon_id, track)?;
+                        hand_over(&relays, port, None, stream, addon.reach())
+                            .map_err(|why| AddonError::host(stash_core::addons::Code::Refused, why))
+                    },
+                )
+                .map(|(located, _)| located);
+            }
             return Err(gone("it has nowhere to play from"));
         };
         if let Some(located) = relays.copy_of(&library, id) {
@@ -1646,6 +1675,11 @@ impl Core {
             {
                 let (state, stop) = (&state, &stop);
                 scope.spawn(move || crate::fill::run(state, stop));
+            }
+            // The listener's phone as the remote, while this computer is linked with it.
+            {
+                let (state, stop) = (&state, &stop);
+                scope.spawn(move || crate::remote::run(state, stop));
             }
             // Plays on their way to the listener's scrobbling services.
             {

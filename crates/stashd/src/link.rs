@@ -585,6 +585,11 @@ impl Link {
         Ok(true)
     }
 
+    /// Reads the space again (the remote heard of a device it doesn't know, or was refused).
+    pub(crate) fn check(&self) -> Result<()> {
+        self.refresh()
+    }
+
     /// Reads the space: walks keys forward, opens every device's label (pinning new keys), and shows the list.
     fn refresh(&self) -> Result<()> {
         let Some((device, mut space)) = self.linked() else { return Ok(()) };

@@ -22,6 +22,7 @@ mod pieces;
 mod playlist_files;
 mod radio;
 mod relay;
+mod remote;
 mod remote_art;
 mod saving;
 mod scrobbling;

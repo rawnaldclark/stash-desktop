@@ -189,7 +189,7 @@ impl Away {
 // ---- the connection
 
 /// The way to the relay: plain on this computer, else TLS.
-enum Conn {
+pub(crate) enum Conn {
     Plain(TcpStream),
     Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
 }
@@ -229,7 +229,21 @@ impl Write for Conn {
 }
 
 impl Conn {
-    fn tcp(&self) -> &TcpStream {
+    /// A TLS connection to `host` over `tcp`, with the web's root certificates (also the phone remote's, `crate::remote`).
+    pub(crate) fn tls(host: &str, tcp: TcpStream) -> Result<Conn, String> {
+        let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+        let config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .map_err(|_| "a secure connection could not be set up".to_string())?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let name = rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|_| "a wrong address".to_string())?;
+        let session = rustls::ClientConnection::new(Arc::new(config), name)
+            .map_err(|_| "a secure connection could not be set up".to_string())?;
+        Ok(Conn::Tls(Box::new(rustls::StreamOwned::new(session, tcp))))
+    }
+
+    pub(crate) fn tcp(&self) -> &TcpStream {
         match self {
             Conn::Plain(s) => s,
             Conn::Tls(s) => s.get_ref(),
