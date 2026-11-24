@@ -240,8 +240,66 @@ impl Library {
         })
     }
 
+    /// `edit`, with what the library knows of the song `id` and its file at `path` does not say: the row is read
+    /// again from the file once it is written, so anything the library had from elsewhere (an album from a phone's
+    /// list, say, for a file that came with only its title and artist) is written into the file too, not lost.
+    fn with_what_is_known(&self, id: i64, path: &Path, edit: &TagEdit) -> Result<TagEdit> {
+        let known = self
+            .conn
+            .query_row(
+                "SELECT t.title, a.name, COALESCE(al.title, ''), COALESCE(aa.name, ''), COALESCE(t.genre, ''),
+                        COALESCE(t.year, al.year), t.track_no, t.disc_no, COALESCE(t.composer, '')
+                 FROM tracks t JOIN artists a ON a.id = t.artist_id
+                 LEFT JOIN albums al ON al.id = t.album_id LEFT JOIN artists aa ON aa.id = al.artist_id
+                 WHERE t.id = ?1",
+                [id],
+                |r| {
+                    Ok((
+                        [r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(8)?],
+                        r.get::<_, Option<i64>>(5)?,
+                        r.get::<_, i64>(6)?,
+                        r.get::<_, i64>(7)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some(([title, artist, album, album_artist, genre, composer], year, track_no, disc_no)) = known else {
+            return Ok(edit.clone());
+        };
+        // What the file says now. A file that cannot be read says nothing: then everything known is written.
+        let file = lofty::read_from_path(path).ok();
+        let tag = file.as_ref().and_then(|f| f.primary_tag().or_else(|| f.first_tag()));
+        let says = |key: ItemKey| tag.and_then(|t| t.get_string(key)).is_some_and(|v| !v.trim().is_empty());
+        let has_year = tag.and_then(|t| t.date()).is_some() || says(ItemKey::Year);
+        let has_track = tag.and_then(|t| t.track()).is_some_and(|n| n > 0);
+        let has_disc = tag.and_then(|t| t.disk()).is_some_and(|n| n > 0);
+
+        let mut out = edit.clone();
+        let carry = |field: &mut Option<String>, value: String, in_file: bool| {
+            if field.is_none() && !in_file && !value.trim().is_empty() {
+                *field = Some(value);
+            }
+        };
+        carry(&mut out.title, title, says(ItemKey::TrackTitle));
+        carry(&mut out.artist, artist, says(ItemKey::TrackArtist));
+        // The album's artist goes with an album, never alone.
+        let album_known = !album.trim().is_empty() || out.album.as_deref().is_some_and(|a| !a.trim().is_empty());
+        carry(&mut out.album, album, says(ItemKey::AlbumTitle));
+        if album_known {
+            carry(&mut out.album_artist, album_artist, says(ItemKey::AlbumArtist));
+        }
+        carry(&mut out.genre, genre, says(ItemKey::Genre));
+        carry(&mut out.composer, composer, says(ItemKey::Composer));
+        carry(&mut out.year, year.filter(|y| (1000..=9999).contains(y)).map(|y| y.to_string()).unwrap_or_default(), has_year);
+        carry(&mut out.track_no, if track_no > 0 { track_no.to_string() } else { String::new() }, has_track);
+        // Disc one is what a file with no disc number is taken to be: not worth writing.
+        carry(&mut out.disc_no, if disc_no > 1 { disc_no.to_string() } else { String::new() }, has_disc);
+        Ok(out)
+    }
+
     /// Writes `edit` into the files of the songs `ids`, and reads each file's row again from what was written. A song
-    /// that is not a file here is skipped; a file that cannot be written is reported and left as it was.
+    /// that is not a file here is skipped; a file that cannot be written is reported and left as it was. What the
+    /// library knows of a song that its file does not say is written along (see [`Self::with_what_is_known`]).
     pub fn edit_tags(&mut self, ids: &[i64], edit: &TagEdit, now: i64) -> Result<EditReport> {
         let mut report = EditReport::default();
         for &id in ids {
@@ -250,7 +308,8 @@ impl Library {
                 continue;
             };
             let path = Path::new(&locator);
-            if let Err(why) = write_tags(path, edit) {
+            let edit = self.with_what_is_known(id, path, edit)?;
+            if let Err(why) = write_tags(path, &edit) {
                 report.failed.push((id, why));
                 continue;
             }
@@ -397,6 +456,59 @@ mod tests {
         assert_eq!(report.skipped, 2); // the entry with no file, and the id that is no song
         assert_eq!(report.failed.len(), 1);
         assert_eq!(report.failed[0].0, ids[0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn what_the_library_knows_and_the_file_does_not_say_is_written_along_not_lost() {
+        // A file that came with only its title and artist, whose album, album artist, year and track number the
+        // library had from elsewhere (a phone's list).
+        let (mut library, dir, ids) = library_of("known", &["a.wav", "b.wav"]);
+        let path = dir.join("a.wav");
+        let meta = std::fs::metadata(&path).unwrap();
+        let mtime = meta.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let mut known = read_track(&path, &path.to_string_lossy(), meta.len(), mtime, 5).unwrap();
+        known.title = "Someone Like You".into();
+        known.artist = "Adele".into();
+        known.album = Some("21".into());
+        known.album_artist = Some("Adele".into());
+        known.year = Some(2011);
+        known.track_no = 11;
+        library.apply_scan(&[ScanChange::Changed(ids[0], known)]).unwrap();
+        assert_eq!(read_more(&path).unwrap().genre, None);
+
+        // Only the genre is asked for.
+        let report = library.edit_tags(&ids[..1], &set(&[("genre", "Pop")]), 10).unwrap();
+        assert_eq!(report.written, 1);
+
+        // The library still knows the rest...
+        let now = library.tags_now(&ids[..1]).unwrap();
+        assert_eq!(now.genre.value.as_deref(), Some("Pop"));
+        assert_eq!(now.title.value.as_deref(), Some("Someone Like You"));
+        assert_eq!(now.artist.value.as_deref(), Some("Adele"));
+        assert_eq!(now.album.value.as_deref(), Some("21"));
+        assert_eq!(now.album_artist.value.as_deref(), Some("Adele"));
+        assert_eq!(now.year.value.as_deref(), Some("2011"));
+        assert_eq!(now.track_no.value.as_deref(), Some("11"));
+        // ...because the file says it now, so a later scan reads the same.
+        let tagged = lofty::read_from_path(&path).unwrap();
+        let tag = tagged.primary_tag().unwrap();
+        assert_eq!(tag.album().as_deref(), Some("21"));
+        assert_eq!(tag.title().as_deref(), Some("Someone Like You"));
+        assert_eq!(tag.track(), Some(11));
+        assert_eq!(read_more(&path).unwrap().year, Some(2011));
+
+        // What the listener asks for still wins over what was known, and a blank still clears.
+        library.edit_tags(&ids[..1], &set(&[("album", "Adele Live"), ("year", "")]), 11).unwrap();
+        let now = library.tags_now(&ids[..1]).unwrap();
+        assert_eq!(now.album.value.as_deref(), Some("Adele Live"));
+        assert_eq!(now.year.value.as_deref(), Some(""));
+        assert_eq!(now.genre.value.as_deref(), Some("Pop"));
+
+        // A song with no album gets no album artist written for it.
+        library.edit_tags(&ids[1..], &set(&[("genre", "Jazz")]), 12).unwrap();
+        let other = lofty::read_from_path(dir.join("b.wav")).unwrap();
+        assert_eq!(other.primary_tag().unwrap().get_string(ItemKey::AlbumArtist), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

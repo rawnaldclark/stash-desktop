@@ -81,6 +81,16 @@ enum Command {
         /// The folder to scan, with everything below it.
         folder: PathBuf,
     },
+    /// Write tags into songs' files from a JSON list, `[{"id": 12, "set": {"album": "21"}}, ...]`: the same as Edit
+    /// tags in the window, for many songs at once with Stash closed. `--dry-run` says what would be written.
+    Tags {
+        #[arg(long)]
+        db: PathBuf,
+        /// The JSON list.
+        list: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Write made-up tracks as real tagged files (for measuring a scan).
     SynthFiles {
         /// The folder to write into.
@@ -285,6 +295,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Scan { db, folder } => scan(&db, &folder),
+        Command::Tags { db, list, dry_run } => tags(&db, &list, dry_run),
         Command::SynthFiles {
             dir,
             tracks,
@@ -363,6 +374,47 @@ fn synth_library(db: &Path, tracks: usize, seed: u64) -> Result<()> {
         added as f64 / took.as_secs_f64(),
         megabytes(file_bytes(db))
     );
+    Ok(())
+}
+
+fn tags(db: &Path, list: &Path, dry_run: bool) -> Result<()> {
+    #[derive(serde::Deserialize)]
+    struct Change {
+        id: i64,
+        set: stash_core::edit::TagEdit,
+    }
+    let text = std::fs::read_to_string(list).with_context(|| format!("reading {}", list.display()))?;
+    let changes: Vec<Change> = serde_json::from_str(&text).context("the list: [{\"id\": 12, \"set\": {\"album\": \"21\"}}, ...]")?;
+    let mut library = Library::open(db).with_context(|| format!("opening {}", db.display()))?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    let (mut written, mut skipped, mut failed) = (0, 0, 0);
+    for change in &changes {
+        if let Some(why) = change.set.wrong() {
+            println!("  {}: not written: {why}", change.id);
+            failed += 1;
+            continue;
+        }
+        let before = library.tags_now(&[change.id])?;
+        let song = format!("{} / {}", before.title.value.as_deref().unwrap_or("?"), before.artist.value.as_deref().unwrap_or("?"));
+        if before.files == 0 {
+            let why = if before.others == 0 { "no such song" } else { "not a file here" };
+            println!("  {}: {why}, skipped", change.id);
+            skipped += 1;
+            continue;
+        }
+        println!("  {} ({song}): {}", change.id, serde_json::to_string(&change.set)?);
+        if dry_run {
+            continue;
+        }
+        let report = library.edit_tags(&[change.id], &change.set, now)?;
+        written += report.written;
+        skipped += report.skipped;
+        for (_, why) in &report.failed {
+            println!("    could not be written: {why}");
+            failed += 1;
+        }
+    }
+    println!("{} {written} written, {skipped} skipped, {failed} failed", if dry_run { "dry run:" } else { "done:" });
     Ok(())
 }
 
