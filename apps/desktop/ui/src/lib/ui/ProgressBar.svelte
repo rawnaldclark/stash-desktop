@@ -1,11 +1,43 @@
-<!-- Elapsed, a seek track, remaining. The fill is one Web Animation (scaleX, compositor) pinned to player.position(); no per-frame JS. -->
+<!-- Elapsed, a seek track, remaining. The fill is one Web Animation (scaleX, compositor) pinned to player.position(); no per-frame JS.
+     With `wave`, a song that is a file on this computer has its track cut to its waveform: the same fill, masked. -->
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import { player } from '../app';
 	import { mmss } from './format';
 	import { S } from './state.svelte';
+	import { get as ask } from '../core';
+	import { LIB_REF } from '../identity';
+	import { waveMask } from './wave';
 
-	let { class: cls = '' }: { class?: string } = $props();
+	let { class: cls = '', wave = false }: { class?: string; wave?: boolean } = $props();
+
+	// The playing song's waveform, when it is a file here: asked for once a song, again a moment later while the core
+	// is drawing another song's (503). A song with none (not a file, or audio it cannot decode) keeps the plain track.
+	const songId = $derived(wave ? (S.v.current?.refs?.[LIB_REF] ?? null) : null);
+	let mask = $state<string | null>(null);
+	$effect(() => {
+		const id = songId;
+		mask = null;
+		if (!id) return;
+		let gone = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const tryOnce = (left: number) => {
+			ask<{ peaks: number[] }>(`/api/waveform/${encodeURIComponent(id)}`).then(
+				(w) => {
+					if (!gone) mask = waveMask(w.peaks);
+				},
+				(e: unknown) => {
+					const busy = String((e as { status?: number })?.status ?? '') === '503' || /being drawn/.test(String((e as Error)?.message ?? ''));
+					if (!gone && busy && left > 0) timer = setTimeout(() => tryOnce(left - 1), 1500);
+				}
+			);
+		};
+		tryOnce(8);
+		return () => {
+			gone = true;
+			clearTimeout(timer);
+		};
+	});
 
 	let track = $state<HTMLElement>();
 	let fill = $state<HTMLElement>();
@@ -95,7 +127,7 @@
 	}
 </script>
 
-<div class="prg {cls}">
+<div class="prg {cls}" class:wv={mask !== null}>
 	<span class="tm tm-e">{mmss(pos)}</span>
 	<div
 		class="trk"
@@ -114,8 +146,10 @@
 		onpointercancel={() => (drag = null)}
 		onkeydown={key}
 	>
-		<i class="trk-bg"></i>
-		<i class="pf" bind:this={fill}></i>
+		<div class="trk-in" style:--wave={mask}>
+			<i class="trk-bg"></i>
+			<i class="pf" bind:this={fill}></i>
+		</div>
 		<div class="knob-w"><i class="pd" bind:this={knob}></i></div>
 	</div>
 	<span class="tm tm-r">-{mmss(Math.max(0, dur - pos))}</span>

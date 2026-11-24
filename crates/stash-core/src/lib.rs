@@ -43,6 +43,7 @@ pub mod station;
 pub mod synth;
 pub mod table;
 pub mod usage;
+pub mod waveform;
 pub mod youtube;
 pub mod youtube_title;
 

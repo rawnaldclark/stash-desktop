@@ -1316,6 +1316,8 @@ impl Core {
             None,
             tidal.source(),
         )?));
+        // Waveforms of the songs played are kept beside the library: a file is decoded once.
+        crate::waveform::keep_in(options.db.parent().unwrap_or_else(|| Path::new(".")).join("Waveforms"));
         // Covers fetched from a server are kept beside the library: seen once, they show with no connection.
         crate::remote_art::keep_in(
             options
@@ -3313,6 +3315,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::fill::route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::waveform::route(state, request, &path)? {
         return Ok((response, false));
     }
     if let Some(response) = crate::folders::route(state, request, &path)? {
