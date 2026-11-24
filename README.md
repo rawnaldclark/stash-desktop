@@ -2,12 +2,29 @@
 
 A desktop music client for Windows, macOS and Linux, from the people who make [Stash](https://github.com/rawnaldclark/Stash) for Android.
 
-**Status: early prototype.** There is no app to download yet. What is here: a core that scans a music folder, searches it, plays it gapless, plays from add-ons and takes in a library from the Android app or the web player, a window for all of that with the look of the Stash web player, and the measurements that decide whether the design holds.
+**Status: beta, Windows only.** The first beta is a Windows installer on the [Releases](https://github.com/rawnaldclark/stash-desktop/releases) page. macOS and Linux have not been built or tried yet.
 
-## What it is going to be
+## Install the beta (Windows 10 or 11)
+
+1. Download `Stash_<version>_x64-setup.exe` from the newest release.
+2. Run it. The installer is not signed yet, so Windows shows "Windows protected your PC": choose **More info**, then **Run anyway**. It installs for your user only and asks for no administrator rights.
+3. Open Stash. Add a music folder in Settings › Your library, or bring your library over from the phone or the web player (see the end of this page).
+
+Your library is one file, `%LOCALAPPDATA%\Stash\library.db`. Uninstalling leaves it where it is. This is a beta: keep a copy of anything you can't replace.
+
+What to expect from a beta:
+
+- It has been used daily on one Windows 10 computer. Other sound cards, screens and very large libraries are where it is most likely to surprise.
+- Apart from YouTube Music, every source is an add-on you add yourself in Settings › Add-ons.
+- There is no auto-update yet: a new beta is a new download.
+- Report anything wrong in [Issues](https://github.com/rawnaldclark/stash-desktop/issues), with what you did and what you saw.
+
+The installer carries a build of [mpv](https://mpv.io)'s `libmpv` (GPL), which does the playing: the exact build `scripts/fetch-mpv.ps1` pins. Stash itself is GPL-3.0-or-later.
+
+## What it is
 
 - **Your library is the product.** Local files and tracks from add-ons live in one database on your computer, with real offline playback, and everything in it can be exported in an open format.
-- **Every source is an add-on.** Stash desktop ships with no music sources. You add the ones you want, in the order you want them asked, and you can see which one served each song. Add-ons speak the same HTTP add-on protocol the Stash Android app uses.
+- **Sources are add-ons.** Apart from YouTube Music, Stash desktop ships with no music sources. You add the ones you want, in the order you want them asked, and you can see which one served each song. Add-ons speak the same HTTP add-on protocol the Stash Android app uses.
 - **A native audio path.** Audio never passes through a web view: gapless playback, an exclusive bit-perfect mode, and quality shown as decoded, not as labelled.
 - **Fast and light.** A hundred-thousand-track library should open, scroll and search without a wait.
 - **Your phone and your desktop work together.** Import your library from the Android app and the web player; later, control the desktop from the phone and hand playback over.
@@ -61,6 +78,8 @@ To bring your library over from Stash on your phone or the web: on the phone, Se
 To try add-ons without having one: `target/release/stashd demo-addon --dir <a music folder>` serves that folder on this computer the way an add-on serves a catalogue, and prints its link. In the window, open Settings › Add-ons, paste the link, and search: the add-on's results appear under your library's. A song's menu has Download, and Liked and each playlist have a download button: the song is saved as a file (in Stash in your Music folder; Library › Downloads can change that), tagged and with its cover, and from then on plays with no connection. Library › Downloads lists what is saved and what is on the way. A song none of your add-ons has, when you play or save it, goes on Library › Not found: open it, pick the add-on's song that is it, and it plays from there from then on. Ctrl+K opens a box that finds anything in your library and does anything the window can. Shuffle spreads each artist's songs out, so two by one artist rarely come together. A smart playlist fills itself by rules (liked and not played in three months, most played this month, lossless only) and changes as your library does. What you play can go to ListenBrainz, or a server that speaks its language, and waits on this computer while there is no connection. Offline, Stash plays only what is on this computer (your files, songs saved, and songs kept as they played) and asks no add-on. Shortcuts that work in any app (play or pause, skip, the volume, like the song playing) can be switched on in Settings. A playlist, or your liked songs, can be kept on this computer: their songs are saved, and so are songs added later. Library › Songs can list only the songs on this computer, and does so by itself while Stash is offline. Any song or artist can be left out of what Stash plays on its own ("Don't play"), and the phone's blocklist comes over on import. Songs can be picked in any list (Ctrl or Shift+click, Ctrl+A) and played, queued, added to a playlist, liked, downloaded or taken out of a playlist together. Playlists can be grouped in folders: carry one onto a folder in the sidebar, or use its menu; a folder folds shut in the sidebar and opens in Library › Playlists. A song by several artists ("A & B", "A feat. B") links each to their own page, and an artist's page lists their songs with others. A playlist file from another player (.m3u, .m3u8: foobar2000, MusicBee, VLC) comes in as a playlist (the + in the sidebar, or Settings), and a playlist or your likes go out as one. A song played from an add-on is kept on this computer as it plays (Settings › Your library › Keep songs you play), so next time it plays with no connection and without asking the add-on. Stash desktop comes with no add-ons; each is added by its link, and the link stays in your library file (it can carry your key, so the window never shows it).
 
 The audio tests need libmpv. On Windows, `powershell -ExecutionPolicy Bypass -File scripts/fetch-mpv.ps1` puts the pinned build in `third_party/mpv/` (it needs 7-Zip). Elsewhere, point `STASH_MPV_LIBRARY` at your system's libmpv. Without it those tests say they were skipped and the rest still run.
+
+To build the Windows installer: run `scripts/fetch-mpv.ps1` (the installer carries `third_party/mpv/libmpv-2.dll`), build the UI as above, then in `apps/desktop/src-tauri` run `npx @tauri-apps/cli@2 build`. The installer is written to `target/release/bundle/nsis/`.
 
 ## License
 
