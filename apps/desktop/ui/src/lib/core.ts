@@ -183,7 +183,7 @@ export const editTags = (ids: number[], set: Record<string, string>) => post<Edi
 
 export type TableSort = 'title' | 'artist' | 'album' | 'genre' | 'year' | 'length' | 'format' | 'added' | 'plays';
 /** What the table shows and in what order: `q` filters by text, `genre` by a genre ('' = none), `here` to this computer. */
-export type TableAsk = { sort: TableSort; down: boolean; q?: string; genre?: string; here?: boolean };
+export type TableAsk = { sort: TableSort; down: boolean; q?: string; genre?: string; here?: boolean; decade?: number; folder?: string };
 export type TableRow = {
 	id: number; title: string; artist: string; artist_id: number; album: string | null; album_id: number | null; genre: string | null; year: number | null;
 	track_no: number; duration_ms: number; codec: string | null; sample_rate: number | null; bit_depth: number | null; bitrate: number | null;
@@ -191,11 +191,17 @@ export type TableRow = {
 };
 export type GenreRow = { genre: string | null; songs: number };
 const tableQuery = (a: TableAsk) =>
-	`sort=${a.sort}&down=${a.down ? 1 : 0}${a.q ? `&q=${encodeURIComponent(a.q)}` : ''}${a.genre !== undefined ? `&genre=${encodeURIComponent(a.genre)}` : ''}${a.here ? '&here=1' : ''}`;
+	`sort=${a.sort}&down=${a.down ? 1 : 0}${a.q ? `&q=${encodeURIComponent(a.q)}` : ''}${a.genre !== undefined ? `&genre=${encodeURIComponent(a.genre)}` : ''}${a.here ? '&here=1' : ''}${a.decade !== undefined ? `&decade=${a.decade}` : ''}${a.folder ? `&folder=${encodeURIComponent(a.folder)}` : ''}`;
 /** A page of the table, how many songs there are for the question, and how many files still wait to have their tags read. */
 export const table = (a: TableAsk, offset: number, limit: number, signal?: AbortSignal) =>
 	get<{ rows: TableRow[]; count: number; waiting: number }>(`/api/table?${tableQuery(a)}&offset=${offset}&limit=${limit}`, signal);
 export const genres = (here: boolean) => get<{ rows: GenreRow[] }>(`/api/genres${here ? '?here=1' : ''}`).then((r) => r.rows);
+export type DecadeRow = { decade: number | null; songs: number };
+export const decades = (here: boolean) => get<{ rows: DecadeRow[] }>(`/api/decades${here ? '?here=1' : ''}`).then((r) => r.rows);
+/** A folder that holds files of the library, and how many songs sit directly in it. */
+export type PlaceRow = { folder: string; songs: number };
+/** The folders with songs, and the music folders the listener added (`roots`). */
+export const places = () => get<{ rows: PlaceRow[]; roots: string[] }>('/api/places');
 
 /** The liked songs, the newest like first. */
 export const likedAt = (offset: number, limit: number, signal?: AbortSignal) => rows<LikedRow>(`/api/liked?offset=${offset}&limit=${limit}`, signal);
