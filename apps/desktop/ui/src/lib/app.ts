@@ -822,6 +822,14 @@ const library: LibraryAPI = {
 			}
 			return [...ids];
 		}),
+	editTags: (ids, set) =>
+		change(async () => {
+			const r = await core.editTags(ids, set);
+			void Promise.all([loadLibrary(), loadLikes(), loadHistory()])
+				.catch(() => {})
+				.then(relisted);
+			return r;
+		}),
 	deleteSongs: (what, opts) =>
 		change(async () => {
 			const c = await core.removeSongs(what, opts);

@@ -13,6 +13,7 @@ pub mod db;
 pub mod discover;
 pub mod downloads;
 pub mod eclipse;
+pub mod edit;
 pub mod eq;
 pub mod first_party;
 pub mod folders;

@@ -260,6 +260,13 @@
 					close();
 				})}
 			{/if}
+			{#if targets.some((t) => t.refs?.[LIB_REF] !== undefined && t.saved)}
+				{@render entry('edit', isGroup ? `Edit tags of ${targets.length}…` : 'Edit tags…', () => {
+					const songs = targets;
+					close();
+					void library.songRows(songs).then((ids) => ids.length && (ui.editing = { ids }), () => {});
+				})}
+			{/if}
 			{#if !m.downloads && m.playlistId === undefined && targets.some((t) => t.refs?.[LIB_REF] !== undefined)}
 				{@render entry('delete', isGroup ? `Delete ${targets.length} from your library…` : 'Delete from your library…', () => {
 					const songs = targets;

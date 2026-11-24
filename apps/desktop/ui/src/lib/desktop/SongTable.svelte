@@ -71,6 +71,11 @@
 			gone = true;
 		};
 	});
+	// The library changed (tags edited, songs deleted or added): the rows on screen are read again.
+	$effect(() => {
+		void L.changed;
+		untrack(() => list?.refresh());
+	});
 	// While tags are still being read, look again now and then: the columns fill in without a click.
 	$effect(() => {
 		if (waiting <= 0) return;

@@ -183,6 +183,8 @@ class UIState {
 	palette = $state(false);
 	/** The smart playlist editor is open: on a new one (`id` null), or on the playlist `id`. */
 	smart = $state<{ id: string | null } | null>(null);
+	/** Edit tags is open on these library rows. */
+	editing = $state<{ ids: number[] } | null>(null);
 	/**
 	 * The question before songs are deleted for good is open: about these library rows, or everything by an artist.
 	 * `title`: the one song's name, or the artist's. `then`: called once they are gone, with how many went.

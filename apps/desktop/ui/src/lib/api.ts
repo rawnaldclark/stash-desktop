@@ -208,6 +208,8 @@ export interface LibraryAPI {
 	keepSongs(items: LibraryItem[]): Promise<void>;
 	/** Takes songs out of the library (those in a playlist, and files of the music folders, stay). Answers the words to say. */
 	removeSongs(items: LibraryItem[]): Promise<string>;
+	/** Writes tags into those songs' files, and reads the lists again. */
+	editTags(ids: number[], set: Record<string, string>): Promise<{ written: number; skipped: number; failed: [number, string][] }>;
 	/** The library's rows for these songs (a song shown as a source's is looked up by that source's name for it). */
 	songRows(items: LibraryItem[]): Promise<number[]>;
 	/** Deletes songs for good, as the listener agreed to in the question: out of their playlists, files to the bin. */

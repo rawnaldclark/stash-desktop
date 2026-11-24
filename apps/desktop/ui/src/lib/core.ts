@@ -169,6 +169,16 @@ export const searchTracks = (query: string, limit: number, signal?: AbortSignal,
 /** What the library has for the text: songs (at most `limit`), and the albums and artists it names (a dozen of each). */
 export const searchLibrary = (query: string, limit: number, signal?: AbortSignal) =>
 	get<{ rows: TrackRow[]; albums: AlbumRow[]; artists: ArtistRow[] }>(`/api/search?q=${encodeURIComponent(query)}&limit=${limit}`, signal);
+// ---- Editing tags
+
+/** A field's value across the songs asked about: what they all say ('' = none of them has one), or null when they differ. */
+export type Common = { value: string | null };
+export type TagsNow = { files: number; others: number; title: Common; artist: Common; album: Common; album_artist: Common; genre: Common; year: Common; track_no: Common; disc_no: Common; composer: Common };
+export type EditReport = { written: number; skipped: number; failed: [number, string][] };
+export const tagsNow = (ids: number[]) => get<TagsNow>(`/api/tags?ids=${ids.join(',')}`);
+/** Writes the fields of `set` into those songs' files: a field left out stays, '' clears it. */
+export const editTags = (ids: number[], set: Record<string, string>) => post<EditReport>('/api/tags', { ids, set });
+
 // ---- The library as a table
 
 export type TableSort = 'title' | 'artist' | 'album' | 'genre' | 'year' | 'length' | 'format' | 'added' | 'plays';
