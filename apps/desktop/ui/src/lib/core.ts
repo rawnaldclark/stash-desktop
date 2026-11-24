@@ -151,6 +151,9 @@ export type SmartRule = { field: SmartField; op: SmartOp; value?: string | numbe
 export type SmartRules = { any: boolean; rules: SmartRule[]; order?: SmartOrder; limit?: number };
 
 export type AlbumRow = { id: number; title: string; artist: string; artist_id: number; year: number | null; tracks: number; art: string | null };
+/** An album as the grid groups it (Library › Albums). */
+export type AlbumCard = AlbumRow & { genre: string | null; added_ms: number; songs_here: number };
+export const albumCards = (here: boolean) => rows<AlbumCard>(`/api/albums/cards${here ? '?here=1' : ''}`);
 export type ArtistRow = { id: number; name: string; tracks: number; albums: number; art: string | null };
 
 type Rows<T> = { rows: T[] };

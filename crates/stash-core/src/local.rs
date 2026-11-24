@@ -41,7 +41,54 @@ pub struct LocalHome {
     pub genres: Vec<GenreCount>,
 }
 
+/// An album as the grid groups it: the album, and what it is grouped by.
+#[derive(Debug, Clone, Serialize)]
+pub struct AlbumCard {
+    #[serde(flatten)]
+    pub album: AlbumRow,
+    /// The genre most of its songs have.
+    pub genre: Option<String>,
+    /// When its newest song came into the library, in milliseconds.
+    pub added_ms: i64,
+    /// How many of its songs are files here.
+    pub songs_here: u32,
+}
+
 impl Library {
+    /// Every album (`here`: only those with a file here), in the library's order, each with its main genre, the newest
+    /// of its songs' arrival and how many of its songs are files here, for a grid grouped by any of them. An album that
+    /// names no year takes its songs' latest.
+    pub fn album_cards(&self, here: bool) -> Result<Vec<AlbumCard>> {
+        let only = if here { format!("WHERE EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = al.id AND {HERE})") } else { String::new() };
+        let sql = format!(
+            "SELECT {ALBUM_COLUMNS},
+                    (SELECT t.genre FROM tracks t WHERE t.album_id = al.id AND COALESCE(t.genre, '') != ''
+                     GROUP BY t.genre ORDER BY COUNT(*) DESC, t.genre LIMIT 1),
+                    (SELECT MAX(t.year) FROM tracks t WHERE t.album_id = al.id),
+                    (SELECT MAX(t.added_at) FROM tracks t WHERE t.album_id = al.id),
+                    (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id AND {HERE})
+             FROM albums al JOIN artists a ON a.id = al.artist_id {only}
+             ORDER BY al.sort_key, al.id"
+        );
+        let rows = self
+            .conn
+            .prepare(&sql)?
+            .query_map([], |r| {
+                let mut album = album_row(r)?;
+                if album.year.is_none() {
+                    album.year = r.get::<_, Option<i32>>(8)?;
+                }
+                Ok(AlbumCard {
+                    album,
+                    genre: r.get(7)?,
+                    added_ms: r.get::<_, Option<i64>>(9)?.unwrap_or(0) * 1000,
+                    songs_here: r.get::<_, i64>(10)?.max(0) as u32,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// The albums with a file here, in the library's order.
     pub fn albums_here_at(&self, offset: usize, limit: usize) -> Result<Vec<AlbumRow>> {
         let sql = format!(
@@ -166,5 +213,17 @@ mod tests {
         assert_eq!(home.genres, vec![GenreCount { genre: "Alternative".into(), songs: 2 }, GenreCount { genre: "Jazz".into(), songs: 1 }]);
         // Nothing played yet: the shelf is empty, not a list of unplayed songs.
         assert!(home.played.is_empty());
+
+        // The grid's cards: every album, or only those with a file here; each with its main genre, a year taken from
+        // its songs when the album names none, and how many of its songs are here.
+        library.conn.execute("UPDATE tracks SET year = 2007 WHERE id = ?1", [nude]).unwrap();
+        assert_eq!(library.album_cards(false).unwrap().len(), 4);
+        let cards = library.album_cards(true).unwrap();
+        let rainbows = cards.iter().find(|c| c.album.title == "In Rainbows").unwrap();
+        assert_eq!((rainbows.genre.as_deref(), rainbows.album.year, rainbows.songs_here), (Some("Alternative"), Some(2007), 2));
+        let blue = cards.iter().find(|c| c.album.title == "Kind of Blue").unwrap();
+        assert_eq!((blue.genre.as_deref(), blue.album.year, blue.songs_here), (Some("Jazz"), None, 1));
+        assert!(blue.added_ms > rainbows.added_ms);
+        assert_eq!(cards.len(), 2);
     }
 }
