@@ -169,6 +169,24 @@ export const searchTracks = (query: string, limit: number, signal?: AbortSignal,
 /** What the library has for the text: songs (at most `limit`), and the albums and artists it names (a dozen of each). */
 export const searchLibrary = (query: string, limit: number, signal?: AbortSignal) =>
 	get<{ rows: TrackRow[]; albums: AlbumRow[]; artists: ArtistRow[] }>(`/api/search?q=${encodeURIComponent(query)}&limit=${limit}`, signal);
+// ---- The library as a table
+
+export type TableSort = 'title' | 'artist' | 'album' | 'genre' | 'year' | 'length' | 'format' | 'added' | 'plays';
+/** What the table shows and in what order: `q` filters by text, `genre` by a genre ('' = none), `here` to this computer. */
+export type TableAsk = { sort: TableSort; down: boolean; q?: string; genre?: string; here?: boolean };
+export type TableRow = {
+	id: number; title: string; artist: string; artist_id: number; album: string | null; album_id: number | null; genre: string | null; year: number | null;
+	track_no: number; duration_ms: number; codec: string | null; sample_rate: number | null; bit_depth: number | null; bitrate: number | null;
+	added_at_ms: number; plays: number; liked: boolean; here: boolean;
+};
+export type GenreRow = { genre: string | null; songs: number };
+const tableQuery = (a: TableAsk) =>
+	`sort=${a.sort}&down=${a.down ? 1 : 0}${a.q ? `&q=${encodeURIComponent(a.q)}` : ''}${a.genre !== undefined ? `&genre=${encodeURIComponent(a.genre)}` : ''}${a.here ? '&here=1' : ''}`;
+/** A page of the table, how many songs there are for the question, and how many files still wait to have their tags read. */
+export const table = (a: TableAsk, offset: number, limit: number, signal?: AbortSignal) =>
+	get<{ rows: TableRow[]; count: number; waiting: number }>(`/api/table?${tableQuery(a)}&offset=${offset}&limit=${limit}`, signal);
+export const genres = (here: boolean) => get<{ rows: GenreRow[] }>(`/api/genres${here ? '?here=1' : ''}`).then((r) => r.rows);
+
 /** The liked songs, the newest like first. */
 export const likedAt = (offset: number, limit: number, signal?: AbortSignal) => rows<LikedRow>(`/api/liked?offset=${offset}&limit=${limit}`, signal);
 /** What was played, the newest first. */

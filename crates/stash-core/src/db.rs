@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 25;
+pub const SCHEMA_VERSION: i64 = 26;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
@@ -382,6 +382,21 @@ const V24: &str = "
 /// one audio file of a picked folder, the song it is (`track_id`; none once the listener took the song out of the
 /// library: it is not brought back), what the file was last seen as (`version`, `size`), what its audio is, and
 /// whether the scan made the song's row (`added`), so the song goes with the file only then.
+/// The library as a table (`table.rs`): what a file's tags say beyond what a scan keeps. `tags_read` is 0 until a
+/// file's tags have been read once, so files scanned before this are read in the background.
+const V26: &str = "
+    ALTER TABLE tracks ADD COLUMN genre TEXT;
+    ALTER TABLE tracks ADD COLUMN year INTEGER;
+    ALTER TABLE tracks ADD COLUMN composer TEXT;
+    ALTER TABLE tracks ADD COLUMN bitrate INTEGER;
+    ALTER TABLE tracks ADD COLUMN tags_read INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX tracks_genre ON tracks(genre);
+    -- A file a scan found changed has its tags read again.
+    CREATE TRIGGER tracks_retag AFTER UPDATE OF file_mtime, file_size ON tracks
+    WHEN NEW.tags_read = 1 AND (NEW.file_mtime IS NOT OLD.file_mtime OR NEW.file_size IS NOT OLD.file_size)
+    BEGIN UPDATE tracks SET tags_read = 0 WHERE id = NEW.id; END;
+";
+
 const V25: &str = "
     CREATE TABLE cloud_accounts(
         id               INTEGER PRIMARY KEY,
@@ -704,6 +719,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V25)?;
         tx.pragma_update(None, "user_version", 25)?;
+        tx.commit()?;
+    }
+    if found < 26 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V26)?;
+        tx.pragma_update(None, "user_version", 26)?;
         tx.commit()?;
     }
     Ok(())

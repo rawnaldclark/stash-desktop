@@ -16,6 +16,7 @@
 	import NotFound from '../../lib/desktop/NotFound.svelte';
 	import { NF } from '../../lib/desktop/unfound.svelte';
 	import Songs from '../../lib/desktop/Songs.svelte';
+	import SongTable from '../../lib/desktop/SongTable.svelte';
 	import TubeLibrary from '../../lib/desktop/TubeLibrary.svelte';
 	import { T } from '../../lib/desktop/youtube.svelte';
 	import { artistHref, fold } from '../../lib/identity';
@@ -172,6 +173,9 @@
 	}
 	/** Library › Songs lists only the songs on this computer. It follows offline (on while Stash is offline, as the phone's
 	 * Download mode hides what is not downloaded), and the chip changes it in between. */
+	/** Songs as a table with columns to sort by (a library manager's view), or as the list with covers. */
+	let songsTable = $state(LS.get('stash.songs.view') !== 'list');
+	$effect(() => LS.set('stash.songs.view', songsTable ? 'table' : 'list'));
 	let songsHere = $state(ui.offline);
 	$effect(() => {
 		songsHere = ui.offline;
@@ -201,15 +205,19 @@
 			{:else if tab === 'playlists'}
 				<div class="lib-sort" role="group" aria-label="Sort your playlists">{#each Object.entries(PL_SORTS) as [k, v] (k)}<button type="button" class="chip" class:on={plSort === k} aria-pressed={plSort === k} onclick={() => (plSort = k as PlSort)}>{v}</button>{/each}</div>
 			{:else if tab === 'songs' && L.counts}
-				<div class="lib-sort" role="group" aria-label="Show"><button type="button" class="chip" class:on={songsHere} aria-pressed={songsHere} title="Only the songs that play with no connection" onclick={() => (songsHere = !songsHere)}><Icon name="download" />On this computer</button></div>
-				<span class="lib-count">{songsHere && hereTotal !== null ? `${hereTotal.toLocaleString()} of ` : ''}{L.counts.tracks.toLocaleString()} {L.counts.tracks === 1 ? 'song' : 'songs'}</span>
+				<div class="lib-sort" role="group" aria-label="Show"><button type="button" class="chip" class:on={songsTable} aria-pressed={songsTable} title="Columns you can sort by: genre, year, format and more" onclick={() => (songsTable = true)}>Table</button><button type="button" class="chip" class:on={!songsTable} aria-pressed={!songsTable} title="The list with covers" onclick={() => (songsTable = false)}>List</button><button type="button" class="chip" class:on={songsHere} aria-pressed={songsHere} title="Only the songs that play with no connection" onclick={() => (songsHere = !songsHere)}><Icon name="download" />On this computer</button></div>
+				{#if !songsTable}<span class="lib-count">{songsHere && hereTotal !== null ? `${hereTotal.toLocaleString()} of ` : ''}{L.counts.tracks.toLocaleString()} {L.counts.tracks === 1 ? 'song' : 'songs'}</span>{/if}
 			{/if}
 		</div>
 	{/if}
 
 	{#if tab === 'songs'}
 		<!-- While the window measures itself, the header's search box filters this list in place. -->
-		<Songs query={measuring ? ui.q : q} here={songsHere && !measuring} bind:hereTotal />
+		{#if songsTable && !measuring}
+			<SongTable query={q} here={songsHere} />
+		{:else}
+			<Songs query={measuring ? ui.q : q} here={songsHere && !measuring} bind:hereTotal />
+		{/if}
 	{:else if tab === 'likes'}
 		{#if L.likes.length}
 			<div class="lib-actions">

@@ -26,6 +26,7 @@ mod scrobbling;
 pub mod serve;
 mod shortcuts;
 mod subsonic;
+mod table;
 mod tidal;
 mod transcode;
 mod unfound;

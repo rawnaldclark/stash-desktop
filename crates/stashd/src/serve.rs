@@ -1648,6 +1648,11 @@ impl Core {
                 let (state, stop) = (&state, &stop);
                 scope.spawn(move || crate::discover::run(state, stop));
             }
+            // Each file's genre, year and the rest of its tags, read once for the library's table.
+            {
+                let (state, stop) = (&state, &stop);
+                scope.spawn(move || crate::table::run(state, stop));
+            }
             // A phone plugged in with songs sent from Stash for Android: taken into the library. Not with
             // STASH_NO_PHONE set: a core run on a test library must never take a real phone's songs (it deletes
             // them from the phone as it goes).
@@ -3282,6 +3287,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::blocking::route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::table::route(state, request, &path)? {
         return Ok((response, false));
     }
     if let Some(response) = crate::folders::route(state, request, &path)? {
