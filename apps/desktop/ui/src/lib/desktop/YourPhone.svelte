@@ -56,7 +56,7 @@
 			</svg>
 			<div class="set-lab">
 				<span class="set-name">Scan this with the Stash app on your phone</span>
-				<span class="set-sub">In the app: Settings › Stash on the web › Link a computer, then point the camera at this code.</span>
+				<span class="set-sub">In the app: Settings › Link Stash on the web › Scan code, then point the camera at this code.</span>
 				<span class="set-sub" aria-live="polite">The code changes in {mmss(left)}.</span>
 				<div class="set-ctl"><button type="button" class="btn ghost" onclick={() => act(core.linkStop)}>Cancel</button></div>
 			</div>
