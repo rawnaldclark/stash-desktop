@@ -33,7 +33,7 @@
 	}
 
 	function onkey(e: KeyboardEvent) {
-		if (e.defaultPrevented || ui.menu || ui.palette || ui.smart || ui.deleting || ui.editing) return;
+		if (e.defaultPrevented || ui.menu || ui.palette || ui.smart || ui.deleting || ui.editing || ui.filling) return;
 		const t = e.target as HTMLElement | null;
 		if (t?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
 		if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'a') {

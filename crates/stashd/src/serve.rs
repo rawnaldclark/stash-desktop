@@ -1078,6 +1078,8 @@ pub(crate) struct State {
     pub(crate) lacks: Arc<Lacks>,
     /// Songs being saved as files.
     pub(crate) saving: crate::saving::Saving,
+    /// Missing tags being looked up, and what was found (see [`crate::fill`]).
+    pub(crate) fill: crate::fill::Fill,
     /// Add-on streams the engine reads through the core, and the copies kept of them.
     pub(crate) relays: Arc<crate::relay::Relays>,
     /// Plays on their way to the listener's scrobbling services.
@@ -1439,6 +1441,7 @@ impl Core {
                 scanning: Arc::new(Mutex::new(Scanning::default())),
                 lacks,
                 saving: crate::saving::Saving::default(),
+                fill: crate::fill::Fill::default(),
                 relays,
                 scrobbling,
                 offline,
@@ -1630,6 +1633,11 @@ impl Core {
             {
                 let (state, stop) = (&state, &stop);
                 scope.spawn(move || crate::saving::run(state, stop));
+            }
+            // Missing tags looked up in a catalogue, when the listener asks.
+            {
+                let (state, stop) = (&state, &stop);
+                scope.spawn(move || crate::fill::run(state, stop));
             }
             // Plays on their way to the listener's scrobbling services.
             {
@@ -3302,6 +3310,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = crate::table::route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::fill::route(state, request, &path)? {
         return Ok((response, false));
     }
     if let Some(response) = crate::folders::route(state, request, &path)? {

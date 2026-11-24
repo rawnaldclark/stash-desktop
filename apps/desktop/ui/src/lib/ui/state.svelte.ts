@@ -183,6 +183,8 @@ class UIState {
 	palette = $state(false);
 	/** The smart playlist editor is open: on a new one (`id` null), or on the playlist `id`. */
 	smart = $state<{ id: string | null } | null>(null);
+	/** Fill in missing tags is open. */
+	filling = $state(false);
 	/** Edit tags is open on these library rows. */
 	editing = $state<{ ids: number[] } | null>(null);
 	/**

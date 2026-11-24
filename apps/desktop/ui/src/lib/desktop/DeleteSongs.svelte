@@ -136,7 +136,7 @@
 	.del-l li { display: flex; align-items: flex-start; gap: 10px; }
 	.del-l :global(.ic) { width: 18px; height: 18px; flex: none; margin-top: 2px; color: var(--wp-text-2); }
 	.del-c { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border-radius: 10px; background: var(--wp-hover); color: var(--wp-text); cursor: pointer; }
-	.del-c input { margin: 3px 0 0; accent-color: var(--wp-accent); }
+	.del-c input { margin: 3px 0 0; accent-color: var(--acc); }
 	.del-c em { display: block; font-style: normal; color: var(--wp-text-2); }
 	.del-n { font-size: 13px; }
 	.del-b { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
@@ -146,5 +146,5 @@
 	.del-go { background: #c62828; color: #fff; }
 	.del-go:disabled { opacity: .55; }
 	@media (hover: hover) and (pointer: fine) { .del-no:hover { background: var(--wp-hover); } .del-go:not(:disabled):hover { background: #b71c1c; } }
-	.del-b button:focus-visible { outline: 2px solid var(--wp-accent); outline-offset: 2px; }
+	.del-b button:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
 </style>

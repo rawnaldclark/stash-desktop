@@ -25,6 +25,9 @@ pub struct MoreTags {
     pub bitrate: Option<u32>,
     /// The file carries a picture of its own: its cover shows with no connection.
     pub picture: bool,
+    /// Where the song sits on its album, when the file says.
+    pub track_no: Option<u32>,
+    pub disc_no: Option<u32>,
 }
 
 /// Reads [`MoreTags`] from the file at `path`.
@@ -41,6 +44,8 @@ pub fn read_more(path: &Path) -> std::result::Result<MoreTags, String> {
         composer: clean(tag.and_then(|t| t.get_string(ItemKey::Composer)).map(str::to_string)),
         bitrate: file.properties().audio_bitrate().filter(|b| *b > 0),
         picture: file.tags().iter().any(|t| t.picture_count() > 0),
+        track_no: tag.and_then(|t| t.track()).filter(|n| *n > 0),
+        disc_no: tag.and_then(|t| t.disk()).filter(|n| *n > 0),
     })
 }
 
@@ -315,13 +320,14 @@ impl Library {
         {
             let mut set = tx.prepare(
                 "UPDATE tracks SET genre = ?2, year = ?3, composer = ?4, bitrate = ?5, tags_read = 1,
-                                   cover = CASE WHEN ?6 THEN 1 ELSE cover END
+                                   cover = CASE WHEN ?6 THEN 1 ELSE cover END,
+                                   track_no = COALESCE(?7, track_no), disc_no = COALESCE(?8, disc_no)
                  WHERE id = ?1",
             )?;
             let mut skip = tx.prepare("UPDATE tracks SET tags_read = 1 WHERE id = ?1")?;
             for (id, tags) in read {
                 n += match tags {
-                    Some(t) => set.execute(params![id, t.genre, t.year, t.composer, t.bitrate, t.picture])?,
+                    Some(t) => set.execute(params![id, t.genre, t.year, t.composer, t.bitrate, t.picture, t.track_no, t.disc_no])?,
                     None => skip.execute([id])?,
                 };
             }
@@ -459,7 +465,7 @@ mod tests {
         let (mut library, ids) = library();
         assert_eq!(ids.len(), 4);
         assert_eq!(library.tags_waiting().unwrap(), 4);
-        let tags = |genre: &str, year: i32| Some(MoreTags { genre: Some(genre.into()), year: Some(year), composer: None, bitrate: Some(900), picture: false });
+        let tags = |genre: &str, year: i32| Some(MoreTags { genre: Some(genre.into()), year: Some(year), composer: None, bitrate: Some(900), picture: false, ..Default::default() });
         library
             .set_more_tags(&[(ids[0], tags("Alternative", 2007)), (ids[1], tags("alternative", 2007)), (ids[2], tags("Electronic", 1992)), (ids[3], None)])
             .unwrap();
@@ -475,7 +481,7 @@ mod tests {
     #[test]
     fn the_table_sorts_by_any_column_and_keeps_an_album_together() {
         let (mut library, ids) = library();
-        let tags = |genre: &str, year: i32| Some(MoreTags { genre: Some(genre.into()), year: Some(year), composer: None, bitrate: None, picture: genre == "Electronic" });
+        let tags = |genre: &str, year: i32| Some(MoreTags { genre: Some(genre.into()), year: Some(year), composer: None, bitrate: None, picture: genre == "Electronic", ..Default::default() });
         library
             .set_more_tags(&[(ids[0], tags("Alternative", 2007)), (ids[1], tags("Alternative", 2007)), (ids[2], tags("Electronic", 1992)), (ids[3], None)])
             .unwrap();

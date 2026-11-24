@@ -109,6 +109,15 @@
 			</div>
 		{/if}
 	</div>
+	<div class="set-row">
+		<div class="set-lab">
+			<span class="set-name">Missing tags</span>
+			<span class="set-sub">Look up the album, year, track number and genre of files that do not say</span>
+		</div>
+		<div class="set-ctl">
+			<button type="button" class="btn ghost" onclick={() => (ui.filling = true)}>Fill in…</button>
+		</div>
+	</div>
 </div>
 
 <CloudStorage />

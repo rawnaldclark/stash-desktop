@@ -134,14 +134,14 @@
 	.et-f.wide { grid-column: span 2; }
 	.et-f input { height: 36px; min-width: 0; padding: 0 10px; border-radius: 10px; border: 1px solid var(--wp-line-2); background: var(--wp-field, transparent); color: var(--wp-text); font: 400 14px/1 var(--font-body); }
 	.et-f input::placeholder { color: var(--wp-text-2); font-style: italic; }
-	.et-f.changed span { color: var(--wp-accent); }
-	.et-f.changed input { border-color: var(--wp-accent); }
-	.et-f input:focus-visible { outline: 2px solid var(--wp-accent); outline-offset: 1px; }
+	.et-f.changed span { color: var(--acc-text); }
+	.et-f.changed input { border-color: var(--acc); }
+	.et-f input:focus-visible { outline: 2px solid var(--acc); outline-offset: 1px; }
 	.et-wrong { margin: 0; color: #c62828; font: 500 13.5px/1.4 var(--font-body); }
 	.et-b { display: flex; justify-content: flex-end; gap: 8px; }
 	.et-b button { height: 38px; padding: 0 18px; border-radius: 999px; font: 600 14px/1 var(--font-body); }
 	.et-no { color: var(--wp-text); }
-	.et-go { background: var(--wp-accent); color: #fff; }
+	.et-go { background: var(--acc); color: var(--acc-ink); }
 	.et-go:disabled { opacity: .5; }
 	@media (hover: hover) and (pointer: fine) { .et-no:hover { background: var(--wp-hover); } }
 	@media (max-width: 560px) { .et-g { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

@@ -179,6 +179,15 @@ export const tagsNow = (ids: number[]) => get<TagsNow>(`/api/tags?ids=${ids.join
 /** Writes the fields of `set` into those songs' files: a field left out stays, '' clears it. */
 export const editTags = (ids: number[], set: Record<string, string>) => post<EditReport>('/api/tags', { ids, set });
 
+// ---- Filling in missing tags
+
+/** What a catalogue lookup found for one song: the fields that would be written. */
+export type FillOffer = { id: number; title: string; artist: string; set: Record<string, string> };
+/** Files with blanks, how far a lookup is, and what it has found. */
+export type FillNow = { blanks: number; running: boolean; total: number; done: number; missed: number; problem: string | null; found: FillOffer[] };
+export const fillNow = () => get<FillNow>('/api/fill');
+export const fillApply = (ids: number[]) => post<EditReport>('/api/fill/apply', { ids });
+
 // ---- The library as a table
 
 export type TableSort = 'title' | 'artist' | 'album' | 'genre' | 'year' | 'length' | 'format' | 'added' | 'plays';

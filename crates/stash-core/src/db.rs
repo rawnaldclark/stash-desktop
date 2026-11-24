@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 /// The schema this build writes. A database with a higher number was written by a newer build and is refused:
 /// a library is never opened by code that does not know its shape.
-pub const SCHEMA_VERSION: i64 = 27;
+pub const SCHEMA_VERSION: i64 = 28;
 
 /// Settings for a library on a desktop disk: WAL so readers (the UI, a remote) never wait for a writer (a scan, an
 /// import), `synchronous = NORMAL` (safe with WAL: a power cut can lose the last transaction, never corrupt the file).
@@ -733,6 +733,14 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch("UPDATE tracks SET tags_read = 0 WHERE origin = 'file';")?;
         tx.pragma_update(None, "user_version", 27)?;
+        tx.commit()?;
+    }
+    if found < 28 {
+        // The pass now also reads where a song sits on its album (a file Stash saved or took from a phone came in
+        // without its track number, though its tags say it): files read before are read once more.
+        let tx = conn.transaction()?;
+        tx.execute_batch("UPDATE tracks SET tags_read = 0 WHERE origin = 'file';")?;
+        tx.pragma_update(None, "user_version", 28)?;
         tx.commit()?;
     }
     Ok(())
