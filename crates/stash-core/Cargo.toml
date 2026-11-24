@@ -14,6 +14,8 @@ md-5 = "0.11"
 regex = "1.13.1"
 # Already in the build (rustls uses it): ECDSA P-256 for the signed config, HMAC-SHA256 for Stash's own signature.
 ring = "0.17.14"
+# P-256 key agreement with a key kept between runs (link/keys.rs; ring only does ephemeral ones).
+p256 = { version = "0.13", default-features = false, features = ["ecdh", "std"] }
 rusqlite = { version = "0.42.0", features = ["bundled", "functions"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
@@ -26,10 +28,9 @@ unicode-normalization = "0.1.26"
 ureq = "3.5.2"
 url = "2.5.8"
 walkdir = "2.5.0"
+# gzip plaintexts of the sync service's envelopes (link/crypto.rs).
+flate2 = "1.1.11"
 zip = { version = "9.6.0", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = ["Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_Devices_PortableDevices", "Win32_Foundation"] }
-
-[dev-dependencies]
-flate2 = "1.1.11"
