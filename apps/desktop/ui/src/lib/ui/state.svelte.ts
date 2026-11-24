@@ -182,6 +182,11 @@ class UIState {
 	palette = $state(false);
 	/** The smart playlist editor is open: on a new one (`id` null), or on the playlist `id`. */
 	smart = $state<{ id: string | null } | null>(null);
+	/**
+	 * The question before songs are deleted for good is open: about these library rows, or everything by an artist.
+	 * `title`: the one song's name, or the artist's. `then`: called once they are gone, with how many went.
+	 */
+	deleting = $state<{ what: { ids: number[] } | { artist: number }; title: string; then?: (removed: number) => void } | null>(null);
 	/** The desktop has no lyrics yet, so the panel opens on Up next unless the listener chose Lyrics. */
 	panelTab = $state<'lyrics' | 'next'>(LS.get('stash.panelTab') === 'lyrics' ? 'lyrics' : 'next');
 	/** On the Now playing route (the big lyrics). */

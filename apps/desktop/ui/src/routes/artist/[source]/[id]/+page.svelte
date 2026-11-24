@@ -12,6 +12,7 @@
 	import Cover from '../../../../lib/ui/Cover.svelte';
 	import Icon from '../../../../lib/ui/Icon.svelte';
 	import { R } from '../../../../lib/desktop/radio.svelte';
+	import { ui } from '../../../../lib/ui/state.svelte';
 	import TrackRow from '../../../../lib/ui/TrackRow.svelte';
 	import type { PickList } from '../../../../lib/ui/pick.svelte';
 	import { songs } from '../../../../lib/ui/format';
@@ -127,6 +128,16 @@
 				{:else}
 					<button type="button" class="act-ib" aria-label="Follow {artist.name}" title="Follow: their new releases come to Home" disabled={following} onclick={() => void follow()}><Icon name="person_add" /></button>
 				{/if}
+			{/if}
+			{#if sid === LIBRARY_SOURCE && /^\d+$/.test(id)}
+				{@const name = artist.name}
+				<button
+					type="button"
+					class="act-ib"
+					aria-label="Delete everything by {name} from your library"
+					title="Delete from your library"
+					onclick={() => (ui.deleting = { what: { artist: Number(id) }, title: name, then: (removed) => { if (removed > 0) history.back(); } })}
+				><Icon name="delete" /></button>
 			{/if}
 			{#if R.ready}
 				{@const name = artist.name}

@@ -261,10 +261,17 @@
 				})}
 			{/if}
 			{#if !m.downloads && m.playlistId === undefined && targets.some((t) => t.refs?.[LIB_REF] !== undefined)}
-				{@render entry('delete', isGroup ? `Remove ${targets.length} from your library` : 'Remove from your library', () => {
-					if (picked) P.clear();
-					void library.removeSongs(targets).then((said) => ui.toast(said), () => {});
+				{@render entry('delete', isGroup ? `Delete ${targets.length} from your library…` : 'Delete from your library…', () => {
+					const songs = targets;
 					close();
+					// The question first: it says what the delete touches (playlists, files) before anything goes.
+					void library.songRows(songs).then(
+						(ids) => {
+							if (ids.length) ui.deleting = { what: { ids }, title: songs.length === 1 ? songs[0].title : '' };
+							else ui.toast('Not in your library');
+						},
+						() => {}
+					);
 				})}
 			{/if}
 			{#if picked}

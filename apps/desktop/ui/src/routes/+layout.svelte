@@ -17,6 +17,7 @@
 	import Sidebar from '../lib/ui/Sidebar.svelte';
 	import CommandPalette from '../lib/ui/CommandPalette.svelte';
 	import SmartEditor from '../lib/desktop/SmartEditor.svelte';
+	import DeleteSongs from '../lib/desktop/DeleteSongs.svelte';
 	import Toast from '../lib/ui/Toast.svelte';
 	import { R } from '../lib/desktop/radio.svelte';
 	import PickBar from '../lib/ui/PickBar.svelte';
@@ -227,5 +228,6 @@
 	<PhoneTransfer />
 	{#if ui.palette}<CommandPalette />{/if}
 	{#if ui.smart}<SmartEditor />{/if}
+	{#if ui.deleting}<DeleteSongs />{/if}
 </div>
 {/if}
