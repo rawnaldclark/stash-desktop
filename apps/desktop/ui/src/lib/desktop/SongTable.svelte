@@ -23,12 +23,12 @@
 	let sort = $state<core.TableSort>((localStorage.getItem('stash.table.sort') as core.TableSort) || 'artist');
 	let down = $state(localStorage.getItem('stash.table.down') === '1');
 	let genre = $state<string | null>(null);
-	let shown = $state<ColumnId[]>(readColumns(localStorage.getItem('stash.table.cols')));
+	let shown = $state<ColumnId[]>(readColumns(localStorage.getItem('stash.table.cols.2')));
 	let choosing = $state(false);
 	$effect(() => {
 		localStorage.setItem('stash.table.sort', sort);
 		localStorage.setItem('stash.table.down', down ? '1' : '0');
-		localStorage.setItem('stash.table.cols', shown.join(','));
+		localStorage.setItem('stash.table.cols.2', shown.join(','));
 	});
 
 	const ask = $derived<core.TableAsk>({ sort, down, q: query.trim() || undefined, genre: genre ?? undefined, here });
@@ -89,7 +89,7 @@
 
 	/** A table row as the rest of the window knows a song (its menu, the picks, the player). */
 	const itemOf = (r: core.TableRow): LibraryItem =>
-		itemOfRow({ ...r, origin: r.here ? 'file' : 'described', sort_key: '', art: null, isrc: null } as unknown as core.TrackRow);
+		itemOfRow({ ...r, origin: r.here ? 'file' : 'described', sort_key: '', isrc: null } as unknown as core.TrackRow);
 
 	const pick: PickList = {
 		get scope() {
@@ -168,7 +168,7 @@
 		{#if choosing}
 			<div class="tb-pop" role="group" aria-label="Columns shown">
 				{#each COLUMNS.filter((c) => !c.fixed) as c (c.id)}
-					<label><input type="checkbox" checked={shown.includes(c.id)} onchange={() => toggleColumn(c.id)} /> {c.name}</label>
+					<label><input type="checkbox" checked={shown.includes(c.id)} onchange={() => toggleColumn(c.id)} /> {c.name || 'Cover'}</label>
 				{/each}
 			</div>
 		{/if}
@@ -200,7 +200,8 @@
 				<div class="tb-r" class:pk={picked} class:cur={playingId === String(r.id)} class:away={!r.here} role="row" tabindex="-1" aria-selected={picked} use:songMenu={{ item }} onclick={(e) => rowClick(e, r, i)} ondblclick={() => void play(i)}>
 					{#each columns as c (c.id)}
 						<span class="tb-c" class:num={c.num} class:strong={c.id === 'title'} role="cell" title={c.id === 'title' ? r.title : undefined}>
-							{#if c.id === 'title'}{r.title}
+							{#if c.id === 'cover'}{#if core.artUrl(r.art)}<img class="tb-cv" src={core.artUrl(r.art)} alt="" loading="lazy" decoding="async" crossorigin="anonymous" />{/if}
+							{:else if c.id === 'title'}{r.title}
 							{:else if c.id === 'artist'}{r.artist}
 							{:else if c.id === 'album'}{r.album ?? ''}
 							{:else if c.id === 'genre'}{r.genre ?? ''}
@@ -243,6 +244,7 @@
 	.tb-hc :global(.tb-dn) { rotate: 180deg; }
 	.tb-r { height: 36px; border-radius: 6px; cursor: default; user-select: none; }
 	.tb-c { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--wp-text-2); }
+	.tb-cv { display: block; width: 28px; height: 28px; border-radius: 4px; object-fit: cover; background: var(--wp-hover); }
 	.tb-c.strong { color: var(--wp-text); font-weight: 500; }
 	.tb-c.num { text-align: right; font-variant-numeric: tabular-nums; }
 	.tb-r.away .tb-c { opacity: .55; }

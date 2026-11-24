@@ -1314,6 +1314,14 @@ impl Core {
             None,
             tidal.source(),
         )?));
+        // Covers fetched from a server are kept beside the library: seen once, they show with no connection.
+        crate::remote_art::keep_in(
+            options
+                .db
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("Covers"),
+        );
         // Copies of songs as they were played sit next to the library, in a folder of their own.
         let relays = Arc::new(crate::relay::Relays::new(
             options
@@ -1771,7 +1779,11 @@ fn answer(state: &State, mut request: Request) -> bool {
         && *request.method() == Method::Get
         && request.url().starts_with(crate::remote_art::ROUTE)
     {
-        crate::remote_art::answer(request, origin.filter(|o| allowed_origin(o, port)));
+        crate::remote_art::answer(
+            request,
+            origin.filter(|o| allowed_origin(o, port)),
+            state.offline.load(Ordering::Relaxed),
+        );
         return false;
     }
     let mut done = false;

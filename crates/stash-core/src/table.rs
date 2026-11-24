@@ -23,6 +23,8 @@ pub struct MoreTags {
     pub composer: Option<String>,
     /// Kilobits a second, as the file's audio says.
     pub bitrate: Option<u32>,
+    /// The file carries a picture of its own: its cover shows with no connection.
+    pub picture: bool,
 }
 
 /// Reads [`MoreTags`] from the file at `path`.
@@ -38,6 +40,7 @@ pub fn read_more(path: &Path) -> std::result::Result<MoreTags, String> {
             .filter(|y| (1000..=9999).contains(y)),
         composer: clean(tag.and_then(|t| t.get_string(ItemKey::Composer)).map(str::to_string)),
         bitrate: file.properties().audio_bitrate().filter(|b| *b > 0),
+        picture: file.tags().iter().any(|t| t.picture_count() > 0),
     })
 }
 
@@ -123,6 +126,8 @@ pub struct TableRow {
     pub liked: bool,
     /// A file that is on this computer now.
     pub here: bool,
+    /// The song's picture as an address (the file's own when it has one), as the other lists give it.
+    pub art: Option<String>,
 }
 
 const FROM: &str = "FROM tracks t JOIN artists a ON a.id = t.artist_id LEFT JOIN albums al ON al.id = t.album_id";
@@ -174,8 +179,10 @@ impl Library {
                     t.track_no, t.duration_ms, t.codec, t.sample_rate, t.bit_depth, t.bitrate, t.added_at * 1000,
                     (SELECT COUNT(*) FROM plays p WHERE p.track_id = t.id) AS plays,
                     t.liked_at_ms IS NOT NULL,
-                    t.origin = 'file' AND t.missing_since IS NULL
+                    t.origin = 'file' AND t.missing_since IS NULL,
+                    {}
              {FROM}{filter} ORDER BY {} LIMIT {} OFFSET {}",
+            crate::library::art!(),
             by.order(down),
             limit.min(2_000),
             offset
@@ -202,6 +209,7 @@ impl Library {
                     plays: r.get::<_, i64>(15)?.max(0) as u32,
                     liked: r.get(16)?,
                     here: r.get(17)?,
+                    art: r.get(18)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -258,18 +266,31 @@ impl Library {
         let mut n = 0;
         {
             let mut set = tx.prepare(
-                "UPDATE tracks SET genre = ?2, year = ?3, composer = ?4, bitrate = ?5, tags_read = 1 WHERE id = ?1",
+                "UPDATE tracks SET genre = ?2, year = ?3, composer = ?4, bitrate = ?5, tags_read = 1,
+                                   cover = CASE WHEN ?6 THEN 1 ELSE cover END
+                 WHERE id = ?1",
             )?;
             let mut skip = tx.prepare("UPDATE tracks SET tags_read = 1 WHERE id = ?1")?;
             for (id, tags) in read {
                 n += match tags {
-                    Some(t) => set.execute(params![id, t.genre, t.year, t.composer, t.bitrate])?,
+                    Some(t) => set.execute(params![id, t.genre, t.year, t.composer, t.bitrate, t.picture])?,
                     None => skip.execute([id])?,
                 };
             }
         }
         tx.commit()?;
         Ok(n)
+    }
+
+    /// The cover addresses of files that carry no picture of their own: fetched and kept while there is a connection,
+    /// so the listener's own files have their covers with none.
+    pub fn file_cover_addresses(&self) -> Result<Vec<String>> {
+        let mut read = self.conn.prepare_cached(
+            "SELECT DISTINCT art_url FROM tracks
+             WHERE origin = 'file' AND missing_since IS NULL AND IFNULL(cover, 0) <> 1 AND art_url LIKE 'http%'",
+        )?;
+        let rows = read.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(rows)
     }
 
     /// How many files still wait to have their extra tags read.
@@ -375,6 +396,7 @@ mod tests {
         assert_eq!(read.composer.as_deref(), Some("Miles Davis"));
         assert_eq!(read.year, Some(1959));
         assert!(read.bitrate.is_some());
+        assert!(!read.picture);
 
         // No tags: nothing to say, and no error.
         let none = read_more(&bare).unwrap();
@@ -389,7 +411,7 @@ mod tests {
         let (mut library, ids) = library();
         assert_eq!(ids.len(), 4);
         assert_eq!(library.tags_waiting().unwrap(), 4);
-        let tags = |genre: &str, year: i32| Some(MoreTags { genre: Some(genre.into()), year: Some(year), composer: None, bitrate: Some(900) });
+        let tags = |genre: &str, year: i32| Some(MoreTags { genre: Some(genre.into()), year: Some(year), composer: None, bitrate: Some(900), picture: false });
         library
             .set_more_tags(&[(ids[0], tags("Alternative", 2007)), (ids[1], tags("alternative", 2007)), (ids[2], tags("Electronic", 1992)), (ids[3], None)])
             .unwrap();
@@ -405,7 +427,7 @@ mod tests {
     #[test]
     fn the_table_sorts_by_any_column_and_keeps_an_album_together() {
         let (mut library, ids) = library();
-        let tags = |genre: &str, year: i32| Some(MoreTags { genre: Some(genre.into()), year: Some(year), composer: None, bitrate: None });
+        let tags = |genre: &str, year: i32| Some(MoreTags { genre: Some(genre.into()), year: Some(year), composer: None, bitrate: None, picture: genre == "Electronic" });
         library
             .set_more_tags(&[(ids[0], tags("Alternative", 2007)), (ids[1], tags("Alternative", 2007)), (ids[2], tags("Electronic", 1992)), (ids[3], None)])
             .unwrap();
@@ -423,6 +445,11 @@ mod tests {
 
         let row = &by(&library, SortBy::Title, false)[0];
         assert_eq!((row.genre.as_deref(), row.year, row.track_no, row.here), (Some("Alternative"), Some(2007), 3, true));
+        // A file found to carry a picture shows its own; the others are asked for when drawn (not known to have none).
+        let xtal = by(&library, SortBy::Title, true).remove(0);
+        assert_eq!(xtal.art, Some(format!("/api/art/track/{}", xtal.id)));
+        let has: Option<i64> = library.conn.query_row("SELECT cover FROM tracks WHERE id = ?1", [xtal.id], |r| r.get(0)).unwrap();
+        assert_eq!(has, Some(1));
     }
 
     #[test]
