@@ -19,11 +19,29 @@
 	/** How many cards are drawn: a page more each time the end of the grid comes near, however many rows are read. */
 	let upTo = $state(PAGE);
 
+	// What is read is for one question (all artists, or only those with a file here): when it changes, the grid starts
+	// again, and a page that answers the old question is dropped (the window learns the mode just after this opens).
+	let asked: boolean | null = null;
+	$effect(() => {
+		const now = here;
+		if (asked === null || now === asked) {
+			asked = now;
+			return;
+		}
+		asked = now;
+		rows = [];
+		done = false;
+		upTo = PAGE;
+		void load();
+	});
+
 	/** Reads the next page from the core. */
 	async function read(): Promise<boolean> {
 		if (done) return false;
+		const only = here;
 		try {
-			const page = await core.artistsAt(rows.length, PAGE, undefined, here);
+			const page = await core.artistsAt(rows.length, PAGE, undefined, only);
+			if (only !== here) return false;
 			rows = [...rows, ...page];
 			done = page.length < PAGE;
 			failure = null;

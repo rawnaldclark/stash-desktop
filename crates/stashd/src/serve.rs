@@ -3445,6 +3445,8 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
             200,
             json!({ "rows": library().albums_at(number("offset", 0), limit(120))? }),
         ),
+        // Every album with what the grid groups it by (`here=1`: only those with a file here).
+        (Method::Get, "/api/albums/cards") => reply_json(200, json!({ "rows": library().album_cards(param("here").as_deref() == Some("1"))? })),
         // Home's shelves for the files on this computer: how much there is, what came lately, what is played most.
         (Method::Get, "/api/local/home") => reply_json(200, json!(library().local_home(12)?)),
         // The library in numbers (Library > Statistics).
