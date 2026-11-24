@@ -194,6 +194,32 @@ pub fn read_cmd(doc: &Value) -> Result<Cmd> {
     Ok(Cmd { sid: sid.to_string(), n, command })
 }
 
+/// What the playing song is as it plays here, for the phone's Now Playing: the codec the engine decodes, its sample rate,
+/// and its bit depth when that is known (a file's, from its tags; 16 when the engine decodes 16-bit samples).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateFormat {
+    /// Lower case, as the engine names it, with raw PCM as "pcm": "flac", "mp3", "opus", "aac", "alac".
+    pub codec: String,
+    pub sample_rate: Option<u32>,
+    pub bit_depth: Option<u32>,
+}
+
+impl StateFormat {
+    /// From the engine's names: `codec` ("flac", "pcm_s24le"), `sample_format` ("s16", "s32", "float").
+    pub fn of(codec: &str, sample_rate: Option<u32>, sample_format: Option<&str>, file_bits: Option<u32>) -> Option<Self> {
+        let codec = codec.trim().to_ascii_lowercase();
+        if codec.is_empty() {
+            return None;
+        }
+        let codec = if codec.starts_with("pcm_") { "pcm".to_string() } else { codec };
+        let bit_depth = file_bits.filter(|b| (8..=64).contains(b)).or(match sample_format {
+            Some("s16") | Some("s16p") => Some(16),
+            _ => None,
+        });
+        Some(Self { codec, sample_rate: sample_rate.filter(|r| *r > 0), bit_depth })
+    }
+}
+
 /// A song as a state carries it: what the phone's card and Up next show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateSong {
@@ -241,6 +267,8 @@ pub struct StateIn {
     pub from: Option<String>,
     /// Finding where the song plays from.
     pub loading: bool,
+    /// What the playing song is as it plays, once the engine has said.
+    pub format: Option<StateFormat>,
 }
 
 /// The state document: v1's fields, the cap `queue`, and the queue window (cut until the document fits [`MAX_STATE_BYTES`]).
@@ -263,6 +291,16 @@ pub fn state_doc(s: &StateIn) -> Value {
     if let Some(song) = &s.song {
         d["song"] = song_out(song);
         d["phase"] = json!(if s.loading { "loading" } else if s.playing { "playing" } else { "paused" });
+        if let Some(f) = &s.format {
+            let mut g = json!({ "codec": f.codec });
+            if let Some(r) = f.sample_rate {
+                g["sampleRate"] = json!(r);
+            }
+            if let Some(b) = f.bit_depth {
+                g["bitDepth"] = json!(b);
+            }
+            d["format"] = g;
+        }
     }
     if let Some(iid) = &s.iid {
         d["iid"] = json!(iid);
@@ -340,8 +378,10 @@ mod tests {
             repeat: "all".into(),
             from: Some("Liked songs".into()),
             loading: false,
+            format: StateFormat::of("FLAC", Some(44_100), Some("s16"), None),
         };
         let d = state_doc(&s);
+        assert_eq!(d["format"], json!({ "codec": "flac", "sampleRate": 44100, "bitDepth": 16 }));
         assert_eq!(d["caps"], json!(["queue"]));
         assert_eq!(d["queue"]["at"], 3);
         assert_eq!(d["queue"]["length"], 200);
@@ -349,5 +389,16 @@ mod tests {
         assert!(n > 0 && n < 50, "{n}");
         assert!(serde_json::to_vec(&d).unwrap().len() <= MAX_STATE_BYTES);
         assert_eq!(d["phase"], "playing");
+    }
+
+    #[test]
+    fn a_format_names_only_what_is_known() {
+        // A 24-bit stream decodes to 32-bit samples: its depth isn't known, so none is said.
+        assert_eq!(StateFormat::of("flac", Some(96_000), Some("s32"), None), Some(StateFormat { codec: "flac".into(), sample_rate: Some(96_000), bit_depth: None }));
+        // A file's own depth, from its tags, is.
+        assert_eq!(StateFormat::of("flac", Some(96_000), Some("s32"), Some(24)).unwrap().bit_depth, Some(24));
+        assert_eq!(StateFormat::of("pcm_s24le", Some(48_000), None, None).unwrap().codec, "pcm");
+        assert_eq!(StateFormat::of("opus", Some(48_000), Some("float"), None).unwrap().bit_depth, None);
+        assert_eq!(StateFormat::of(" ", None, None, None), None);
     }
 }
