@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use stash_core::link::crypto::{Envelope, b64u, open, place, random_bytes, seal};
-use stash_core::link::remote::{Cmd, Command, PhoneSong, StateIn, StateSong, read_cmd, state_doc};
+use stash_core::link::remote::{Cmd, Command, PhoneSong, StateFormat, StateIn, StateSong, read_cmd, state_doc};
 use stash_core::player::{AddonTrack, Player, QueueItem, Repeat};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::{Message, WebSocket};
@@ -104,6 +104,8 @@ enum Ended {
 #[derive(PartialEq, Clone)]
 struct Said {
     status: &'static str,
+    /// The engine's codec and sample rate: they arrive once the song starts, and the phone shows them.
+    format: Option<(String, Option<u32>)>,
     qid: Option<u64>,
     queue_version: u64,
     shuffle: bool,
@@ -337,6 +339,7 @@ impl<'s> Session<'s> {
         let s = self.player.state();
         let said = Said {
             status: s.status,
+            format: s.signal.as_ref().and_then(|g| g.codec.clone().map(|c| (c, g.decoded.sample_rate))),
             qid: s.track.as_ref().map(|t| t.qid),
             queue_version: s.queue_version,
             shuffle: s.shuffle,
@@ -368,6 +371,18 @@ impl<'s> Session<'s> {
         at.elapsed() >= if playing { BEAT_PLAYING } else { BEAT_PAUSED }
     }
 
+    /// What the playing song is as it plays: the engine's codec and rate, and a file's bit depth from the library (a stream's
+    /// only when the engine decodes 16-bit samples).
+    fn format_of(&self, s: &stash_core::player::PlayerState) -> Option<StateFormat> {
+        let track = s.track.as_ref()?;
+        let signal = s.signal.as_ref()?;
+        let file_bits = match (track.addon.is_none(), track.id) {
+            (true, Some(id)) => self.state.library.lock().unwrap().bit_depth_of(id).ok().flatten(),
+            _ => None,
+        };
+        StateFormat::of(signal.codec.as_deref()?, signal.decoded.sample_rate, signal.decoded.format.as_deref(), file_bits)
+    }
+
     fn send_state(&mut self) -> Result<(), Box<tungstenite::Error>> {
         let s = self.player.state();
         let index = s.index.unwrap_or(0);
@@ -394,6 +409,7 @@ impl<'s> Session<'s> {
             repeat: s.repeat.to_string(),
             from: s.from.clone(),
             loading: s.status == "loading",
+            format: self.format_of(&s),
         };
         let (said, position) = self.said_now();
         self.said = Some((said, position, Instant::now()));

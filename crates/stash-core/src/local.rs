@@ -55,6 +55,17 @@ pub struct AlbumCard {
 }
 
 impl Library {
+    /// The bit depth the library read from row `id`'s file, if it knows one (the phone's remote shows it while the file plays).
+    pub fn bit_depth_of(&self, id: i64) -> Result<Option<u32>> {
+        let bits: Option<Option<u32>> = self
+            .conn
+            .prepare_cached("SELECT bit_depth FROM tracks WHERE id = ?1")?
+            .query_map(params![id], |r| r.get(0))?
+            .next()
+            .transpose()?;
+        Ok(bits.flatten())
+    }
+
     /// The library's row for a song another device describes (the phone's remote, `crate::link::remote`), by the identity
     /// rule the web player and the app share: its ISRC first; else its words (title and artist, folded) with no ISRC that
     /// says otherwise. A file on this computer is preferred, then a liked song, then the oldest row.
