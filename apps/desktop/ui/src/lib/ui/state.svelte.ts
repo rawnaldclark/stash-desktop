@@ -181,6 +181,8 @@ class UIState {
 	}
 	/** The command palette (Ctrl+K) is open. */
 	palette = $state(false);
+	/** The list of keyboard shortcuts (`?`) is open. */
+	keys = $state(false);
 	/** The smart playlist editor is open: on a new one (`id` null), or on the playlist `id`. */
 	smart = $state<{ id: string | null } | null>(null);
 	/** Fill in missing tags is open. */

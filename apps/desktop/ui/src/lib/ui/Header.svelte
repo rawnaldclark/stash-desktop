@@ -6,6 +6,7 @@
 	import Icon from './Icon.svelte';
 	import { ui } from './state.svelte';
 	import { goOffline } from '../app';
+	import { K, withKeys } from './keys';
 
 	let input = $state<HTMLInputElement>();
 	let timer: ReturnType<typeof setTimeout> | undefined;
@@ -30,8 +31,8 @@
 
 <header class="head">
 	<span class="hd-nav">
-		<button type="button" class="hd-circ" aria-label="Back" title="Back" onclick={() => history.back()}><Icon name="chevron_left" /></button>
-		<button type="button" class="hd-circ" aria-label="Forward" title="Forward" onclick={() => history.forward()}><Icon name="chevron_right" /></button>
+		<button type="button" class="hd-circ" aria-label="Back" title={withKeys('Back', K.pageBack)} onclick={() => history.back()}><Icon name="chevron_left" /></button>
+		<button type="button" class="hd-circ" aria-label="Forward" title={withKeys('Forward', K.pageForward)} onclick={() => history.forward()}><Icon name="chevron_right" /></button>
 	</span>
 	<form class="hd-search" role="search" onsubmit={(e) => { e.preventDefault(); go(ui.q, true); }}>
 		<Icon name="search" />
@@ -49,6 +50,7 @@
 			onfocus={() => { if (page.url.pathname !== '/search') go(ui.q, true); }}
 			onkeydown={(e) => { if (e.key === 'Escape') { ui.q = ''; go('', true); input?.blur(); } }}
 		/>
+		{#if !ui.q}<kbd class="kbd hd-key" aria-hidden="true" title="Press / to search">/</kbd>{/if}
 	</form>
 	{#if ui.local}<a class="hd-dev hd-off" href="/settings?c=general" aria-label="Stash plays only your own music files. Change it in Settings" title="Only your own music files: Stash stays off the internet. Click to change"><Icon name="folder" /><span class="hd-dt">My files</span></a>
 	{:else if ui.offline}<button type="button" class="hd-dev hd-off" aria-label="Offline: only what is on this computer plays. Go back online" title="Offline: only what is on this computer plays. Click to go back online" onclick={() => void goOffline(false)}><Icon name="download" /><span class="hd-dt">Offline</span></button>{/if}

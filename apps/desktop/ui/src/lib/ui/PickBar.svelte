@@ -21,7 +21,8 @@
 
 	/** The list Ctrl+A picks: the one with the focus, the one songs are picked in, or the first on the page. */
 	function listForAll(): PickList | null {
-		const row = (document.activeElement as HTMLElement | null)?.closest('.trk-row');
+		// A row of a list, or a list that takes the keyboard as a whole (the song table, `data-picks`).
+		const row = (document.activeElement as HTMLElement | null)?.closest('.trk-row, [data-picks]');
 		const focused = row ? rowLists.get(row) : undefined;
 		if (focused) return focused;
 		if (P.list) return P.list;

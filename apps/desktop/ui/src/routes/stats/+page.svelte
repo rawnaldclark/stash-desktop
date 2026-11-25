@@ -8,6 +8,8 @@
 	import Columns from '../../lib/desktop/stats/Columns.svelte';
 	import { diskSize } from '../../lib/desktop/local-home';
 	import { hours, monthNames, percent, playsWord, rowHref, songsWord } from '../../lib/desktop/stats/stats';
+	import { folders } from '../../lib/desktop/folders.svelte';
+	import Icon from '../../lib/ui/Icon.svelte';
 
 	let s = $state.raw<core.LibraryStats | null>(null);
 	let failure = $state<string | null>(null);
@@ -57,15 +59,16 @@
 </script>
 
 <div class="view view-in st">
-	<h1 class="st-h">Your library in numbers</h1>
-	<p class="st-sub">The music files on this computer, and everything you have played in Stash.</p>
+	<div class="pg-head"><h1 class="pg-title">Statistics</h1></div>
+	<p class="pg-sub">Your library in numbers: the music files on this computer, and everything you have played in Stash.</p>
 
 	{#if failure && !s}
 		<p class="s-hint" role="alert">{failure}</p>
 	{:else if !s || !t}
 		<p class="s-hint">Counting…</p>
 	{:else if t.songs === 0 && t.plays === 0}
-		<p class="s-hint">No music files on this computer yet. Add a music folder in Settings › Library and its numbers show up here.</p>
+		<p class="s-hint">No music files on this computer yet. Add a music folder and its numbers show up here.</p>
+		<button type="button" class="btn ghost" onclick={() => void folders.add()}><Icon name="create_new_folder" />Add a music folder…</button>
 	{:else}
 		<ul class="st-tiles" aria-label="In all">
 			{#each tiles as tile (tile.label)}
@@ -147,8 +150,6 @@
 	}
 	:global(:root[data-theme='light']) .st { --st-bar: #7c3aed; --st-bar-on: #6d28d9; --st-quiet: color-mix(in oklab, #7c3aed 30%, transparent); }
 
-	.st-h { margin: 0; font: 700 28px/1.2 var(--font-display, var(--font-body)); color: var(--wp-text); }
-	.st-sub { margin: 6px 0 18px; color: var(--wp-text-2); font: 400 14px/1.4 var(--font-body); }
 	.st-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 10px; margin: 0 0 22px; padding: 0; list-style: none; }
 	.st-tiles li { display: grid; gap: 4px; padding: 14px 16px; border-radius: 14px; background: var(--wp-hover); border: 1px solid var(--wp-line); }
 	.st-tiles b { font: 700 20px/1.15 var(--font-display, var(--font-body)); color: var(--wp-text); font-variant-numeric: tabular-nums; }

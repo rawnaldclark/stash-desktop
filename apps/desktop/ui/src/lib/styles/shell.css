@@ -179,6 +179,8 @@ body.carrying, body.carrying * { cursor: grabbing !important; user-select: none;
 .hd-search input { flex: 1; min-width: 0; height: 100%; border: 0; outline: 0; background: none; color: var(--wp-text); font: 400 14px/1 var(--font-body); }
 .hd-search input::placeholder { color: var(--wp-text-2); opacity: 1; }
 .hd-search input::-webkit-search-cancel-button { display: none; }
+.hd-search .hd-key { flex: none; }
+.hd-search:focus-within .hd-key { display: none; }
 .hd-search input:focus-visible, .empty-search input:focus-visible { outline: none; }
 .hd-search:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
 .empty-search:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }

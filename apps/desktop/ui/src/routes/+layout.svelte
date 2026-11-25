@@ -16,6 +16,8 @@
 	import PlayerBar from '../lib/ui/PlayerBar.svelte';
 	import Sidebar from '../lib/ui/Sidebar.svelte';
 	import CommandPalette from '../lib/ui/CommandPalette.svelte';
+	import KeysSheet from '../lib/ui/KeysSheet.svelte';
+	import { sectionForKey } from '../lib/desktop/library-sections';
 	import SmartEditor from '../lib/desktop/SmartEditor.svelte';
 	import DeleteSongs from '../lib/desktop/DeleteSongs.svelte';
 	import EditTags from '../lib/desktop/EditTags.svelte';
@@ -180,10 +182,34 @@
 			ui.palette = !ui.palette;
 			return;
 		}
+		// Ctrl+1 to Ctrl+6: Library's sections. Ctrl+,: Settings. Alt+Left and Alt+Right: back and forward.
+		const dialog = ui.palette || ui.keys || !!ui.smart || !!ui.editing || !!ui.deleting || ui.filling || !!ui.menu || !!ui.choices;
+		if (!mini && !dialog && !e.defaultPrevented) {
+			if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
+				const section = sectionForKey(e.key);
+				if (section || e.key === ',') {
+					e.preventDefault();
+					void goto(section ? `/library?tab=${section}` : '/settings');
+					return;
+				}
+			}
+			if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+				e.preventDefault();
+				if (e.key === 'ArrowLeft') history.back();
+				else history.forward();
+				return;
+			}
+		}
 		if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
 		if (e.key === '/' && !typing(e.target)) {
 			e.preventDefault();
 			header?.focusSearch();
+			return;
+		}
+		// ?: every key the window answers to.
+		if (e.key === '?' && !typing(e.target) && !mini && !dialog) {
+			e.preventDefault();
+			ui.keys = true;
 			return;
 		}
 		if (typing(e.target) || ui.menu) return;
@@ -230,6 +256,7 @@
 	<Toast />
 	<PhoneTransfer />
 	{#if ui.palette}<CommandPalette />{/if}
+	{#if ui.keys}<KeysSheet />{/if}
 	{#if ui.smart}<SmartEditor />{/if}
 	{#if ui.deleting}<DeleteSongs />{/if}
 	{#if ui.editing}<EditTags />{/if}
