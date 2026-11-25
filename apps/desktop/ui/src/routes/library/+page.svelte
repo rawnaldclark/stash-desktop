@@ -9,6 +9,9 @@
 	import DownloadSwitch from '../../lib/desktop/DownloadSwitch.svelte';
 	import type { HistoryEntry, LibraryItem, Playlist } from '../../lib/api';
 	import { artUrl, measuring } from '../../lib/core';
+	import * as core from '../../lib/core';
+	import { BROWSE, COLLECTIONS, isBrowse, isCollection, keysFor } from '../../lib/desktop/library-sections';
+	import { folders, lastPart, many } from '../../lib/desktop/folders.svelte';
 	import { shelf } from '../../lib/ui/shelf';
 	import Albums from '../../lib/desktop/Albums.svelte';
 	import Artists from '../../lib/desktop/Artists.svelte';
@@ -33,29 +36,34 @@
 	type Tab = (typeof TABS)[number];
 	const tab = $derived<Tab>(TABS.find((t) => t === page.url.searchParams.get('tab')) ?? 'songs');
 
-	const tabs: [Tab, string][] = [
-		['songs', 'Songs'],
-		['likes', 'Liked'],
-		['playlists', 'Playlists'],
-		['albums', 'Albums'],
-		['artists', 'Artists'],
-		['genres', 'Genres'],
-		['folders', 'Folders'],
-		['youtube', 'YouTube Music'],
-		['downloads', 'Downloads'],
-		['notfound', 'Not found'],
-		['history', 'History']
-	];
-	// Not found shows only while songs wait on it; YouTube Music, once the listener signed in to it.
-	// On the listener's own files only, what comes from the internet is not there: YouTube Music, downloads from add-ons, songs not found.
-	const LOCAL_OUT: Tab[] = ['youtube', 'downloads', 'notfound'];
-	const shownTabs = $derived(
-		tabs.filter(([id]) => (!ui.local || !LOCAL_OUT.includes(id)) && (id !== 'notfound' || NF.open > 0 || tab === 'notfound') && (id !== 'youtube' || (T.on && T.signedIn) || tab === 'youtube'))
-	);
+	// The chips are the ways to look through the whole library; a collection (likes, history, downloads, songs not found,
+	// YouTube Music) is a page of its own, opened from the sidebar, and its title says which.
+	const browsing = $derived(isBrowse(tab));
+	const title = $derived(isCollection(tab) ? COLLECTIONS[tab] : 'Your library');
 	$effect(() => {
 		void NF.refresh();
 	});
-	onMount(() => void T.refreshAccount());
+	onMount(() => {
+		void T.refreshAccount();
+		void folders.init();
+	});
+
+	// Files on this computer missing an album, year, track number or genre: said under the chips, with the way to fill them in.
+	let blanks = $state(0);
+	$effect(() => {
+		void L.changed;
+		if (!browsing || measuring) return;
+		let gone = false;
+		core.fillNow().then(
+			(f) => {
+				if (!gone) blanks = f.running ? 0 : f.blanks;
+			},
+			() => {}
+		);
+		return () => {
+			gone = true;
+		};
+	});
 
 	// Sort orders, remembered in this window per tab.
 	const LIKE_SORTS = { recent: 'Recently added', title: 'Title A–Z', artist: 'Artist A–Z', plays: 'Most played', duration: 'Duration' } as const;
@@ -193,13 +201,31 @@
 </script>
 
 <div class="view view-in view-library">
-	<h1 class="vh2 lib-title">Your library</h1>
-	<nav class="lib-chips" aria-label="Library sections">
-		{#each shownTabs as [id, label] (id)}
-			<a class="chip" class:on={tab === id} href="/library?tab={id}" aria-current={tab === id ? 'page' : undefined}>{label}</a>
-		{/each}
-		<a class="chip" href="/stats">Statistics</a>
-	</nav>
+	<div class="pg-head">
+		<h1 class="pg-title">{title}</h1>
+		{#if browsing && !measuring}
+			<!-- The library's own tools, where the library is: add a folder of music, read the folders again. -->
+			<div class="pg-tools">
+				{#if folders.scan}
+					<span class="pg-status" role="status">Scanning {folders.scan.folder ? lastPart(folders.scan.folder) : 'your music folders'}… {many(folders.scan.report?.files ?? 0, 'file', 'files')}</span>
+				{:else}
+					{#if folders.notice}<span class="pg-status" class:bad={folders.notice.trouble} role="status">{folders.notice.text}</span>{/if}
+					{#if folders.list.length}<button type="button" class="btn ghost" title="Read your music folders again: new songs come in, changed tags are read again" onclick={() => void folders.again()}><Icon name="refresh" />Scan again</button>{/if}
+					<button type="button" class="btn ghost" onclick={() => void folders.add()}><Icon name="create_new_folder" />Add a music folder…</button>
+				{/if}
+			</div>
+		{/if}
+	</div>
+	{#if browsing}
+		<nav class="lib-chips" aria-label="Library sections">
+			{#each BROWSE as b (b.id)}
+				<a class="chip" class:on={tab === b.id} href="/library?tab={b.id}" title="{b.label} ({keysFor(b.id)})" aria-current={tab === b.id ? 'page' : undefined}>{b.label}</a>
+			{/each}
+		</nav>
+		{#if blanks > 0 && tab !== 'playlists' && !measuring}
+			<p class="s-hint lib-blanks">{many(blanks, 'file', 'files')} on this computer {blanks === 1 ? 'is' : 'are'} missing an album, year, track number or genre. <button type="button" class="lnk" onclick={() => (ui.filling = true)}>Fill in missing tags…</button></p>
+		{/if}
+	{/if}
 
 	{#if findable && !measuring}
 		<div class="lib-tools">
@@ -338,6 +364,7 @@
 
 <style>
 	.lib-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 14px; }
+	.lib-blanks { margin: -4px 0 14px; max-width: none; }
 	.hist-more { margin: 16px 8px 0 0; }
 	.lib-find { display: flex; align-items: center; gap: 8px; flex: 1 1 220px; max-width: 360px; height: 38px; padding: 0 12px; border-radius: 10px; background: var(--wp-field); border: 1px solid var(--wp-line); color: var(--wp-text-2); }
 	.lib-find:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }

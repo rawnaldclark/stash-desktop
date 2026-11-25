@@ -3,16 +3,18 @@
      The rows come a page at a time from the core in the order asked (`/api/table`), so it is as quick with 100,000 songs
      as with a hundred. A click picks a row (Ctrl and Shift pick more), a double click plays from it. -->
 <script lang="ts">
-	import { onMount, untrack } from 'svelte';
+	import { onMount, tick, untrack } from 'svelte';
 	import type { LibraryItem } from '../api';
 	import { itemOfRow, player } from '../app';
 	import * as core from '../core';
 	import VirtualList from '../VirtualList.svelte';
 	import Icon from '../ui/Icon.svelte';
 	import { mmss } from '../ui/format';
-	import { P, type PickList } from '../ui/pick.svelte';
+	import { P, rowLists, type PickList } from '../ui/pick.svelte';
 	import { songMenu } from '../ui/song-menu';
-	import { L, S } from '../ui/state.svelte';
+	import { L, S, ui, type Choice } from '../ui/state.svelte';
+	import { under } from './playlist-folders';
+	import { folders } from './folders.svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { decadeName } from './browse';
@@ -142,6 +144,8 @@
 		void askKey;
 		untrack(() => {
 			P.clear();
+			at = null;
+			moved++;
 			list?.refresh();
 		});
 	});
@@ -155,6 +159,9 @@
 		}
 	}
 	function rowClick(e: MouseEvent, r: core.TableRow, i: number) {
+		moved++;
+		at = i;
+		table?.focus({ preventScroll: true });
 		const item = itemOf(r);
 		if (e.shiftKey) void P.range(pick, i, e.ctrlKey || e.metaKey);
 		else if (e.ctrlKey || e.metaKey) P.toggle(pick, i, item);
@@ -169,6 +176,102 @@
 		const items = await pick.between(i, Math.min(count - 1, i + 499));
 		if (items.length) void player.playItems(items, 0, { from: FROM });
 	}
+	/** The genre and the decade shown are chosen in the window's own menu, as every other choice is. */
+	function genreMenu(el: HTMLElement) {
+		const choices: Choice[] = [
+			{ icon: 'library_music', label: 'All genres', checked: genre === null, run: () => show('genre', null) },
+			...genres.map((g): Choice => ({ icon: 'sell', label: `${g.genre ?? 'No genre'} (${g.songs.toLocaleString()})`, checked: genre === (g.genre ?? ''), run: () => show('genre', g.genre ?? '') }))
+		];
+		ui.openChoices({ ...under(el), label: 'Show one genre', title: 'Genre', choices });
+	}
+	function decadeMenu(el: HTMLElement) {
+		const choices: Choice[] = [
+			{ icon: 'library_music', label: 'All years', checked: decade === null, run: () => show('decade', null) },
+			...decades
+				.filter((d) => d.decade !== null)
+				.map((d): Choice => ({ icon: 'history', label: `${decadeName(d.decade)} (${d.songs.toLocaleString()})`, checked: decade === d.decade, run: () => show('decade', String(d.decade)) }))
+		];
+		ui.openChoices({ ...under(el), label: 'Show one decade', title: 'Years', choices });
+	}
+
+	// ---- The keyboard: the arrow keys move through the songs (Shift picks the ones on the way), Page Up and Down a
+	// screen, Home and End to the ends, Enter plays from the song, the menu key (or Shift+F10) opens its menu.
+	/** The song the keyboard is on, by its place; null until a key or a click puts it somewhere. */
+	let at = $state<number | null>(null);
+	let table = $state<HTMLElement>();
+	/**
+	 * What the keys pick is applied in the order they came, each after the one before (a song may have to be read from
+	 * the core first): held down, Shift+Down still picks from where the plain Down keys left off. A click or another list
+	 * (`moved`) drops the picks still waiting.
+	 */
+	let picks: Promise<void> = Promise.resolve();
+	let moved = 0;
+	// Ctrl+A with the table focused picks all of it, as it does on a row of any other list.
+	$effect(() => {
+		if (table) rowLists.set(table, pick);
+	});
+	/** Brings the song at `i` on screen (below the sticky headings), drawing it first when it is far away. */
+	async function reveal(i: number) {
+		await tick();
+		let el = document.getElementById(`tb-r-${i}`);
+		if (!el) {
+			list?.scrollToIndex(Math.max(0, i - 3));
+			await new Promise((r) => requestAnimationFrame(() => r(null)));
+			await tick();
+			el = document.getElementById(`tb-r-${i}`);
+		}
+		el?.scrollIntoView({ block: 'nearest' });
+	}
+	/** The menu key or Shift+F10 on the table (the browser sends those as a right-click on what has the focus): the menu of
+	 * the song the keyboard is on. A right-click on a row opens that row's own. */
+	async function tableMenu(e: MouseEvent) {
+		const keyboard = (e.clientX === 0 && e.clientY === 0) || e.button !== 2;
+		if (e.target !== table || at === null || !keyboard) return;
+		e.preventDefault();
+		const i = at;
+		await reveal(i);
+		document.getElementById(`tb-r-${i}`)?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+	}
+	async function tableKey(e: KeyboardEvent) {
+		// Only on the table itself: Enter on a column heading sorts by it, as it always did.
+		if (e.target !== table || !count || e.altKey || e.metaKey) return;
+		if (e.key === 'Enter') {
+			if (at === null) return;
+			e.preventDefault();
+			void play(at);
+			return;
+		}
+		if (e.ctrlKey) return;
+		const screen = Math.max(1, Math.floor((scroller?.clientHeight ?? 400) / ROW_HEIGHT) - 2);
+		const from = at ?? -1;
+		const last = count - 1;
+		const to =
+			e.key === 'ArrowDown' ? Math.min(last, from + 1)
+			: e.key === 'ArrowUp' ? Math.max(0, from - 1)
+			: e.key === 'PageDown' ? Math.min(last, Math.max(0, from) + screen)
+			: e.key === 'PageUp' ? Math.max(0, from - screen)
+			: e.key === 'Home' ? 0
+			: e.key === 'End' ? last
+			: null;
+		if (to === null) return;
+		e.preventDefault();
+		at = to;
+		const add = e.shiftKey;
+		const when = moved;
+		picks = picks
+			.then(async () => {
+				if (when !== moved) return;
+				if (add) return P.range(pick, to, false);
+				const [item] = await pick.between(to, to);
+				if (item && when === moved) {
+					P.clear();
+					P.toggle(pick, to, item);
+				}
+			})
+			.catch(() => {});
+		await reveal(to);
+	}
+
 	function toggleColumn(id: ColumnId) {
 		shown = shown.includes(id) ? shown.filter((c) => c !== id) : COLUMNS.filter((c) => c.id === id || shown.includes(c.id)).map((c) => c.id);
 	}
@@ -179,25 +282,9 @@
 </script>
 
 <div class="tb-tools">
-	<label class="tb-genre">
-		<span class="vh">Genre</span>
-		<select aria-label="Genre" value={genre ?? '\u0000'} onchange={(e) => show('genre', e.currentTarget.value === '\u0000' ? null : e.currentTarget.value)}>
-			<option value={'\u0000'}>All genres</option>
-			{#each genres as g (g.genre ?? '')}
-				<option value={g.genre ?? ''}>{g.genre ?? 'No genre'} ({g.songs.toLocaleString()})</option>
-			{/each}
-		</select>
-	</label>
+	<button type="button" class="chip tb-pick" class:on={genre !== null} aria-haspopup="menu" title="Show one genre" onclick={(e) => genreMenu(e.currentTarget)}><span>{genre === null ? 'All genres' : genre || 'No genre'}</span><Icon name="expand_more" /></button>
 	{#if decades.some((d) => d.decade !== null)}
-		<label class="tb-genre">
-			<span class="vh">Decade</span>
-			<select aria-label="Decade" value={decade === null ? '' : String(decade)} onchange={(e) => show('decade', e.currentTarget.value || null)}>
-				<option value="">All years</option>
-				{#each decades.filter((d) => d.decade !== null) as d (d.decade)}
-					<option value={String(d.decade)}>{decadeName(d.decade)} ({d.songs.toLocaleString()})</option>
-				{/each}
-			</select>
-		</label>
+		<button type="button" class="chip tb-pick" class:on={decade !== null} aria-haspopup="menu" title="Show one decade" onclick={(e) => decadeMenu(e.currentTarget)}><span>{decade === null ? 'All years' : decadeName(decade)}</span><Icon name="expand_more" /></button>
 	{/if}
 	{#if folder}
 		<button type="button" class="chip on tb-in" title="{folder}: click to show every folder" onclick={() => show('folder', null)}><Icon name="folder" /><span>{folder.split(/[\\/]+/).pop()}</span><Icon name="close" /></button>
@@ -221,9 +308,14 @@
 {#if failure}
 	<p class="s-hint" role="alert">{failure}</p>
 {:else if count === 0}
-	<p class="s-hint">{query.trim() || genre !== null || decade !== null || folder ? 'No song matches.' : here ? 'No music on this computer yet. Add a music folder in Settings › Library.' : 'No songs yet.'}</p>
+	{#if query.trim() || genre !== null || decade !== null || folder}
+		<p class="s-hint">No song matches.</p>
+	{:else}
+		<p class="s-hint">{here ? 'No music on this computer yet.' : 'No songs yet.'} Add the folder your music is in, and its songs show up here.</p>
+		<button type="button" class="btn ghost" onclick={() => void folders.add()}><Icon name="create_new_folder" />Add a music folder…</button>
+	{/if}
 {:else if count !== null && scroller}
-	<div class="tb" role="table" aria-label="Songs" aria-rowcount={count} style:--tb-grid={grid}>
+	<div class="tb" role="grid" aria-label="Songs" aria-rowcount={count} style:--tb-grid={grid} tabindex="0" data-picks="" aria-activedescendant={at !== null ? `tb-r-${at}` : undefined} bind:this={table} onkeydown={tableKey} oncontextmenu={tableMenu}>
 		<div class="tb-h" role="row">
 			{#each columns as c (c.id)}
 				{#if c.sort}
@@ -239,10 +331,11 @@
 			{#if r}
 				{@const item = itemOf(r)}
 				{@const picked = P.has(pick, i, item)}
-				<!-- svelte-ignore a11y_click_events_have_key_events -->
-				<div class="tb-r" class:pk={picked} class:cur={playingId === String(r.id)} class:away={!r.here} role="row" tabindex="-1" aria-selected={picked} use:songMenu={{ item }} onclick={(e) => rowClick(e, r, i)} ondblclick={() => void play(i)}>
+				<!-- The table holds the focus and names the song the keyboard is on (aria-activedescendant), so a row takes none. -->
+				<!-- svelte-ignore a11y_click_events_have_key_events, a11y_interactive_supports_focus -->
+				<div class="tb-r" id="tb-r-{i}" class:pk={picked} class:kb={at === i} class:cur={playingId === String(r.id)} class:away={!r.here} role="row" aria-rowindex={i + 1} aria-selected={picked} use:songMenu={{ item }} onclick={(e) => rowClick(e, r, i)} ondblclick={() => void play(i)}>
 					{#each columns as c (c.id)}
-						<span class="tb-c" class:num={c.num} class:strong={c.id === 'title'} role="cell" title={c.id === 'title' ? r.title : undefined}>
+						<span class="tb-c" class:num={c.num} class:strong={c.id === 'title'} role="gridcell" title={c.id === 'title' ? r.title : undefined}>
 							{#if c.id === 'cover'}{#if core.artUrl(r.art)}<img class="tb-cv" src={core.artUrl(r.art)} alt="" loading="lazy" decoding="async" crossorigin="anonymous" />{/if}
 							{:else if c.id === 'title'}{r.title}
 							{:else if c.id === 'artist'}{r.artist}
@@ -268,7 +361,9 @@
 
 <style>
 	.tb-tools { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 4px 0 8px; }
-	.tb-genre select { height: 34px; max-width: 260px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--wp-line-2); background: var(--wp-field, transparent); color: var(--wp-text); font: 400 14px/1 var(--font-body); }
+	.tb-pick { max-width: 280px; }
+	.tb-pick span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.tb-pick.chip :global(.ic) { margin: 0 -6px 0 -2px; }
 	.tb-in { display: inline-flex; align-items: center; gap: 6px; max-width: 260px; }
 	.tb-in span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.tb-in :global(svg) { width: 16px; height: 16px; flex: none; }
@@ -278,7 +373,6 @@
 	.tb-pop { position: absolute; z-index: 30; right: 0; top: calc(100% + 6px); display: grid; gap: 2px; min-width: 170px; padding: 8px; border-radius: 12px; background: var(--wp-main); border: 1px solid var(--wp-line-2); box-shadow: 0 12px 32px rgb(0 0 0 / .18); }
 	.tb-pop label { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; font: 400 14px/1.2 var(--font-body); cursor: pointer; }
 	.tb-pop input { accent-color: var(--acc); }
-	.vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 	.tb { margin: 0 -8px; font: 400 13.5px/1 var(--font-body); }
 	.tb-h, .tb-r { display: grid; grid-template-columns: var(--tb-grid); align-items: center; column-gap: 12px; padding: 0 10px; }
 	.tb-h { position: sticky; top: 0; z-index: 5; height: 34px; background: var(--wp-main); border-bottom: 1px solid var(--wp-line-2); }
@@ -288,7 +382,10 @@
 	.tb-hc.on { color: var(--wp-text); }
 	.tb-hc :global(svg) { width: 14px; height: 14px; flex: none; transition: rotate 120ms; }
 	.tb-hc :global(.tb-dn) { rotate: 180deg; }
-	.tb-r { height: 36px; border-radius: 6px; cursor: default; user-select: none; }
+	/* Moved to with the keys: below the sticky headings, above the player bar and the bar of picked songs. */
+	.tb-r { height: 36px; border-radius: 6px; cursor: default; user-select: none; scroll-margin: 40px 0 calc(var(--bar-clear, 0px) + var(--pick-clear, 0px) + 12px); }
+	.tb:focus { outline: none; }
+	.tb:focus .tb-r.kb { box-shadow: inset 0 0 0 2px var(--acc); }
 	.tb-c { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--wp-text-2); }
 	.tb-cv { display: block; width: 28px; height: 28px; border-radius: 4px; object-fit: cover; background: var(--wp-hover); }
 	.tb-c.strong { color: var(--wp-text); font-weight: 500; }

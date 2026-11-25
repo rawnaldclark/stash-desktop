@@ -119,6 +119,17 @@
 .sr-songs { display: grid; align-content: start; }
 .sec-h { margin-top: 28px !important; font-size: 17px; }
 
+/* a page's title, one size on every page: Library and its collections, Statistics, Settings (`.set-title` is the same) */
+.pg-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px 16px; margin: 0 0 16px; }
+.pg-title { margin: 0; font: 700 28px/1.15 var(--font-display); letter-spacing: -.025em; color: var(--wp-text); }
+.pg-sub { margin: -10px 0 18px; color: var(--wp-text-2); font: 400 14px/1.4 var(--font-body); }
+.pg-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; }
+.pg-status { max-width: 52ch; color: var(--wp-text-2); font: 400 13px/1.35 var(--font-body); }
+.pg-status.bad { color: var(--red); }
+.btn .ic { width: 18px; height: 18px; margin: 0 6px 0 -4px; flex: none; }
+/* a key, as the window says it: the command palette's look */
+.kbd { display: inline-block; min-width: 20px; padding: 2px 6px; border-radius: 6px; border: 1px solid var(--wp-line-2); color: var(--wp-text-2); font: 500 11px/1.4 var(--font-body); text-align: center; white-space: nowrap; }
+
 /* library, playlist headers */
 .lib-title { margin-bottom: 12px; }
 .lib-actions { display: flex; align-items: center; gap: 12px; margin: 4px 0 12px; }

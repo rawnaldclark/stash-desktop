@@ -13,6 +13,10 @@
 	import { atEvent, folderMenu, moveTo, newMenu, playlistMenu, playlistsWord, under } from '../desktop/playlist-folders';
 	import { L, ui } from './state.svelte';
 	import { songs } from './format';
+	import { isCollection } from '../desktop/library-sections';
+	import { NF } from '../desktop/unfound.svelte';
+	import { T } from '../desktop/youtube.svelte';
+	import NavTile from './NavTile.svelte';
 
 	// As Stash for Android's tab bar has them (Sync is the phone's own).
 	const nav: [string, string, NavIconName][] = [
@@ -21,7 +25,10 @@
 		['/search', 'Search', 'search'],
 		['/settings', 'Settings', 'settings']
 	];
-	const here = (href: string) => (href === '/' ? page.url.pathname === '/' : page.url.pathname.startsWith(href));
+	/** The collections are rows of their own below (Liked songs, History…): on theirs, Library is not lit too. */
+	const onTab = (t: string) => page.url.pathname === '/library' && page.url.searchParams.get('tab') === t;
+	const here = (href: string) =>
+		href === '/' ? page.url.pathname === '/' : href === '/library' ? page.url.pathname.startsWith('/library') && !isCollection(page.url.searchParams.get('tab')) : page.url.pathname.startsWith(href);
 	const folderIds = $derived(new Set(L.folders.map((f) => f.id)));
 	/** The playlists in no folder (or in one that is gone). */
 	const loose = $derived(L.playlists.filter((p) => !p.folder || !folderIds.has(p.folder)));
@@ -49,9 +56,17 @@
 			<a class="nav-i" class:on={here(href)} {href} title={name} aria-current={here(href) ? 'page' : undefined}><NavIcon name={icon} /><span>{name}</span></a>
 		{/each}
 	</nav>
+	<!-- The library's own pages (Library's chips are the ways to look through everything), as Namida's tiles. -->
+	<nav class="sb-tiles" aria-label="Your library's pages">
+		<NavTile href="/library?tab=history" icon="history" label="History" on={onTab('history')} />
+		{#if !ui.local}<NavTile href="/library?tab=downloads" icon="download" label="Downloads" on={onTab('downloads')} />{/if}
+		<NavTile href="/stats" icon="leaderboard" label="Statistics" on={page.url.pathname === '/stats'} />
+		{#if !ui.local && (NF.open > 0 || onTab('notfound'))}<NavTile href="/library?tab=notfound" icon="search" label="Not found" count={NF.open} on={onTab('notfound')} />{/if}
+		{#if !ui.local && ((T.on && T.signedIn) || onTab('youtube'))}<NavTile href="/library?tab=youtube" icon="library_music" label="YouTube Music" on={onTab('youtube')} />{/if}
+	</nav>
 	<div class="sb-sec" data-drop-folder=""><span class="caps">Your library</span><button type="button" class="sb-new" aria-label="New playlist or folder" title="New playlist or folder" aria-haspopup="menu" onclick={(e) => newMenu(under(e.currentTarget))}><Icon name="add" /></button></div>
 	<nav class="sb-list" aria-label="Playlists">
-		<a class="sb-rec" class:on={page.url.pathname === '/library' && page.url.searchParams.get('tab') === 'likes'} href="/library?tab=likes" title="Liked songs">
+		<a class="sb-rec" class:on={onTab('likes')} href="/library?tab=likes" title="Liked songs">
 			<Tile liked /><span class="sb-t"><b>Liked songs</b><i>{#if L.likedKept}<Icon name="download" class="kept-mk" label="On this computer" />{/if}{songs(L.likes.length)}</i></span>
 		</a>
 		{#each L.folders as f (f.id)}

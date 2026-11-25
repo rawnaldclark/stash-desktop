@@ -1,9 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { hours, monthNames, niceTop, percent, rowHref, tick } from './stats';
+import { fromFirstPlay, hours, monthNames, niceTop, percent, rowHref, tick, wholeHours } from './stats';
 
 describe('a long time', () => {
 	it('is said in whole hours', () => {
 		expect([hours(0), hours(40 * 60_000), hours(3_600_000), hours(27.4 * 3_600_000), hours(1234 * 3_600_000)]).toEqual(['under an hour', '1 hour', '1 hour', '27 hours', '1,234 hours']);
+	});
+	it('is a big number of whole hours, never "0" while there is some', () => {
+		expect([wholeHours(0), wholeHours(20 * 60_000), wholeHours(40 * 60_000), wholeHours(27.4 * 3_600_000), wholeHours(1234 * 3_600_000)]).toEqual(['0', '<1', '1', '27', '1,234']);
+	});
+});
+
+describe('months of listening', () => {
+	it('start at the first month with plays, keeping quiet months after it', () => {
+		const m = (plays: number) => ({ plays });
+		expect(fromFirstPlay([m(0), m(0), m(3), m(0), m(5)])).toEqual([m(3), m(0), m(5)]);
+		expect(fromFirstPlay([m(2), m(0)])).toEqual([m(2), m(0)]);
+		expect(fromFirstPlay([m(0), m(0)])).toEqual([]);
+		expect(fromFirstPlay([])).toEqual([]);
 	});
 });
 

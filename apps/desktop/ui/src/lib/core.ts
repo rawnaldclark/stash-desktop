@@ -254,7 +254,10 @@ export type LocalHome = { stats: LocalStats; added: AlbumRow[]; played: TrackRow
 export const localHome = () => get<LocalHome>('/api/local/home');
 
 /** Library › Statistics. A bar is a row of a list: `key` is what it opens (a genre, decade or artist id). */
-export type StatBar = { label: string; value: number; bytes?: number; key?: string | null; detail?: string };
+/** `art`: a song's cover or an artist's picture, where the row has one (as `art` everywhere: give it to `artUrl`). */
+export type StatBar = { label: string; value: number; bytes?: number; key?: string | null; detail?: string; art?: string | null };
+/** One of the last twelve months: its plays, and the song played most in it (`id`: its row; `plays`: that month). */
+export type StatMonth = { month: string; plays: number; top?: { id: number; title: string; artist: string; plays: number; art?: string | null } };
 export type LibraryStats = {
 	totals: { songs: number; albums: number; artists: number; genres: number; duration_ms: number; bytes: number; lossless: number; hi_res: number; plays: number; played_ms: number };
 	formats: StatBar[];
@@ -265,7 +268,7 @@ export type LibraryStats = {
 	artists_by_songs: StatBar[];
 	artists_by_plays: StatBar[];
 	most_played: StatBar[];
-	months: StatBar[];
+	months: StatMonth[];
 	tags: { label: string; have: number; of: number }[];
 };
 export const libraryStats = () => get<LibraryStats>('/api/stats');

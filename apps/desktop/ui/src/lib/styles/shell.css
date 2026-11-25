@@ -55,6 +55,10 @@
 .nav-i.on .ni { color: var(--acc-text); }
 @media (prefers-reduced-motion: reduce) { .nav-i::before, .nav-i .ni, .nav-i span { transition: none !important; } }
 .caps { font: 600 11px/1.4 var(--font-body); letter-spacing: .08em; text-transform: uppercase; color: var(--wp-text-2); }
+/* The library's own pages as Namida's drawer tiles (NavTile.svelte): 6px apart, as Namida stacks them. */
+.sb-tiles { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin-top: 14px; flex: none; }
+.wp-g.rail .sb-tiles { justify-items: center; align-self: stretch; }
+@container wp (max-width: 1099.98px) { .sb-tiles { justify-items: center; align-self: stretch; } }
 .sb-sec { display: flex; align-items: center; justify-content: space-between; margin-top: 20px; padding: 0 4px 8px; flex: none; }
 .sb-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; align-content: start; }
 .sb-rec { display: flex; align-items: center; gap: 10px; height: 52px; padding: 6px; border-radius: 8px; transition: background-color 150ms var(--ease-standard); }
@@ -179,6 +183,8 @@ body.carrying, body.carrying * { cursor: grabbing !important; user-select: none;
 .hd-search input { flex: 1; min-width: 0; height: 100%; border: 0; outline: 0; background: none; color: var(--wp-text); font: 400 14px/1 var(--font-body); }
 .hd-search input::placeholder { color: var(--wp-text-2); opacity: 1; }
 .hd-search input::-webkit-search-cancel-button { display: none; }
+.hd-search .hd-key { flex: none; }
+.hd-search:focus-within .hd-key { display: none; }
 .hd-search input:focus-visible, .empty-search input:focus-visible { outline: none; }
 .hd-search:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
 .empty-search:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
@@ -284,8 +290,8 @@ body.carrying, body.carrying * { cursor: grabbing !important; user-select: none;
 @media (prefers-reduced-motion: no-preference) { .wsh + .wsh { animation: wash-in var(--dur-colour) var(--ease-standard) both; } }
 @keyframes wash-in { from { opacity: 0; } }
 @container wp (max-width: 1099.98px) { .wash { height: 300px; } }
-.views { position: relative; padding: 24px 24px calc(var(--bar-clear) + 24px); --wp-text-2: var(--wp-text-2w); }
-@container wp (max-width: 1099.98px) { .views { padding: 20px 20px calc(var(--bar-clear) + 24px); } }
+.views { position: relative; padding: 24px 24px calc(var(--bar-clear) + var(--pick-clear, 0px) + 24px); --wp-text-2: var(--wp-text-2w); }
+@container wp (max-width: 1099.98px) { .views { padding: 20px 20px calc(var(--bar-clear) + var(--pick-clear, 0px) + 24px); } }
 .view-in { animation: view-in 220ms var(--ease-out-expo) both; }
 @keyframes view-in { from { opacity: .02; transform: translateY(8px); } }
 @media (prefers-reduced-motion: reduce) { .view-in { animation: none; } }

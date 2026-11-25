@@ -436,6 +436,10 @@ const player: PlayerAPI = {
 		return command(() => core.playEntries(entries, Math.min(start, entries.length - 1), opts?.from));
 	},
 	playLibrary: (offset, opts) => command(() => core.playLibrary(offset, opts?.from, opts?.here, opts?.id)),
+	playRows(ids, startIndex = 0, opts) {
+		if (!ids.length) return Promise.resolve();
+		return command(() => core.playEntries(ids.map((id) => ({ id })), Math.max(0, Math.min(startIndex, ids.length - 1)), opts?.from));
+	},
 	play: () => void command(() => core.setPaused(false)),
 	pause: () => void command(() => core.setPaused(true)),
 	toggle: () => {

@@ -11,8 +11,14 @@
 	import { eqEntry } from './equalizer';
 	import type { IconName } from './icons';
 	import { L, S, ui } from './state.svelte';
+	import { K, type Keys } from './keys';
+	import { BROWSE, keysFor, type BrowseId } from '../desktop/library-sections';
+	import { folders } from '../desktop/folders.svelte';
+	import { importPlaylistFile } from '../desktop/playlist-files';
 
-	type Choice = { id: string; group: string; icon: IconName; label: string; sub?: string; run: () => void };
+	/** `keys`: the keys that do it anywhere in the window, said beside it. */
+	type Choice = { id: string; group: string; icon: IconName; label: string; sub?: string; keys?: Keys; run: () => void };
+	const SECTION_ICON: Record<BrowseId, IconName> = { songs: 'library_music', playlists: 'queue_music', albums: 'album', artists: 'person', genres: 'sell', folders: 'folder' };
 
 	let q = $state('');
 	let active = $state(0);
@@ -33,9 +39,9 @@
 		const s = S.v;
 		const list: Choice[] = [];
 		if (s.current) {
-			list.push({ id: 'toggle', group: 'Commands', icon: s.playing ? 'pause' : 'play_arrow', label: s.playing ? 'Pause' : 'Play', run: () => player.toggle() });
-			list.push({ id: 'next', group: 'Commands', icon: 'skip_next', label: 'Next song', run: () => player.next() });
-			list.push({ id: 'prev', group: 'Commands', icon: 'skip_previous', label: 'Previous song', run: () => player.prev() });
+			list.push({ id: 'toggle', group: 'Commands', icon: s.playing ? 'pause' : 'play_arrow', label: s.playing ? 'Pause' : 'Play', keys: K.playPause, run: () => player.toggle() });
+			list.push({ id: 'next', group: 'Commands', icon: 'skip_next', label: 'Next song', keys: K.next, run: () => player.next() });
+			list.push({ id: 'prev', group: 'Commands', icon: 'skip_previous', label: 'Previous song', keys: K.prev, run: () => player.prev() });
 			const liked = L.isLiked(s.current);
 			list.push({ id: 'like', group: 'Commands', icon: liked ? 'favorite' : 'favorite_border', label: liked ? 'Remove the song playing from Likes' : 'Like the song playing', sub: s.current.title, run: () => void L.toggleLike(s.current!) });
 			list.push({ id: 'now', group: 'Commands', icon: 'open_in_full', label: 'Now playing', run: go('/now') });
@@ -64,17 +70,21 @@
 		list.push({ id: 'smart', group: 'Commands', icon: 'add', label: 'New smart playlist', run: () => (ui.smart = { id: null }) });
 		list.push({ id: 'offline', group: 'Commands', icon: 'download', label: ui.offline ? 'Go back online' : 'Go offline (only what is on this computer)', run: () => void goOffline(!ui.offline) });
 		list.push({ id: 'lyrics', group: 'Commands', icon: 'lyrics', label: 'Lyrics', run: () => ui.setTab('lyrics') });
-		const pages: [string, string, IconName][] = [
+		list.push({ id: 'keys', group: 'Commands', icon: 'keyboard', label: 'Keyboard shortcuts', keys: K.keys, run: () => (ui.keys = true) });
+		// The library's own tools: bring music in, read it again, fill in what its tags leave out.
+		list.push({ id: 'add-folder', group: 'Library', icon: 'create_new_folder', label: 'Add a music folder…', run: () => void folders.add() });
+		if (folders.list.length) list.push({ id: 'scan', group: 'Library', icon: 'refresh', label: 'Scan your music folders again', run: () => void folders.again() });
+		list.push({ id: 'fill', group: 'Library', icon: 'edit', label: 'Fill in missing tags…', run: () => (ui.filling = true) });
+		list.push({ id: 'import-pl', group: 'Library', icon: 'playlist_add', label: 'Import a playlist file…', run: () => void importPlaylistFile() });
+		const pages: [string, string, IconName, Keys?][] = [
 			['Home', '/', 'home'],
-			['Search', '/search', 'search'],
-			['Library › Songs', '/library?tab=songs', 'library_music'],
-			['Library › Liked', '/library?tab=likes', 'favorite'],
-			['Library › Playlists', '/library?tab=playlists', 'queue_music'],
-			['Library › Albums', '/library?tab=albums', 'album'],
-			['Library › Artists', '/library?tab=artists', 'person'],
-			['Library › Downloads', '/library?tab=downloads', 'download'],
-			['Library › Not found', '/library?tab=notfound', 'search'],
-			['Library › History', '/library?tab=history', 'history'],
+			['Search', '/search', 'search', K.search],
+			...BROWSE.map((b): [string, string, IconName, Keys] => [`Library › ${b.label}`, `/library?tab=${b.id}`, SECTION_ICON[b.id], keysFor(b.id).split('+')]),
+			['Liked songs', '/library?tab=likes', 'favorite'],
+			['History', '/library?tab=history', 'history'],
+			...(ui.local ? [] : ([['Downloads', '/library?tab=downloads', 'download'], ['Not found', '/library?tab=notfound', 'search']] as [string, string, IconName][])),
+			['Statistics', '/stats', 'leaderboard'],
+			['Settings', '/settings', 'settings', K.settings],
 			['Settings › Sound', '/settings#sound', 'settings'],
 			['Settings › Exclusive mode', '/settings#sound', 'settings'],
 			['Settings › Playback', '/settings#playback', 'settings'],
@@ -90,7 +100,7 @@
 			['Settings › Shortcuts', '/settings#shortcuts', 'settings'],
 			['Settings › Appearance', '/settings#appearance', 'settings']
 		];
-		for (const [label, href, icon] of pages) list.push({ id: `go:${href}`, group: 'Go to', icon, label, run: go(href) });
+		for (const [label, href, icon, keys] of pages) list.push({ id: `go:${href}:${label}`, group: 'Go to', icon, label, keys, run: go(href) });
 		return list;
 	});
 
@@ -103,7 +113,7 @@
 
 	const choices = $derived.by((): Choice[] => {
 		const typed = q.trim();
-		if (!typed) return commands.filter((c) => c.group === 'Commands').concat(commands.filter((c) => c.group === 'Go to').slice(0, 6));
+		if (!typed) return commands.filter((c) => c.group === 'Commands').concat(commands.filter((c) => c.group === 'Library'), commands.filter((c) => c.group === 'Go to').slice(0, 9));
 		const out: Choice[] = commands.filter((c) => matches(c.label, typed)).slice(0, 6);
 		if (found) {
 			const songs = found.rows.slice(0, 6);
@@ -171,6 +181,7 @@
 
 	onMount(() => {
 		input?.focus();
+		void folders.init();
 		core.windowInfo().then(
 			(w) => (canMini = w.mini),
 			() => {}
@@ -212,6 +223,7 @@
 			<li id="pal-{i}" data-i={i} role="option" aria-selected={i === active} class="pal-o" class:on={i === active} onmousemove={() => (active = i)} onclick={() => choose(c)}>
 				<Icon name={c.icon} />
 				<span class="pal-t"><b dir="auto">{c.label}</b>{#if c.sub}<i dir="auto">{c.sub}</i>{/if}</span>
+				{#if c.keys}<span class="pal-k" aria-label="Keys: {c.keys.join(' ')}">{#each c.keys as k, j (j)}<kbd class="kbd">{k}</kbd>{/each}</span>{/if}
 			</li>
 		{/each}
 		{#if q.trim() && !choices.length}<li class="pal-none" role="presentation">Nothing for “{q.trim()}”.</li>{/if}
@@ -235,6 +247,7 @@
 	.pal-t b { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font: 500 14px/1.35 var(--font-body); }
 	.pal-t i { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--wp-text-2); font: 400 13px/1.35 var(--font-body); }
 	.pal-none { padding: 14px 10px; color: var(--wp-text-2); font: 400 14px/1.4 var(--font-body); }
+	.pal-k { display: inline-flex; gap: 3px; margin-left: auto; padding-left: 12px; flex: none; }
 	@media (prefers-reduced-motion: no-preference) { .pal { animation: pal-in 140ms var(--ease-out-expo, ease-out) both; } }
 	@keyframes pal-in { from { opacity: 0; transform: translate(-50%, -6px); } }
 </style>
