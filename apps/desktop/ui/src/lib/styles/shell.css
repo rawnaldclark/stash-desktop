@@ -286,8 +286,8 @@ body.carrying, body.carrying * { cursor: grabbing !important; user-select: none;
 @media (prefers-reduced-motion: no-preference) { .wsh + .wsh { animation: wash-in var(--dur-colour) var(--ease-standard) both; } }
 @keyframes wash-in { from { opacity: 0; } }
 @container wp (max-width: 1099.98px) { .wash { height: 300px; } }
-.views { position: relative; padding: 24px 24px calc(var(--bar-clear) + 24px); --wp-text-2: var(--wp-text-2w); }
-@container wp (max-width: 1099.98px) { .views { padding: 20px 20px calc(var(--bar-clear) + 24px); } }
+.views { position: relative; padding: 24px 24px calc(var(--bar-clear) + var(--pick-clear, 0px) + 24px); --wp-text-2: var(--wp-text-2w); }
+@container wp (max-width: 1099.98px) { .views { padding: 20px 20px calc(var(--bar-clear) + var(--pick-clear, 0px) + 24px); } }
 .view-in { animation: view-in 220ms var(--ease-out-expo) both; }
 @keyframes view-in { from { opacity: .02; transform: translateY(8px); } }
 @media (prefers-reduced-motion: reduce) { .view-in { animation: none; } }

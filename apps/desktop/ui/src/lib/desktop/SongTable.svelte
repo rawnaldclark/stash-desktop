@@ -382,7 +382,8 @@
 	.tb-hc.on { color: var(--wp-text); }
 	.tb-hc :global(svg) { width: 14px; height: 14px; flex: none; transition: rotate 120ms; }
 	.tb-hc :global(.tb-dn) { rotate: 180deg; }
-	.tb-r { height: 36px; border-radius: 6px; cursor: default; user-select: none; scroll-margin: 40px 0 8px; }
+	/* Moved to with the keys: below the sticky headings, above the player bar and the bar of picked songs. */
+	.tb-r { height: 36px; border-radius: 6px; cursor: default; user-select: none; scroll-margin: 40px 0 calc(var(--bar-clear, 0px) + var(--pick-clear, 0px) + 12px); }
 	.tb:focus { outline: none; }
 	.tb:focus .tb-r.kb { box-shadow: inset 0 0 0 2px var(--acc); }
 	.tb-c { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--wp-text-2); }
