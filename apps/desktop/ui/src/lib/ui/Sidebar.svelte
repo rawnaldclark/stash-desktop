@@ -16,6 +16,7 @@
 	import { isCollection } from '../desktop/library-sections';
 	import { NF } from '../desktop/unfound.svelte';
 	import { T } from '../desktop/youtube.svelte';
+	import NavTile from './NavTile.svelte';
 
 	// As Stash for Android's tab bar has them (Sync is the phone's own).
 	const nav: [string, string, NavIconName][] = [
@@ -55,33 +56,19 @@
 			<a class="nav-i" class:on={here(href)} {href} title={name} aria-current={here(href) ? 'page' : undefined}><NavIcon name={icon} /><span>{name}</span></a>
 		{/each}
 	</nav>
+	<!-- The library's own pages (Library's chips are the ways to look through everything), as Namida's tiles. -->
+	<nav class="sb-tiles" aria-label="Your library's pages">
+		<NavTile href="/library?tab=history" icon="history" label="History" on={onTab('history')} />
+		{#if !ui.local}<NavTile href="/library?tab=downloads" icon="download" label="Downloads" on={onTab('downloads')} />{/if}
+		<NavTile href="/stats" icon="leaderboard" label="Statistics" on={page.url.pathname === '/stats'} />
+		{#if !ui.local && (NF.open > 0 || onTab('notfound'))}<NavTile href="/library?tab=notfound" icon="search" label="Not found" count={NF.open} on={onTab('notfound')} />{/if}
+		{#if !ui.local && ((T.on && T.signedIn) || onTab('youtube'))}<NavTile href="/library?tab=youtube" icon="library_music" label="YouTube Music" on={onTab('youtube')} />{/if}
+	</nav>
 	<div class="sb-sec" data-drop-folder=""><span class="caps">Your library</span><button type="button" class="sb-new" aria-label="New playlist or folder" title="New playlist or folder" aria-haspopup="menu" onclick={(e) => newMenu(under(e.currentTarget))}><Icon name="add" /></button></div>
 	<nav class="sb-list" aria-label="Playlists">
 		<a class="sb-rec" class:on={onTab('likes')} href="/library?tab=likes" title="Liked songs">
 			<Tile liked /><span class="sb-t"><b>Liked songs</b><i>{#if L.likedKept}<Icon name="download" class="kept-mk" label="On this computer" />{/if}{songs(L.likes.length)}</i></span>
 		</a>
-		<!-- The collections, each a page of its own (Library's chips are the ways to look through everything). -->
-		<a class="sb-rec" class:on={onTab('history')} href="/library?tab=history" title="History">
-			<span class="tile fold-tile"><Icon name="history" /></span><span class="sb-t"><b>History</b><i>What you played</i></span>
-		</a>
-		{#if !ui.local}
-			<a class="sb-rec" class:on={onTab('downloads')} href="/library?tab=downloads" title="Downloads">
-				<span class="tile fold-tile"><Icon name="download" /></span><span class="sb-t"><b>Downloads</b><i>Saved for offline</i></span>
-			</a>
-		{/if}
-		<a class="sb-rec" class:on={page.url.pathname === '/stats'} href="/stats" title="Statistics">
-			<span class="tile fold-tile"><Icon name="leaderboard" /></span><span class="sb-t"><b>Statistics</b><i>Your numbers</i></span>
-		</a>
-		{#if !ui.local && (NF.open > 0 || onTab('notfound'))}
-			<a class="sb-rec" class:on={onTab('notfound')} href="/library?tab=notfound" title="Not found">
-				<span class="tile fold-tile"><Icon name="search" /></span><span class="sb-t"><b>Not found</b><i>{NF.open > 0 ? `${songs(NF.open)} to find` : 'Nothing to find'}</i></span>
-			</a>
-		{/if}
-		{#if !ui.local && ((T.on && T.signedIn) || onTab('youtube'))}
-			<a class="sb-rec" class:on={onTab('youtube')} href="/library?tab=youtube" title="YouTube Music">
-				<span class="tile fold-tile"><Icon name="library_music" /></span><span class="sb-t"><b>YouTube Music</b><i>Your library there</i></span>
-			</a>
-		{/if}
 		{#each L.folders as f (f.id)}
 			{@const its = inside(f.id)}
 			<div class="sb-folder" data-drop-folder={f.id}>

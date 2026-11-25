@@ -55,6 +55,10 @@
 .nav-i.on .ni { color: var(--acc-text); }
 @media (prefers-reduced-motion: reduce) { .nav-i::before, .nav-i .ni, .nav-i span { transition: none !important; } }
 .caps { font: 600 11px/1.4 var(--font-body); letter-spacing: .08em; text-transform: uppercase; color: var(--wp-text-2); }
+/* The library's own pages as Namida's drawer tiles (NavTile.svelte): 6px apart, as Namida stacks them. */
+.sb-tiles { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin-top: 14px; flex: none; }
+.wp-g.rail .sb-tiles { justify-items: center; align-self: stretch; }
+@container wp (max-width: 1099.98px) { .sb-tiles { justify-items: center; align-self: stretch; } }
 .sb-sec { display: flex; align-items: center; justify-content: space-between; margin-top: 20px; padding: 0 4px 8px; flex: none; }
 .sb-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; align-content: start; }
 .sb-rec { display: flex; align-items: center; gap: 10px; height: 52px; padding: 6px; border-radius: 8px; transition: background-color 150ms var(--ease-standard); }

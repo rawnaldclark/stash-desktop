@@ -89,6 +89,8 @@ export interface PlayerAPI {
 	playItems(items: LibraryItem[], startIndex?: number, opts?: PlayOptions): Promise<void>;
 	/** Replaces the queue with the whole library in title order and plays from row `offset` (the list is too long to hand over song by song). */
 	playLibrary(offset: number, opts?: PlayOptions): Promise<void>;
+	/** Replaces the queue with these rows of the library, in this order, and plays from `startIndex` (Statistics' lists). */
+	playRows(ids: number[], startIndex?: number, opts?: PlayOptions): Promise<void>;
 	play(): void;
 	pause(): void;
 	toggle(): void;

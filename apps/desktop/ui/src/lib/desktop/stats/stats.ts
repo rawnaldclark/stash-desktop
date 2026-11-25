@@ -50,6 +50,20 @@ export function hours(ms: number): string {
 	return `${h.toLocaleString()} ${h === 1 ? 'hour' : 'hours'}`;
 }
 
+/** Whole hours as a big number shows them, its word beside it ("hours of music"): "27", "1,204", "<1" (some, under an
+ * hour), "0" (none). */
+export function wholeHours(ms: number): string {
+	if (ms <= 0) return '0';
+	const h = Math.round(ms / 3_600_000);
+	return h < 1 ? '<1' : h.toLocaleString();
+}
+
+/** The months from the first one with plays on: the ones before it are from before any listening here. */
+export function fromFirstPlay<T extends { plays: number }>(months: T[]): T[] {
+	const first = months.findIndex((m) => m.plays > 0);
+	return first < 0 ? [] : months.slice(first);
+}
+
 const count = (n: number, one: string, many: string) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
 export const songsWord = (n: number) => count(n, 'song', 'songs');
 export const playsWord = (n: number) => count(n, 'play', 'plays');
