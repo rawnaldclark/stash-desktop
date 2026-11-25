@@ -75,8 +75,9 @@
 	.ks-top h2 { margin: 0; font: 600 16px/1.2 var(--font-display); color: var(--wp-text); }
 	.ks-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 8px 28px; padding: 10px 18px 6px; overflow-y: auto; }
 	.ks-g h3 { margin: 12px 0 6px; }
-	.ks-g dl { margin: 0; }
-	.ks-r { display: grid; grid-template-columns: minmax(150px, auto) minmax(0, 1fr); align-items: center; gap: 14px; min-height: 34px; padding: 3px 0; border-bottom: 1px solid var(--wp-line); }
+	/* One column of keys per group, so what they do lines up under each other. */
+	.ks-g dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: 16px; margin: 0; }
+	.ks-r { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: center; min-height: 34px; padding: 3px 0; border-bottom: 1px solid var(--wp-line); }
 	.ks-r:last-child { border-bottom: 0; }
 	.ks-r dt { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
 	.ks-r dd { margin: 0; color: var(--wp-text-2); font: 400 13.5px/1.35 var(--font-body); }

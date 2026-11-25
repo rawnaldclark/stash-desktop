@@ -59,13 +59,19 @@ export const KEY_GROUPS: KeyGroup[] = [
 		]
 	},
 	{
-		title: 'In a list of songs',
+		title: 'In Library › Songs',
 		rows: [
-			{ keys: [['↑'], ['↓']], does: 'Move up or down (Library › Songs)' },
+			{ keys: [['↑'], ['↓']], does: 'Move through the songs' },
 			{ keys: [['Shift', '↑'], ['Shift', '↓']], does: 'Pick the songs on the way' },
-			{ keys: [['Page Up'], ['Page Down'], ['Home'], ['End']], does: 'Move a screen, or to the top or the end' },
-			{ keys: [['Enter']], does: 'Play from the song' },
-			{ keys: [['Ctrl', 'A']], does: 'Pick every song in the list' },
+			{ keys: [['Page Up'], ['Page Down']], does: 'A screen up or down' },
+			{ keys: [['Home'], ['End']], does: 'To the top or the end' },
+			{ keys: [['Enter']], does: 'Play from the song' }
+		]
+	},
+	{
+		title: 'In any list of songs',
+		rows: [
+			{ keys: [['Ctrl', 'A']], does: 'Pick every song' },
 			{ keys: [['Shift', 'F10']], does: 'The song’s menu' },
 			{ keys: [['Delete']], does: 'Delete the songs picked' },
 			{ keys: [['Esc']], does: 'Let the picked songs go' }

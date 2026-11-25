@@ -66,11 +66,11 @@
 		</a>
 		{#if !ui.local}
 			<a class="sb-rec" class:on={onTab('downloads')} href="/library?tab=downloads" title="Downloads">
-				<span class="tile fold-tile"><Icon name="download" /></span><span class="sb-t"><b>Downloads</b><i>Saved to this computer</i></span>
+				<span class="tile fold-tile"><Icon name="download" /></span><span class="sb-t"><b>Downloads</b><i>Saved for offline</i></span>
 			</a>
 		{/if}
 		<a class="sb-rec" class:on={page.url.pathname === '/stats'} href="/stats" title="Statistics">
-			<span class="tile fold-tile"><Icon name="leaderboard" /></span><span class="sb-t"><b>Statistics</b><i>Your library in numbers</i></span>
+			<span class="tile fold-tile"><Icon name="leaderboard" /></span><span class="sb-t"><b>Statistics</b><i>Your numbers</i></span>
 		</a>
 		{#if !ui.local && (NF.open > 0 || onTab('notfound'))}
 			<a class="sb-rec" class:on={onTab('notfound')} href="/library?tab=notfound" title="Not found">

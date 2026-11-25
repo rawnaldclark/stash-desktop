@@ -145,6 +145,7 @@
 		untrack(() => {
 			P.clear();
 			at = null;
+			moved++;
 			list?.refresh();
 		});
 	});
@@ -158,6 +159,7 @@
 		}
 	}
 	function rowClick(e: MouseEvent, r: core.TableRow, i: number) {
+		moved++;
 		at = i;
 		table?.focus({ preventScroll: true });
 		const item = itemOf(r);
@@ -197,6 +199,13 @@
 	/** The song the keyboard is on, by its place; null until a key or a click puts it somewhere. */
 	let at = $state<number | null>(null);
 	let table = $state<HTMLElement>();
+	/**
+	 * What the keys pick is applied in the order they came, each after the one before (a song may have to be read from
+	 * the core first): held down, Shift+Down still picks from where the plain Down keys left off. A click or another list
+	 * (`moved`) drops the picks still waiting.
+	 */
+	let picks: Promise<void> = Promise.resolve();
+	let moved = 0;
 	// Ctrl+A with the table focused picks all of it, as it does on a row of any other list.
 	$effect(() => {
 		if (table) rowLists.set(table, pick);
@@ -247,14 +256,19 @@
 		if (to === null) return;
 		e.preventDefault();
 		at = to;
-		if (e.shiftKey) void P.range(pick, to, false);
-		else {
-			const [item] = await pick.between(to, to);
-			if (item && at === to) {
-				P.clear();
-				P.toggle(pick, to, item);
-			}
-		}
+		const add = e.shiftKey;
+		const when = moved;
+		picks = picks
+			.then(async () => {
+				if (when !== moved) return;
+				if (add) return P.range(pick, to, false);
+				const [item] = await pick.between(to, to);
+				if (item && when === moved) {
+					P.clear();
+					P.toggle(pick, to, item);
+				}
+			})
+			.catch(() => {});
 		await reveal(to);
 	}
 
