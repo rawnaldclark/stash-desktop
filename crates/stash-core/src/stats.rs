@@ -4,7 +4,7 @@
 use serde::Serialize;
 
 use crate::Result;
-use crate::library::Library;
+use crate::library::{Library, art};
 
 /// A song that is a file here.
 const HERE: &str = "t.origin = 'file' AND t.locator != '' AND t.missing_since IS NULL";
@@ -12,6 +12,11 @@ const HERE: &str = "t.origin = 'file' AND t.locator != '' AND t.missing_since IS
 const LOSSLESS: &str = "LOWER(COALESCE(t.codec, '')) IN ('flac', 'alac', 'wav', 'pcm', 'aiff', 'ape', 'wavpack', 'wv', 'tta')";
 /// Lossless and past CD quality.
 const HI_RES: &str = "(COALESCE(t.bit_depth, 0) > 16 OR COALESCE(t.sample_rate, 0) > 48000)";
+/// A song's art, as every list of songs shows it.
+const SONG_ART: &str = art!();
+/// An artist's picture as the Artists tab shows it (the art of one of their songs, a source's first), for the artist
+/// row `x` of the query it is in.
+const ARTIST_ART: &str = concat!("(SELECT ", art!(), " FROM tracks t WHERE t.artist_id = x.id AND ", art!(), " IS NOT NULL ORDER BY t.art_url IS NULL LIMIT 1)");
 
 /// One row of a ranked or ordered list: what it is, how many, and (for formats) how much room it takes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -26,6 +31,32 @@ pub struct Bar {
     /// A second line: a song's artist.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Its picture, where it has one: a song's cover, an artist's picture (`art` as every list has it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub art: Option<String>,
+}
+
+/// One month of listening: how many plays, and the song played most in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Month {
+    /// "2026-11".
+    pub month: String,
+    pub plays: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top: Option<MonthTop>,
+}
+
+/// The song played most in a month (the one played last, between equals).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MonthTop {
+    /// Its row of the library.
+    pub id: i64,
+    pub title: String,
+    pub artist: String,
+    /// Its plays that month.
+    pub plays: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub art: Option<String>,
 }
 
 /// How many of the files have a tag.
@@ -67,8 +98,8 @@ pub struct LibraryStats {
     pub artists_by_songs: Vec<Bar>,
     pub artists_by_plays: Vec<Bar>,
     pub most_played: Vec<Bar>,
-    /// The last twelve months, oldest first, as "2026-11".
-    pub months: Vec<Bar>,
+    /// The last twelve months, oldest first.
+    pub months: Vec<Month>,
     pub tags: Vec<Share>,
 }
 
@@ -131,7 +162,9 @@ impl Library {
                         Some((title, artist)) => (title.to_string(), Some(artist.to_string())),
                         None => (label, None),
                     };
-                    Ok(Bar { label, value: n(r.get(1)?), bytes: r.get::<_, Option<i64>>(2)?.map(n), key: r.get(3)?, detail })
+                    // A fifth column, where a list has one, is the row's picture.
+                    let art = if r.as_ref().column_count() > 4 { r.get(4)? } else { None };
+                    Ok(Bar { label, value: n(r.get(1)?), bytes: r.get::<_, Option<i64>>(2)?.map(n), key: r.get(3)?, detail, art })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(rows)
@@ -159,9 +192,9 @@ impl Library {
                 |r| Ok((n(r.get(0)?), n(r.get(1)?), n(r.get(2)?))),
             )?;
             vec![
-                Bar { label: "Hi-res lossless".into(), value: hi, bytes: None, key: None, detail: None },
-                Bar { label: "CD-quality lossless".into(), value: cd, bytes: None, key: None, detail: None },
-                Bar { label: "Lossy".into(), value: lossy, bytes: None, key: None, detail: None },
+                Bar { label: "Hi-res lossless".into(), value: hi, bytes: None, key: None, detail: None, art: None },
+                Bar { label: "CD-quality lossless".into(), value: cd, bytes: None, key: None, detail: None, art: None },
+                Bar { label: "Lossy".into(), value: lossy, bytes: None, key: None, detail: None, art: None },
             ]
         };
 
@@ -189,35 +222,66 @@ impl Library {
         )?;
         let shown: u64 = genres.iter().map(|g| g.value).sum();
         if n(tagged) > shown {
-            genres.push(Bar { label: "Other genres".into(), value: n(tagged) - shown, bytes: None, key: None, detail: None });
+            genres.push(Bar { label: "Other genres".into(), value: n(tagged) - shown, bytes: None, key: None, detail: None, art: None });
         }
 
+        // The artists' pictures are looked up for the rows shown only (`x`, the top ones).
         let artists_by_songs = bars(
             &format!(
-                "SELECT a.name, COUNT(*) AS n, NULL, CAST(a.id AS TEXT) FROM tracks t JOIN artists a ON a.id = t.artist_id
-                 WHERE {HERE} GROUP BY a.id ORDER BY n DESC, a.sort_key LIMIT ?1"
+                "SELECT x.name, x.n, NULL, CAST(x.id AS TEXT), {ARTIST_ART}
+                 FROM (SELECT a.id, a.name, a.sort_key, COUNT(*) AS n FROM tracks t JOIN artists a ON a.id = t.artist_id
+                       WHERE {HERE} GROUP BY a.id ORDER BY n DESC, a.sort_key LIMIT ?1) x
+                 ORDER BY x.n DESC, x.sort_key"
             ),
             top,
         )?;
         let artists_by_plays = bars(
-            "SELECT a.name, COUNT(*) AS n, NULL, CAST(a.id AS TEXT) FROM plays p JOIN tracks t ON t.id = p.track_id
-             JOIN artists a ON a.id = t.artist_id GROUP BY a.id ORDER BY n DESC, a.sort_key LIMIT ?1",
+            &format!(
+                "SELECT x.name, x.n, NULL, CAST(x.id AS TEXT), {ARTIST_ART}
+                 FROM (SELECT a.id, a.name, a.sort_key, COUNT(*) AS n FROM plays p JOIN tracks t ON t.id = p.track_id
+                       JOIN artists a ON a.id = t.artist_id GROUP BY a.id ORDER BY n DESC, a.sort_key LIMIT ?1) x
+                 ORDER BY x.n DESC, x.sort_key"
+            ),
             top,
         )?;
         let most_played = bars(
-            "SELECT t.title || char(31) || a.name, COUNT(*) AS n, NULL, CAST(t.id AS TEXT) FROM plays p JOIN tracks t ON t.id = p.track_id
-             JOIN artists a ON a.id = t.artist_id GROUP BY t.id ORDER BY n DESC, t.sort_key LIMIT ?1",
+            &format!(
+                "SELECT t.title || char(31) || a.name, COUNT(*) AS n, NULL, CAST(t.id AS TEXT), {SONG_ART} FROM plays p JOIN tracks t ON t.id = p.track_id
+                 JOIN artists a ON a.id = t.artist_id GROUP BY t.id ORDER BY n DESC, t.sort_key LIMIT ?1"
+            ),
             top,
         )?;
-        let months = bars(
-            "WITH RECURSIVE m(i, month) AS (
-                 SELECT 0, strftime('%Y-%m', 'now', 'localtime', 'start of month')
-                 UNION ALL SELECT i + 1, strftime('%Y-%m', 'now', 'localtime', 'start of month', '-' || (i + 1) || ' months') FROM m WHERE i < 11)
-             SELECT m.month, (SELECT COUNT(*) FROM plays p
-                              WHERE strftime('%Y-%m', p.played_at_ms / 1000, 'unixepoch', 'localtime') = m.month), NULL, NULL
-             FROM m WHERE ?1 > 0 ORDER BY m.month",
-            1,
-        )?;
+        // Each of the last twelve months: its plays, and the song played most in it. Plays from a day before the first
+        // month are read too (so no time zone can cut one off) and left out by the months they are not in.
+        let months = self
+            .conn
+            .prepare(&format!(
+                "WITH RECURSIVE m(i, month) AS (
+                     SELECT 0, strftime('%Y-%m', 'now', 'localtime', 'start of month')
+                     UNION ALL SELECT i + 1, strftime('%Y-%m', 'now', 'localtime', 'start of month', '-' || (i + 1) || ' months') FROM m WHERE i < 11),
+                 heard AS (
+                     SELECT strftime('%Y-%m', p.played_at_ms / 1000, 'unixepoch', 'localtime') AS month, p.track_id, COUNT(*) AS n,
+                            MAX(p.played_at_ms) AS last
+                     FROM plays p
+                     WHERE p.played_at_ms >= (CAST(strftime('%s', 'now', 'localtime', 'start of month', '-11 months', 'utc') AS INTEGER) - 86400) * 1000
+                     GROUP BY month, p.track_id),
+                 ranked AS (
+                     SELECT h.month, h.track_id, h.n, SUM(h.n) OVER (PARTITION BY h.month) AS total,
+                            ROW_NUMBER() OVER (PARTITION BY h.month ORDER BY h.n DESC, h.last DESC) AS place
+                     FROM heard h)
+                 SELECT m.month, COALESCE(r.total, 0), t.id, t.title, a.name, r.n, {SONG_ART}
+                 FROM m LEFT JOIN ranked r ON r.month = m.month AND r.place = 1
+                        LEFT JOIN tracks t ON t.id = r.track_id LEFT JOIN artists a ON a.id = t.artist_id
+                 ORDER BY m.month"
+            ))?
+            .query_map([], |r| {
+                let top = match r.get::<_, Option<i64>>(2)? {
+                    Some(id) => Some(MonthTop { id, title: r.get(3)?, artist: r.get::<_, Option<String>>(4)?.unwrap_or_default(), plays: n(r.get(5)?), art: r.get(6)? }),
+                    None => None,
+                };
+                Ok(Month { month: r.get(0)?, plays: n(r.get(1)?), top })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
         let tags = {
             let (of, album, genre, year, track, cover) = self.conn.query_row(
@@ -288,8 +352,15 @@ mod tests {
         assert_eq!(pairs(&s.artists_by_plays), vec![("Radiohead".into(), 4)]);
         assert_eq!(pairs(&s.most_played), vec![("A".into(), 3), ("B".into(), 1)]);
         assert_eq!(s.most_played[0].detail.as_deref(), Some("Radiohead"));
+        // Songs and artists come with their art (here, a file's own cover).
+        assert_eq!(s.most_played[0].art, Some(format!("/api/art/track/{a}")));
+        assert_eq!(s.artists_by_plays[0].art, Some(format!("/api/art/track/{a}")));
+        assert!(s.artists_by_songs.iter().all(|x| x.art.is_some()));
+        assert!(s.genres.iter().all(|g| g.art.is_none()));
         assert_eq!(s.months.len(), 12);
-        assert!(s.months.windows(2).all(|w| w[0].label < w[1].label));
+        assert!(s.months.windows(2).all(|w| w[0].month < w[1].month));
+        // Those plays were in 1970: in none of the last twelve months.
+        assert!(s.months.iter().all(|m| m.plays == 0 && m.top.is_none()));
         let tags: Vec<_> = s.tags.iter().map(|t| (t.label.as_str(), t.have, t.of)).collect();
         assert_eq!(tags[1], ("Genre", 3, 4));
         assert_eq!(tags[2], ("Year", 3, 4));
@@ -297,6 +368,31 @@ mod tests {
         // With a top of one, the rest of the genres fold into "Other genres".
         let s = library.library_stats(1).unwrap();
         assert_eq!(pairs(&s.genres), vec![("Alternative".into(), 2), ("Other genres".into(), 1)]);
+    }
+
+    #[test]
+    fn each_month_names_the_song_played_most_in_it() {
+        let mut library = Library::open_in_memory().unwrap();
+        let a = file(&mut library, "A", "Radiohead", "flac", 44_100, Some(16), None, None);
+        let b = file(&mut library, "B", "Cher", "flac", 44_100, Some(16), None, None);
+        let now = "CAST(strftime('%s', 'now') AS INTEGER) * 1000";
+        for before in [0, 2000] {
+            library.conn.execute(&format!("INSERT INTO plays(track_id, played_at_ms) VALUES (?1, {now} - ?2)"), [b, before]).unwrap();
+        }
+        library.conn.execute(&format!("INSERT INTO plays(track_id, played_at_ms) VALUES (?1, {now} - 1000)"), [a]).unwrap();
+
+        let s = library.library_stats(10).unwrap();
+        let this = s.months.last().unwrap();
+        assert_eq!(this.plays, 3);
+        let top = this.top.as_ref().unwrap();
+        assert_eq!((top.id, top.title.as_str(), top.artist.as_str(), top.plays), (b, "B", "Cher", 2));
+        assert_eq!(top.art, Some(format!("/api/art/track/{b}")));
+        assert!(s.months[..11].iter().all(|m| m.plays == 0 && m.top.is_none()));
+
+        // Between songs played as often, the one played last.
+        library.conn.execute(&format!("INSERT INTO plays(track_id, played_at_ms) VALUES (?1, {now} + 1000)"), [a]).unwrap();
+        let s = library.library_stats(10).unwrap();
+        assert_eq!(s.months.last().unwrap().top.as_ref().map(|t| t.id), Some(a));
     }
 
     #[test]
