@@ -27,6 +27,34 @@ pub const FOLDER: [&str; 2] = ["Download", "Stash transfer"];
 /// The list of what each file is, written last by the phone.
 pub const LIST: &str = "stash-transfer.json";
 
+/// A file that sends nothing for this long is taken as stuck, and its read is called off. A phone's File transfer was
+/// seen to stop mid-file every hundred or so songs and never start again by itself, until it was unplugged.
+pub const STALL: std::time::Duration = std::time::Duration::from_secs(20);
+/// What a read called off for sending nothing says: the caller opens the phone again rather than give up on the song.
+pub const STALLED: &str = "the phone stopped sending mid-song";
+
+/// What a read tells as it goes: how much of the file has come so far, and (once) that the file has sent nothing for
+/// `stall_after`, when its read is called off. `stalled` is told from another thread.
+pub struct Watch<'a> {
+    pub stall_after: std::time::Duration,
+    pub progress: &'a (dyn Fn(u64) + Sync),
+    pub stalled: &'a (dyn Fn() + Sync),
+}
+
+fn no_progress(_: u64) {}
+fn no_stall() {}
+
+impl Watch<'static> {
+    /// Telling no one, called off after the usual [`STALL`].
+    pub fn quiet() -> Self {
+        Watch {
+            stall_after: STALL,
+            progress: &no_progress,
+            stalled: &no_stall,
+        }
+    }
+}
+
 #[cfg(windows)]
 pub use imp::{Transfer, open_transfer, phones};
 
@@ -39,23 +67,34 @@ pub fn phones() -> Result<Vec<Phone>, String> {
 mod imp {
     use std::io::Write;
     use std::path::Path;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::mpsc::{RecvTimeoutError, channel};
+    use std::time::{Duration, Instant};
 
     use windows::Win32::Devices::PortableDevices::*;
     use windows::Win32::Foundation::PROPERTYKEY;
     use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
     use windows::Win32::System::Com::{
         CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
-        CoTaskMemFree, IStream, STGM_READ,
+        CoTaskMemFree, CoUninitialize, IStream, STGM_READ,
     };
     use windows::Win32::System::Variant::VT_LPWSTR;
-    use windows::core::{HSTRING, PCWSTR, PWSTR};
+    use windows::core::{HSTRING, Interface, PCWSTR, PWSTR};
 
-    use super::{FOLDER, Phone, PhoneFile};
+    use super::{FOLDER, Phone, PhoneFile, STALLED, Watch};
 
     fn com() {
         // Already initialised on this thread (in either mode) is fine.
         let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     }
+
+    /// A COM object handed to the thread that watches a read. Sound because every thread here is in the
+    /// multithreaded apartment and the phone is opened free-threaded (`PortableDeviceFTM`), so its objects may be
+    /// called from any of them; the watcher only ever calls `Cancel`.
+    struct Agile<T>(T);
+    unsafe impl<T> Send for Agile<T> {}
+    unsafe impl<T> Sync for Agile<T> {}
 
     fn said(e: windows::core::Error) -> String {
         format!("the phone did not answer ({:#x})", e.code().0)
@@ -238,7 +277,7 @@ mod imp {
         /// The whole of a small file (the list).
         pub fn bytes(&self, file: &PhoneFile, cap: u64) -> Result<Vec<u8>, String> {
             let mut out = Vec::new();
-            self.each_block(file, &mut |block| {
+            self.each_block(file, &Watch::quiet(), &mut |block| {
                 if out.len() as u64 + block.len() as u64 > cap {
                     return Err("the list is too big".into());
                 }
@@ -248,32 +287,16 @@ mod imp {
             Ok(out)
         }
 
-        /// The first `n` bytes of `file` (fewer when it is shorter): what kind of file it is.
-        pub fn head(&self, file: &PhoneFile, n: usize) -> Result<Vec<u8>, String> {
-            const ENOUGH: &str = "\0enough";
-            let mut out = Vec::new();
-            let read = self.each_block(file, &mut |block| {
-                out.extend_from_slice(&block[..block.len().min(n - out.len())]);
-                if out.len() >= n {
-                    Err(ENOUGH.into())
-                } else {
-                    Ok(())
-                }
-            });
-            match read {
-                Ok(()) => Ok(out),
-                Err(e) if e == ENOUGH => Ok(out),
-                Err(e) => Err(e),
-            }
-        }
-
-        /// Copies `file` to `to` (a new file); how many bytes. Nothing is left at `to` when it fails.
-        pub fn copy(&self, file: &PhoneFile, to: &Path) -> Result<u64, String> {
+        /// Copies `file` to `to` (a new file), telling `watch` how much has come; how many bytes. Nothing is left at
+        /// `to` when it fails; one called off for sending nothing fails with [`STALLED`].
+        pub fn copy(&self, file: &PhoneFile, to: &Path, watch: &Watch) -> Result<u64, String> {
             let mut out = std::fs::File::create(to).map_err(|e| e.to_string())?;
             let mut n = 0u64;
-            let done = self.each_block(file, &mut |block| {
+            let done = self.each_block(file, watch, &mut |block| {
                 n += block.len() as u64;
-                out.write_all(block).map_err(|e| e.to_string())
+                out.write_all(block).map_err(|e| e.to_string())?;
+                (watch.progress)(n);
+                Ok(())
             });
             if let Err(e) = done.and_then(|_| out.flush().map_err(|e| e.to_string())) {
                 drop(out);
@@ -283,43 +306,96 @@ mod imp {
             Ok(n)
         }
 
+        /// Reads `file` to its end, a block at a time, into `take`. Another thread watches: when nothing has come for
+        /// `watch.stall_after` (the phone stuck mid-file, which it does not get over by itself), it tells
+        /// `watch.stalled` and calls the read off (the stream's and the transfer's `Cancel`), which then fails with
+        /// [`STALLED`]. Should the read not end even so, `stalled` has been told, so the listener can be asked to
+        /// turn File transfer off and on, which ends it.
         fn each_block(
             &self,
             file: &PhoneFile,
+            watch: &Watch,
             take: &mut dyn FnMut(&[u8]) -> Result<(), String>,
         ) -> Result<(), String> {
-            unsafe {
-                let resources = self.content.Transfer().map_err(said)?;
-                let wide = HSTRING::from(file.object.as_str());
-                let mut optimal = 0u32;
-                let mut stream: Option<IStream> = None;
-                resources
-                    .GetStream(
-                        PCWSTR(wide.as_ptr()),
-                        &WPD_RESOURCE_DEFAULT,
-                        STGM_READ.0,
-                        &mut optimal,
-                        &mut stream,
-                    )
-                    .map_err(said)?;
-                let stream = stream.ok_or_else(|| "the phone gave no file".to_string())?;
-                let mut buf = vec![0u8; (optimal as usize).clamp(64 * 1024, 4 * 1024 * 1024)];
-                loop {
-                    let mut read = 0u32;
-                    let hr = stream.Read(
-                        buf.as_mut_ptr() as *mut _,
-                        buf.len() as u32,
-                        Some(&mut read),
-                    );
-                    if hr.is_err() {
-                        return Err(format!("the phone stopped sending ({:#x})", hr.0));
+            let started = Instant::now();
+            let since = || started.elapsed().as_millis() as u64;
+            // When something last came (ms after `started`); the file's stream, once open; whether it was called off.
+            let heard = AtomicU64::new(0);
+            let open: Mutex<Option<Agile<IPortableDeviceDataStream>>> = Mutex::new(None);
+            let called_off = AtomicBool::new(false);
+            let resources = unsafe { self.content.Transfer() }.map_err(said)?;
+            let asked = Agile(resources.clone());
+            let (finished, wait) = channel::<()>();
+            std::thread::scope(|scope| {
+                let (heard, open, called_off, asked) = (&heard, &open, &called_off, &asked);
+                let quiet_for = watch.stall_after.as_millis() as u64;
+                scope.spawn(move || {
+                    let inited = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+                    // Ends as soon as the read does (its sender dropped), or once it has called the read off.
+                    while let Err(RecvTimeoutError::Timeout) =
+                        wait.recv_timeout(Duration::from_millis(250))
+                    {
+                        if since().saturating_sub(heard.load(Ordering::Relaxed)) >= quiet_for {
+                            called_off.store(true, Ordering::SeqCst);
+                            (watch.stalled)();
+                            if let Some(stream) = open.lock().unwrap().as_ref() {
+                                let _ = unsafe { stream.0.Cancel() };
+                            }
+                            let _ = unsafe { asked.0.Cancel() };
+                            break;
+                        }
                     }
-                    if read == 0 {
-                        return Ok(());
+                    if inited {
+                        unsafe { CoUninitialize() };
                     }
-                    take(&buf[..read as usize])?;
-                }
-            }
+                });
+                let read = (|| {
+                    let wide = HSTRING::from(file.object.as_str());
+                    let mut optimal = 0u32;
+                    let mut stream: Option<IStream> = None;
+                    let got = unsafe {
+                        resources.GetStream(
+                            PCWSTR(wide.as_ptr()),
+                            &WPD_RESOURCE_DEFAULT,
+                            STGM_READ.0,
+                            &mut optimal,
+                            &mut stream,
+                        )
+                    };
+                    if called_off.load(Ordering::SeqCst) {
+                        return Err(STALLED.to_string());
+                    }
+                    got.map_err(said)?;
+                    let stream = stream.ok_or_else(|| "the phone gave no file".to_string())?;
+                    *open.lock().unwrap() = stream.cast::<IPortableDeviceDataStream>().ok().map(Agile);
+                    let mut buf = vec![0u8; (optimal as usize).clamp(64 * 1024, 4 * 1024 * 1024)];
+                    loop {
+                        let mut read = 0u32;
+                        let hr = unsafe {
+                            stream.Read(
+                                buf.as_mut_ptr() as *mut _,
+                                buf.len() as u32,
+                                Some(&mut read),
+                            )
+                        };
+                        if called_off.load(Ordering::SeqCst) {
+                            return Err(STALLED.to_string());
+                        }
+                        if hr.is_err() {
+                            return Err(format!("the phone stopped sending ({:#x})", hr.0));
+                        }
+                        if read == 0 {
+                            return Ok(());
+                        }
+                        heard.store(since(), Ordering::Relaxed);
+                        take(&buf[..read as usize])?;
+                        // Writing the block here is not the phone's silence.
+                        heard.store(since(), Ordering::Relaxed);
+                    }
+                })();
+                drop(finished);
+                read
+            })
         }
 
         /// Deletes the transfer folder and everything in it from the phone.

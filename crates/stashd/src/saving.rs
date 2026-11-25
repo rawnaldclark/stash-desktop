@@ -25,7 +25,7 @@ use tiny_http::{Method, Request};
 use crate::serve::{Reply, State, body_json, now_ms, refuse, reply_json, through_addons};
 
 /// The setting that names the downloads folder.
-const FOLDER: &str = "downloads.folder";
+pub(crate) const FOLDER: &str = "downloads.folder";
 /// How often the one coming in checks it is still wanted.
 const LOOK_EVERY: Duration = Duration::from_millis(500);
 /// How often, with nothing to save, the lists kept on this computer are looked at for songs that came onto them (a

@@ -1194,6 +1194,11 @@ impl State {
         self.saving.ring();
     }
 
+    /// The folder the library is in, where the core's own notes (a phone transfer's log) go too.
+    pub(crate) fn data_dir(&self) -> Option<&Path> {
+        self.options.db.parent()
+    }
+
     /// Starts reading `folders` into the library on a thread of its own, through a connection of its own, so the
     /// window goes on answering. False when a scan is running already.
     fn scan(&self, folders: Vec<String>) -> bool {
