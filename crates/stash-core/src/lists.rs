@@ -2486,6 +2486,15 @@ mod tests {
         assert!(!library.wants_file(ids[1]).unwrap());
         assert!(!library.download_arriving(ids[1], 7).unwrap());
         assert_eq!(state(&library, ids[1]), None);
+        // Which of a phone's songs are here already, found as adopting them would find them, changing nothing: the
+        // saved one and the file are; the one coming in and one the library has never met are not.
+        let asked = [song("Alpha"), song("Bravo"), song("Charlie"), song("Delta")];
+        let tracks = |library: &Library| -> i64 {
+            library.conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0)).unwrap()
+        };
+        let before = tracks(&library);
+        assert_eq!(library.songs_here(&asked).unwrap(), vec![true, true, false, false]);
+        assert_eq!(tracks(&library), before, "asking added no song");
     }
 
     #[test]

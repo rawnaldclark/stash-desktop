@@ -395,6 +395,21 @@ impl Merger<'_> {
 }
 
 impl Library {
+    /// For each of `songs`, whether the library has it as a file already: the row [`Self::adopt_songs`] would find
+    /// for it (by ISRC, then by its words), when that row is a file or saved as one. Changes nothing.
+    pub fn songs_here(&self, songs: &[Song]) -> crate::Result<Vec<bool>> {
+        songs
+            .iter()
+            .map(|song| {
+                let words = words_key(&song.title, &song.artist);
+                match same_song(&self.conn, &words, song.isrc.as_deref())? {
+                    Some(id) => Ok(!self.wants_file(id)?),
+                    None => Ok(false),
+                }
+            })
+            .collect()
+    }
+
     /// The library's rows for `songs`, in their order: for each the row the library has for that song, or a new one
     /// known by its description.
     pub fn adopt_songs(&mut self, songs: &[Song]) -> crate::Result<Vec<i64>> {
