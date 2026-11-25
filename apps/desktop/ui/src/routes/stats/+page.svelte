@@ -13,7 +13,7 @@
 	import StoryCard from '../../lib/desktop/stats/StoryCard.svelte';
 	import TopList, { type TopEntry } from '../../lib/desktop/stats/TopList.svelte';
 	import { diskSize } from '../../lib/desktop/local-home';
-	import { fromFirstPlay, percent, playsWord, rowHref, songsWord, wholeHours } from '../../lib/desktop/stats/stats';
+	import { fromFirstPlay, percent, rowHref, songsWord, wholeHours } from '../../lib/desktop/stats/stats';
 	import { folders } from '../../lib/desktop/folders.svelte';
 	import Icon from '../../lib/ui/Icon.svelte';
 
@@ -69,7 +69,7 @@
 	const topArtists = $derived<TopEntry[]>((s?.artists_by_plays ?? []).map((a) => ({ label: a.label, value: a.value, art: a.art, href: rowHref('artists', a) })));
 	const playTop = (i: number) => void player.playRows(songsPlayed.map((m) => Number(m.key)), i, { from: 'Most played' });
 	const months = $derived(fromFirstPlay(s?.months ?? []));
-	const yearPlays = $derived(months.reduce((sum, m) => sum + m.plays, 0));
+	const yearSongs = $derived(months.filter((m) => m.top).length);
 
 	const formatRows = $derived((s?.formats ?? []).map((f) => ({ label: f.label, value: f.value, figure: `${songsWord(f.value)} · ${diskSize(f.bytes ?? 0)}` })));
 	const genreRows = $derived(
@@ -123,13 +123,11 @@
 						<TopList entries={topArtists} round unit={['play', 'plays']} />
 					</StoryCard>
 				{/if}
-				<StoryCard title="Month by month" sub="{playsWord(yearPlays)} in the last twelve months, and the song you played most in each." wide>
-					{#if months.length}
+				{#if yearSongs}
+					<StoryCard title="Your year in {songsWord(yearSongs)}" sub="The song you played most in each of the last twelve months. Choose one to play it." wide>
 						<MonthGrid {months} onplay={(id) => void player.playRows([id], 0, { from: 'Statistics' })} />
-					{:else}
-						<p class="st-note">No plays in the last twelve months.</p>
-					{/if}
-				</StoryCard>
+					</StoryCard>
+				{/if}
 			{/if}
 
 			{#if t.songs}

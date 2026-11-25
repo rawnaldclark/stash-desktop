@@ -1,14 +1,13 @@
-<!-- The last twelve months of Library › Statistics, modeled on Namida's month cells ("Your year"): each month is the
-     cover of the song played most in it with the month on a chip at its corner (10px corners, the chip 6px), the song's
-     name under it and the month's plays; a thin bar under them compares the month with the busiest one. A month with no
-     plays is an empty tile. Choosing a month plays its song. -->
+<!-- The last twelve months of Library › Statistics, as Namida's month cells ("Your year", _MonthCell): each month is
+     the cover of the song played most in it, the month on a chip at its corner (10px corners, the chip 6px), and under it
+     the song's name and its plays that month. A month with no plays is an empty tile. Choosing a month plays its song;
+     its tooltip also says the month's plays in all. -->
 <script lang="ts">
 	import { artUrl, type StatMonth } from '../../core';
 	import Icon from '../../ui/Icon.svelte';
 	import { monthNames, playsWord } from './stats';
 
 	let { months, onplay }: { months: StatMonth[]; onplay: (id: number) => void } = $props();
-	const busiest = $derived(Math.max(1, ...months.map((m) => m.plays)));
 	const thisYear = new Date().getFullYear();
 	/** "Nov", or "Dec ’25" for a month of another year. */
 	const chip = (month: string) => {
@@ -28,8 +27,8 @@
 					<button
 						type="button"
 						class="mg-c"
-						title="{full}: {playsWord(m.plays)}. Played most: {top.title} by {top.artist} ({playsWord(top.plays)}). Choose to play it."
-						aria-label="{full}: {playsWord(m.plays)}. Play the song played most, {top.title} by {top.artist}"
+						title="{full}: {top.title} by {top.artist}, {playsWord(top.plays)} of the month's {m.plays.toLocaleString()}. Choose to play it."
+						aria-label="{full}: {top.title} by {top.artist}, {playsWord(top.plays)} of the month's {m.plays.toLocaleString()}. Play it"
 						onclick={() => onplay(top.id)}
 					>
 						<span class="mg-pic">
@@ -38,15 +37,13 @@
 							<span class="mg-m">{chip(m.month)}</span>
 						</span>
 						<b>{top.title}</b>
-						<i>{playsWord(m.plays)}</i>
-						<span class="mg-bar" aria-hidden="true"><s style:width="{Math.max(4, (m.plays / busiest) * 100)}%"></s></span>
+						<i>{playsWord(top.plays)}</i>
 					</button>
 				{:else}
 					<div class="mg-c none" role="img" aria-label="{full}: no plays">
 						<span class="mg-pic"><span class="mg-m">{chip(m.month)}</span></span>
 						<b>No plays</b>
 						<i>&nbsp;</i>
-						<span class="mg-bar" aria-hidden="true"></span>
 					</div>
 				{/if}
 			</li>
@@ -68,8 +65,6 @@
 	.mg-c b { font: 600 12.5px/1.3 var(--font-body); }
 	.mg-c i { font: 400 12px/1.3 var(--font-body); color: var(--wp-text-2w); font-variant-numeric: tabular-nums; }
 	.mg-c.none b { color: var(--wp-text-2w); font-weight: 500; }
-	.mg-bar { display: block; height: 3px; margin-top: 4px; border-radius: 2px; background: color-mix(in srgb, var(--acc) 18%, transparent); }
-	.mg-bar s { display: block; height: 100%; border-radius: 2px; background: var(--acc); }
 	@media (hover: hover) and (pointer: fine) { button.mg-c:hover { background: var(--wp-hover); } }
 	button.mg-c:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 </style>
