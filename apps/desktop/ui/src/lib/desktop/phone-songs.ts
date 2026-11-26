@@ -1,7 +1,8 @@
 /**
  * Choosing which of a phone's songs come in (PhoneSongs.svelte, the core's `GET /api/phone/songs`), apart from the screen
- * so it is tested. The filters choose what is shown; what is shown and ticked is taken. A song unticked stays unticked
- * while the filters change.
+ * so it is tested. Nothing is chosen to begin with: songs are ticked one by one, or all those a filter shows at once.
+ * Filters only choose what is shown; they never take a song out of the choice. Songs on this computer already are not
+ * chosen (the phone lets go of its copies of them once the rest are in).
  */
 
 /** One song a phone sent, as the core offers it. */
@@ -80,67 +81,83 @@ export const complete = (s: Pick<Offered, 'title' | 'artist' | 'album' | 'art_ur
 /** Who a song is by, for choosing by artist: its album's artist when the phone says, else its own. */
 export const artistOf = (s: Pick<Offered, 'artist' | 'album_artist'>): string => (s.album_artist?.trim() || s.artist.trim() || 'Unknown artist');
 
+/** The filters, in the order they sit in the row. */
+export type FacetId = 'playlist' | 'artist' | 'album' | 'format' | 'quality' | 'tags';
+
+export const FACETS: { id: FacetId; label: string; many: string; find: string; least: number }[] = [
+	{ id: 'playlist', label: 'Playlist', many: 'playlists', find: 'Find a playlist', least: 1 },
+	{ id: 'artist', label: 'Artist', many: 'artists', find: 'Find an artist', least: 2 },
+	{ id: 'album', label: 'Album', many: 'albums', find: 'Find an album', least: 1 },
+	{ id: 'format', label: 'Format', many: 'formats', find: 'Find a format', least: 2 },
+	{ id: 'quality', label: 'Quality', many: 'qualities', find: 'Find a quality', least: 2 },
+	{ id: 'tags', label: 'Tags', many: 'tags', find: 'Find', least: 2 }
+];
+
+/** The phone's Liked songs, chosen from with its playlists. */
+export const LIKED = 'Liked songs';
+export const COMPLETE_TAGS = 'Complete tags';
+export const MISSING_TAGS = 'Missing tags';
+
+/** What a song is under a filter: its playlists (Liked songs too when liked), artist, "Album · Artist", format, quality or tags. */
+export function keysOf(s: Offered, facet: FacetId): string[] {
+	switch (facet) {
+		case 'playlist':
+			return s.liked ? [LIKED, ...s.playlists] : s.playlists;
+		case 'artist':
+			return [artistOf(s)];
+		case 'album':
+			return s.album?.trim() ? [`${s.album.trim()} · ${artistOf(s)}`] : [];
+		case 'format':
+			return [formatOf(s)];
+		case 'quality':
+			return [QUALITIES.find((q) => q.id === qualityOf(s))!.label];
+		case 'tags':
+			return [complete(s) ? COMPLETE_TAGS : MISSING_TAGS];
+	}
+}
+
 export type Filters = {
 	/** Words in the title, artist or album. */
 	text: string;
-	/** Only songs not on this computer yet. */
-	newOnly: boolean;
-	/** Only songs with a title, artist, album and cover. */
-	completeOnly: boolean;
-	likedOnly: boolean;
-	/** Each empty: any. */
-	formats: string[];
-	qualities: Quality[];
-	artists: string[];
-	albums: string[];
-	playlists: string[];
+	/** Songs on this computer already are shown too (greyed: they are not chosen). */
+	showHere: boolean;
+	/** For each filter, what is ticked in it: a song shows when it is any of them. None ticked is any. */
+	picked: Partial<Record<FacetId, string[]>>;
 };
 
-export const NO_FILTERS: Filters = { text: '', newOnly: true, completeOnly: false, likedOnly: false, formats: [], qualities: [], artists: [], albums: [], playlists: [] };
+export const noFilters = (): Filters => ({ text: '', showHere: false, picked: {} });
 
 const fold = (t: string) => t.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase();
 
 export function shows(s: Offered, f: Filters): boolean {
-	if (f.newOnly && s.here) return false;
-	if (f.completeOnly && !complete(s)) return false;
-	if (f.likedOnly && !s.liked) return false;
-	if (f.formats.length && !f.formats.includes(formatOf(s))) return false;
-	if (f.qualities.length && !f.qualities.includes(qualityOf(s))) return false;
-	if (f.artists.length && !f.artists.includes(artistOf(s))) return false;
-	if (f.albums.length && !f.albums.includes(s.album?.trim() || '')) return false;
-	if (f.playlists.length && !s.playlists.some((p) => f.playlists.includes(p))) return false;
-	const words = fold(f.text).split(/\s+/).filter(Boolean);
-	if (words.length) {
-		const hay = fold(`${s.title} ${s.artist} ${s.album ?? ''} ${s.album_artist ?? ''}`);
-		if (!words.every((w) => hay.includes(w))) return false;
+	if (s.here && !f.showHere) return false;
+	for (const { id } of FACETS) {
+		const want = f.picked[id];
+		if (!want?.length) continue;
+		const has = keysOf(s, id);
+		if (!want.some((k) => has.includes(k))) return false;
 	}
-	return true;
+	const words = fold(f.text).split(/\s+/).filter(Boolean);
+	if (!words.length) return true;
+	const hay = fold(`${s.title} ${s.artist} ${s.album ?? ''} ${s.album_artist ?? ''}`);
+	return words.every((w) => hay.includes(w));
 }
 
-/** A filter's choices, each with how many of the songs have it: the most first, then by name. */
-export type Facet = { value: string; label: string; count: number };
+/** Whether any filter or words narrow the songs shown. */
+export const narrowed = (f: Filters): boolean => !!f.text.trim() || FACETS.some(({ id }) => !!f.picked[id]?.length);
 
-function facet(values: string[], label = (v: string) => v): Facet[] {
+/** One of a filter's choices, with how many of the songs are it. */
+export type Facet = { value: string; count: number };
+
+/** What a filter can choose from among `songs`: the most first, then by name. */
+export function facet(songs: Offered[], id: FacetId): Facet[] {
 	const counts = new Map<string, number>();
-	for (const v of values) counts.set(v, (counts.get(v) ?? 0) + 1);
-	return [...counts]
-		.map(([value, count]) => ({ value, label: label(value), count }))
-		.sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+	for (const s of songs) for (const k of keysOf(s, id)) counts.set(k, (counts.get(k) ?? 0) + 1);
+	return [...counts].map(([value, count]) => ({ value, count })).sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
 }
 
-/** What each filter can choose from, among `songs`. */
-export function facets(songs: Offered[]) {
-	return {
-		formats: facet(songs.map(formatOf)),
-		qualities: QUALITIES.map((q) => ({ value: q.id, label: q.label, count: songs.filter((s) => qualityOf(s) === q.id).length })).filter((q) => q.count > 0),
-		artists: facet(songs.map(artistOf)),
-		albums: facet(songs.map((s) => s.album?.trim() || '').filter(Boolean)),
-		playlists: facet(songs.flatMap((s) => s.playlists))
-	};
-}
-
-/** The songs to take: those shown and not unticked. */
-export const chosen = (songs: Offered[], f: Filters, unticked: ReadonlySet<string>): Offered[] => songs.filter((s) => shows(s, f) && !unticked.has(s.file));
+/** The songs to take: those chosen that are still offered and not on this computer already. */
+export const toTake = (songs: Offered[], chosen: ReadonlySet<string>): Offered[] => songs.filter((s) => !s.here && chosen.has(s.file));
 
 export const bytesOf = (songs: Offered[]): number => songs.reduce((n, s) => n + s.bytes, 0);
 

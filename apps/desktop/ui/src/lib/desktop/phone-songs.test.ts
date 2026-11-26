@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { NO_FILTERS, artistOf, bytesOf, chosen, complete, detailOf, facets, formatOf, qualityOf, shows, size, type Offered } from './phone-songs';
+import { LIKED, artistOf, bytesOf, complete, detailOf, facet, formatOf, keysOf, narrowed, noFilters, qualityOf, shows, size, toTake, type Filters, type Offered } from './phone-songs';
 
 const song = (o: Partial<Offered>): Offered => ({
 	file: '1.flac',
@@ -64,48 +64,56 @@ describe('choosing a phone’s songs', () => {
 		song({ file: '4.mp3', title: 'Old', format: 'mp3', art_url: null })
 	];
 	const files = (list: Offered[]) => list.map((s) => s.file);
+	const only = (f: Partial<Filters>) => files(songs.filter((s) => shows(s, { ...noFilters(), showHere: true, ...f })));
 
 	it('hides songs here already, until asked to show them', () => {
-		expect(files(songs.filter((s) => shows(s, NO_FILTERS)))).toEqual(['1.flac', '3.opus', '4.mp3']);
-		expect(songs.filter((s) => shows(s, { ...NO_FILTERS, newOnly: false }))).toHaveLength(4);
+		expect(files(songs.filter((s) => shows(s, noFilters())))).toEqual(['1.flac', '3.opus', '4.mp3']);
+		expect(only({})).toHaveLength(4);
 	});
 
-	it('takes any of the formats, qualities, artists, albums or playlists chosen, and all the filters at once', () => {
-		const all = { ...NO_FILTERS, newOnly: false };
-		const only = (f: Partial<typeof all>) => files(songs.filter((s) => shows(s, { ...all, ...f })));
-		expect(only({ formats: ['FLAC', 'AAC'] })).toEqual(['1.flac', '2.m4a']);
-		expect(only({ qualities: ['lossy'] })).toEqual(['2.m4a', '3.opus', '4.mp3']);
-		expect(only({ qualities: ['hires'] })).toEqual(['1.flac']);
-		expect(only({ artists: ['Other'] })).toEqual(['3.opus']);
-		expect(only({ albums: ['Album'] })).toEqual(['1.flac', '2.m4a', '4.mp3']);
-		expect(only({ playlists: ['Chill'] })).toEqual(['3.opus']);
-		expect(only({ playlists: ['Gym'], qualities: ['lossy'] })).toEqual(['3.opus']);
-		expect(only({ completeOnly: true })).toEqual(['1.flac', '2.m4a']);
-		expect(only({ likedOnly: true })).toEqual(['1.flac']);
+	it('shows any of what is ticked in a filter, and what every filter at once allows', () => {
+		expect(only({ picked: { format: ['FLAC', 'AAC'] } })).toEqual(['1.flac', '2.m4a']);
+		expect(only({ picked: { quality: ['Lossy'] } })).toEqual(['2.m4a', '3.opus', '4.mp3']);
+		expect(only({ picked: { quality: ['Hi-res'] } })).toEqual(['1.flac']);
+		expect(only({ picked: { artist: ['Other'] } })).toEqual(['3.opus']);
+		expect(only({ picked: { album: ['Album · Band'] } })).toEqual(['1.flac', '2.m4a', '4.mp3']);
+		expect(only({ picked: { playlist: ['Chill'] } })).toEqual(['3.opus']);
+		expect(only({ picked: { playlist: ['Gym'], quality: ['Lossy'] } })).toEqual(['3.opus']);
+		expect(only({ picked: { tags: ['Complete tags'] } })).toEqual(['1.flac', '2.m4a']);
+		expect(only({ picked: { playlist: [LIKED] } })).toEqual(['1.flac']);
+		expect(only({ picked: { format: [] } })).toHaveLength(4);
 	});
 
 	it('finds words anywhere in the title, artist or album, accents or not', () => {
-		const find = (text: string) => files(songs.filter((s) => shows(s, { ...NO_FILTERS, newOnly: false, text })));
-		expect(find('cafe')).toEqual(['3.opus']);
-		expect(find('other café')).toEqual(['3.opus']);
-		expect(find('  ')).toHaveLength(4);
-		expect(find('nothing')).toEqual([]);
+		expect(only({ text: 'cafe' })).toEqual(['3.opus']);
+		expect(only({ text: 'other café' })).toEqual(['3.opus']);
+		expect(only({ text: '  ' })).toHaveLength(4);
+		expect(only({ text: 'nothing' })).toEqual([]);
 	});
 
-	it('takes what is shown and not unticked, and keeps an untick while the filters change', () => {
-		const unticked = new Set(['3.opus']);
-		expect(files(chosen(songs, NO_FILTERS, unticked))).toEqual(['1.flac', '4.mp3']);
-		expect(files(chosen(songs, { ...NO_FILTERS, formats: ['Opus', 'MP3'] }, unticked))).toEqual(['4.mp3']);
-		expect(bytesOf(chosen(songs, NO_FILTERS, new Set()))).toBe(65e6);
+	it('knows when the songs shown are narrowed', () => {
+		expect(narrowed(noFilters())).toBe(false);
+		expect(narrowed({ ...noFilters(), showHere: true, picked: { format: [] } })).toBe(false);
+		expect(narrowed({ ...noFilters(), text: 'x' })).toBe(true);
+		expect(narrowed({ ...noFilters(), picked: { artist: ['Band'] } })).toBe(true);
 	});
 
-	it('offers each filter’s choices with their counts, the most first', () => {
-		const f = facets(songs);
-		expect(f.formats.map((x) => [x.value, x.count])).toEqual([['AAC', 1], ['FLAC', 1], ['MP3', 1], ['Opus', 1]]);
-		expect(f.qualities.map((x) => [x.value, x.count])).toEqual([['hires', 1], ['lossy', 3]]);
-		expect(f.artists.map((x) => [x.value, x.count])).toEqual([['Band', 3], ['Other', 1]]);
-		expect(f.albums.map((x) => [x.value, x.count])).toEqual([['Album', 3]]);
-		expect(f.playlists.map((x) => [x.value, x.count])).toEqual([['Gym', 2], ['Chill', 1]]);
+	it('takes only the songs chosen, never one here already, whatever is shown', () => {
+		expect(toTake(songs, new Set())).toEqual([]);
+		expect(files(toTake(songs, new Set(['1.flac', '2.m4a', '4.mp3', 'gone.flac'])))).toEqual(['1.flac', '4.mp3']);
+		expect(bytesOf(toTake(songs, new Set(['1.flac', '3.opus'])))).toBe(35e6);
+	});
+
+	it('offers each filter’s choices with their counts, the most first, the liked songs with the playlists', () => {
+		const fresh = songs.filter((s) => !s.here);
+		const counts = (id: Parameters<typeof facet>[1]) => facet(fresh, id).map((x) => [x.value, x.count]);
+		expect(counts('format')).toEqual([['FLAC', 1], ['MP3', 1], ['Opus', 1]]);
+		expect(counts('quality')).toEqual([['Lossy', 2], ['Hi-res', 1]]);
+		expect(counts('artist')).toEqual([['Band', 2], ['Other', 1]]);
+		expect(counts('album')).toEqual([['Album · Band', 2]]);
+		expect(counts('playlist')).toEqual([['Gym', 2], ['Chill', 1], [LIKED, 1]]);
+		expect(counts('tags')).toEqual([['Missing tags', 2], ['Complete tags', 1]]);
+		expect(keysOf(song({ album: ' Live ', album_artist: 'Band ' }), 'album')).toEqual(['Live · Band']);
 	});
 
 	it('says sizes as people do', () => {

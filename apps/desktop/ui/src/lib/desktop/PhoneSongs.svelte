@@ -1,17 +1,18 @@
 <!-- The songs a phone sent (Send to computer, over USB), to choose which come in (the core's `phone_transfer.rs`).
-     Nothing is read from the phone until they are chosen. Filters above the list choose what is shown (songs on this
-     computer already are hidden to begin with); what is shown and ticked is taken. Once they are in, the phone is told
-     the computer is done (its list is deleted) and clears its copies of the rest: its own songs are not touched. -->
+     Nothing is read from the phone until they are chosen, and nothing is chosen to begin with: songs are ticked one by
+     one, or all those the filters show at once; Take all takes every new one. The filters only choose what is shown, never
+     what is chosen. The bar with Take stays on screen above the player bar. Once they are in, the phone is told the
+     computer is done and clears its copies of the rest: its own songs are not touched. -->
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import { SvelteSet } from 'svelte/reactivity';
 	import * as core from '../core';
 	import Cover from '../ui/Cover.svelte';
 	import Icon from '../ui/Icon.svelte';
 	import { songs as songsWord } from '../ui/format';
 	import PhoneFacet from './PhoneFacet.svelte';
-	import { NO_FILTERS, artistOf, bytesOf, detailOf, facets as facetsOf, shows, size, type Filters, type Offer, type Quality } from './phone-songs';
+	import { FACETS, bytesOf, detailOf, facet, narrowed as isNarrowed, noFilters, shows, size, toTake, type FacetId, type Filters, type Offer, type Offered } from './phone-songs';
 
 	type Now = { state: string; phone: string | null; done: number; total: number; taken: number; had: number; not_kept: number; failed: number; left: number };
 
@@ -20,16 +21,24 @@
 	let failure = $state<string | null>(null);
 	let looked = $state(false);
 	let sending = $state(false);
-	let filters = $state<Filters>({ ...NO_FILTERS });
-	/** The songs whose tick was taken off, by their file on the phone. */
-	const unticked = new SvelteSet<string>();
+	let filters = $state<Filters>(noFilters());
+	/** The list shows the songs not here yet (and those here, greyed, when asked), filtered; or every song chosen. */
+	let show = $state<'new' | 'chosen'>('new');
+	/** The songs chosen when the chosen ones were asked for: one unticked there stays in the list, to tick again. */
+	let review = $state.raw<ReadonlySet<string>>(new Set());
+	/** The filter whose panel is open under the row. */
+	let open = $state<FacetId | null>(null);
+	/** The songs chosen, by their file on the phone. */
+	const chosen = new SvelteSet<string>();
 
 	async function readOffer() {
 		try {
 			const o = await core.get<Offer>('/api/phone/songs');
 			if (o.sent_at_ms !== offer?.sent_at_ms) {
-				unticked.clear();
-				filters = { ...NO_FILTERS };
+				chosen.clear();
+				filters = noFilters();
+				show = 'new';
+				open = null;
 			}
 			offer = o;
 			failure = null;
@@ -64,42 +73,64 @@
 	});
 
 	const all = $derived(offer?.songs ?? []);
-	const here = $derived(all.filter((s) => s.here).length);
-	/** What the filters choose from: the songs not here yet, unless those here are shown too. */
-	const base = $derived(filters.newOnly ? all.filter((s) => !s.here) : all);
-	const f = $derived(facetsOf(base));
-	const shown = $derived(all.filter((s) => shows(s, filters)));
-	const picked = $derived(shown.filter((s) => !unticked.has(s.file)));
-	const pickedBytes = $derived(bytesOf(picked));
-	const allTicked = $derived(shown.length > 0 && picked.length === shown.length);
-	const someTicked = $derived(picked.length > 0 && picked.length < shown.length);
-	const narrowed = $derived(
-		!!filters.text.trim() || filters.completeOnly || filters.likedOnly || !!(filters.formats.length + filters.qualities.length + filters.artists.length + filters.albums.length + filters.playlists.length)
-	);
+	const fresh = $derived(all.filter((s) => !s.here));
+	const freshBytes = $derived(bytesOf(fresh));
+	const here = $derived(all.length - fresh.length);
+	const taking = $derived(toTake(all, chosen));
+	const takingBytes = $derived(bytesOf(taking));
+	/** What each filter can choose from: the songs not here yet. */
+	const choices = $derived(Object.fromEntries(FACETS.map((f) => [f.id, facet(fresh, f.id)])) as Record<FacetId, ReturnType<typeof facet>>);
+	/** A filter with too few choices to tell songs apart is left out of the row. */
+	const row = $derived(FACETS.filter((f) => choices[f.id].length >= f.least));
+	/** The filters narrow the new songs; the chosen ones are shown all, so what is taken is plain. */
+	const narrowed = $derived(show === 'new' && isNarrowed(filters));
+	const base = $derived(show === 'chosen' ? all.filter((s) => review.has(s.file)) : filters.showHere ? all : fresh);
+	const shown = $derived(show === 'chosen' ? base : base.filter((s) => shows(s, filters)));
+	const choosable = $derived(shown.filter((s) => !s.here));
+	const allOn = $derived(choosable.length > 0 && choosable.every((s) => chosen.has(s.file)));
+	const pills = $derived(FACETS.flatMap((f) => (filters.picked[f.id] ?? []).map((value) => ({ id: f.id, label: f.label, value }))));
+	const openFacet = $derived(FACETS.find((f) => f.id === open) ?? null);
 
-	function flip<K extends 'formats' | 'qualities'>(key: K, value: Filters[K][number]) {
-		const list = filters[key] as string[];
-		filters[key] = (list.includes(value) ? list.filter((v) => v !== value) : [...list, value]) as Filters[K];
+	function tickOne(file: string) {
+		if (chosen.has(file)) chosen.delete(file);
+		else chosen.add(file);
 	}
 
-	function tickShown(on: boolean) {
-		for (const s of shown) {
-			if (on) unticked.delete(s.file);
-			else unticked.add(s.file);
+	function chooseShown(on: boolean) {
+		for (const s of choosable) {
+			if (on) chosen.add(s.file);
+			else chosen.delete(s.file);
 		}
 	}
 
-	function tickOne(file: string) {
-		if (unticked.has(file)) unticked.delete(file);
-		else unticked.add(file);
+	function setPicked(id: FacetId, values: string[]) {
+		const picked = { ...filters.picked };
+		if (values.length) picked[id] = values;
+		else delete picked[id];
+		filters = { ...filters, picked };
 	}
 
-	async function take() {
-		if (!offer || !picked.length) return;
+	async function closePanel() {
+		const was = open;
+		open = null;
+		await tick();
+		document.querySelector<HTMLElement>(`[data-facet="${was}"]`)?.focus({ preventScroll: true });
+	}
+
+	function seeChosen() {
+		review = new Set(chosen);
+		show = 'chosen';
+		open = null;
+		document.getElementById('main')?.scrollTo({ top: 0 });
+	}
+
+	/** Takes `songs`; none (every song here already) lets the phone clear its copies. */
+	async function take(songs: Offered[]) {
+		if (!offer) return;
 		sending = true;
 		failure = null;
 		try {
-			await core.post('/api/phone/take', { sent_at_ms: offer.sent_at_ms, files: picked.map((s) => s.file) });
+			await core.post('/api/phone/take', songs.length ? { sent_at_ms: offer.sent_at_ms, files: songs.map((s) => s.file) } : { sent_at_ms: offer.sent_at_ms, files: [], none: true });
 			offer = null;
 		} catch (e) {
 			failure = core.said(e);
@@ -111,69 +142,121 @@
 
 	const phone = $derived(offer?.phone ?? now?.phone ?? 'your phone');
 	const busy = $derived(now?.state === 'taking' || now?.state === 'stalled');
+	const takeAllLabel = $derived(`Take all ${fresh.length.toLocaleString()} new · ${size(freshBytes)}`);
+	const baseCount = $derived(base.length);
+	const shownLine = $derived(
+		`${narrowed ? `${shown.length.toLocaleString()} of ${songsWord(baseCount)} shown` : songsWord(shown.length)} · ${size(bytesOf(choosable))}`
+	);
 </script>
 
 <div class="view view-in ps">
-	<div class="pg-head"><h1 class="pg-title">Songs from {phone}</h1></div>
+	<div class="pg-head">
+		<h1 class="pg-title">Songs from {phone}</h1>
+		{#if offer && fresh.length}
+			<button type="button" class="btn" disabled={sending} onclick={() => void take(fresh)}>{takeAllLabel}</button>
+		{/if}
+	</div>
 	{#if offer}
-		<p class="pg-sub">
-			{songsWord(all.length)} sent · {here ? `${here.toLocaleString()} on this computer already · ` : ''}{size(bytesOf(all))}. Choose which come in.
-		</p>
-		<div class="ps-tools">
-			<label class="ps-find"><Icon name="search" /><input type="search" placeholder="Find a song, artist or album" aria-label="Find a song, artist or album" bind:value={filters.text} maxlength="200" /></label>
+		<p class="pg-sub ps-sub">
+			<span>
+				{songsWord(all.length)} sent{here ? ` · ${here.toLocaleString()} on this computer already${filters.showHere ? ', shown greyed' : ', hidden'}` : ''} · nothing comes in until you take it.
+			</span>
 			{#if here}
-				<button type="button" class="chip" class:on={filters.newOnly} aria-pressed={filters.newOnly} onclick={() => (filters.newOnly = !filters.newOnly)}>Only new songs</button>
+				<button type="button" class="ps-link" onclick={() => (filters = { ...filters, showHere: !filters.showHere })}>{filters.showHere ? 'Hide them' : 'Show them'}</button>
 			{/if}
-			<button type="button" class="chip" class:on={filters.completeOnly} aria-pressed={filters.completeOnly} title="With a title, artist, album and cover" onclick={() => (filters.completeOnly = !filters.completeOnly)}>Complete tags</button>
-			{#if base.some((s) => s.liked)}
-				<button type="button" class="chip" class:on={filters.likedOnly} aria-pressed={filters.likedOnly} onclick={() => (filters.likedOnly = !filters.likedOnly)}>Liked</button>
-			{/if}
-		</div>
-		<div class="ps-tools" role="group" aria-label="Filters">
-			{#each f.formats as x (x.value)}
-				<button type="button" class="chip" class:on={filters.formats.includes(x.value)} aria-pressed={filters.formats.includes(x.value)} onclick={() => flip('formats', x.value)}>{x.label} <span class="ps-n">{x.count.toLocaleString()}</span></button>
-			{/each}
-			{#if f.qualities.length > 1}
-				<span class="ps-gap" aria-hidden="true"></span>
-				{#each f.qualities as x (x.value)}
-					<button type="button" class="chip" class:on={filters.qualities.includes(x.value as Quality)} aria-pressed={filters.qualities.includes(x.value as Quality)} onclick={() => flip('qualities', x.value as Quality)}>{x.label} <span class="ps-n">{x.count.toLocaleString()}</span></button>
+		</p>
+
+		{#if show === 'new'}
+			<div class="ps-tools" role="group" aria-label="Filters">
+				<label class="ps-find"><Icon name="search" /><input type="search" placeholder="Find a song, artist or album" aria-label="Find a song, artist or album" bind:value={filters.text} maxlength="200" /></label>
+				{#each row as f (f.id)}
+					{@const n = filters.picked[f.id]?.length ?? 0}
+					<button type="button" class="chip ps-chip" class:on={n > 0} class:open={open === f.id} data-facet={f.id} aria-expanded={open === f.id} onclick={() => (open = open === f.id ? null : f.id)}>
+						{f.label}{n ? ` · ${n}` : ''}<Icon name="expand_more" />
+					</button>
 				{/each}
+			</div>
+
+			{#if openFacet}
+				{#key openFacet.id}
+					<PhoneFacet
+						label={openFacet.label}
+						many={openFacet.many}
+						find={openFacet.find}
+						facets={choices[openFacet.id]}
+						bind:picked={() => filters.picked[openFacet.id] ?? [], (v) => setPicked(openFacet.id, v)}
+						onclose={() => void closePanel()}
+					/>
+				{/key}
 			{/if}
-			<span class="ps-gap" aria-hidden="true"></span>
-			<PhoneFacet label="Artists" facets={f.artists} bind:chosen={filters.artists} />
-			{#if f.albums.length}<PhoneFacet label="Albums" facets={f.albums} bind:chosen={filters.albums} />{/if}
-			{#if f.playlists.length}<PhoneFacet label="Playlists" facets={f.playlists} bind:chosen={filters.playlists} />{/if}
-			{#if narrowed}
-				<button type="button" class="ps-reset" onclick={() => (filters = { ...NO_FILTERS, newOnly: filters.newOnly })}>Clear filters</button>
+
+			{#if pills.length}
+				<div class="ps-pills" role="group" aria-label="Filters on">
+					{#each pills as p (`${p.id}:${p.value}`)}
+						<span class="ps-pill"><i>{p.label}</i>{p.value}<button type="button" aria-label="Remove {p.value}" onclick={() => setPicked(p.id, (filters.picked[p.id] ?? []).filter((v) => v !== p.value))}><Icon name="close" /></button></span>
+					{/each}
+					<button type="button" class="ps-link" onclick={() => (filters = { ...noFilters(), showHere: filters.showHere })}>Clear filters</button>
+				</div>
+			{/if}
+		{/if}
+
+		<div class="ps-head">
+			<div class="ps-head-l">
+				<div class="ps-seg" role="group" aria-label="Show">
+					<button type="button" class:on={show === 'new'} aria-pressed={show === 'new'} onclick={() => (show = 'new')}>New songs {fresh.length.toLocaleString()}</button>
+					<button type="button" class:on={show === 'chosen'} aria-pressed={show === 'chosen'} onclick={seeChosen}>Chosen {taking.length.toLocaleString()}</button>
+				</div>
+				<span class="ps-n">{shownLine}</span>
+			</div>
+			{#if choosable.length}
+				<button type="button" class="btn ghost" onclick={() => chooseShown(!allOn)}>
+					{allOn ? 'Unchoose' : 'Choose'}
+					{choosable.length === 1 ? 'it' : `${narrowed ? 'these' : 'all'} ${choosable.length.toLocaleString()}`}
+				</button>
 			{/if}
 		</div>
 
 		<div class="ps-list" role="group" aria-label="Songs">
-			<label class="ps-h">
-				<input type="checkbox" checked={allTicked} indeterminate={someTicked} disabled={!shown.length} onchange={() => tickShown(!allTicked)} />
-				<span>{shown.length === all.length ? songsWord(shown.length) : `${shown.length.toLocaleString()} of ${songsWord(all.length)} shown`}</span>
-			</label>
 			{#each shown as s (s.file)}
-				<label class="ps-r" class:ps-off={unticked.has(s.file)}>
-					<input type="checkbox" checked={!unticked.has(s.file)} onchange={() => tickOne(s.file)} />
+				{@const on = !s.here && chosen.has(s.file)}
+				<label class="ps-r" class:ps-on={on} class:ps-here={s.here}>
+					<input type="checkbox" checked={on} disabled={s.here} onchange={() => tickOne(s.file)} />
 					<Cover artwork={s.art_url ? [{ url: core.artUrl(s.art_url) ?? '' }] : undefined} seed={s.album ?? s.title} class="ps-art" />
 					<span class="ps-song">
-						<b>{s.title}{#if s.here}<i class="ps-here">On this computer</i>{/if}</b>
-						<span>{[s.artist, artistOf(s) === s.artist ? '' : artistOf(s), s.album ?? ''].filter(Boolean).join(' · ')}</span>
+						<b>{s.title}{#if s.here}<i class="ps-tag">On this computer</i>{/if}</b>
+						<span>{[s.artist, s.album ?? ''].filter(Boolean).join(' · ')}</span>
 					</span>
 					<span class="ps-fmt">{detailOf(s)}</span>
 					<span class="ps-size">{size(s.bytes)}</span>
 				</label>
 			{:else}
-				<p class="s-hint">No songs match. <button type="button" class="ps-reset" onclick={() => (filters = { ...NO_FILTERS, newOnly: false })}>Show them all</button></p>
+				<p class="s-hint">
+					{#if show === 'chosen' && !taking.length}
+						Nothing chosen yet. Tick songs, or filter and choose them all.
+					{:else}
+						No songs match. <button type="button" class="ps-link" onclick={() => (filters = { ...noFilters(), showHere: filters.showHere })}>Clear filters</button>
+					{/if}
+				</p>
 			{/each}
 		</div>
 
-		<div class="ps-bar">
-			{#if failure}<span class="pg-status bad" role="alert">{failure}</span>{:else}<span class="pg-status">Songs you don't take stay in Stash on {phone}.</span>{/if}
-			<button type="button" class="btn" disabled={!picked.length || sending} onclick={take}>
-				{sending ? 'Starting…' : picked.length ? `Take ${songsWord(picked.length)} · ${size(pickedBytes)}` : 'Tick the songs to take'}
-			</button>
+		<!-- Sticks above the player bar (`--bar-clear`), like the bar for songs picked in a list. -->
+		<div class="ps-take">
+			<div class="ps-take-in" role="region" aria-label="Songs to take">
+				{#if failure}<span class="ps-bad" role="alert">{failure}</span>{/if}
+				{#if taking.length}
+					<span class="ps-take-n" aria-live="polite">{taking.length.toLocaleString()} chosen · {size(takingBytes)}</span>
+					<button type="button" class="ps-tb" onclick={seeChosen}>See them</button>
+					<button type="button" class="ps-tb go" disabled={sending} onclick={() => void take(taking)}>{sending ? 'Starting…' : `Take ${taking.length.toLocaleString()}`}</button>
+					<button type="button" class="ps-tb x" aria-label="Unchoose them all" title="Unchoose them all" onclick={() => chosen.clear()}><Icon name="close" /></button>
+				{:else if fresh.length}
+					<span class="ps-take-q">Tick songs, or filter and choose them all, or</span>
+					<button type="button" class="ps-tb go" disabled={sending} onclick={() => void take(fresh)}>{sending ? 'Starting…' : takeAllLabel}</button>
+				{:else}
+					<span class="ps-take-q">Every song {phone} sent is on this computer already.</span>
+					<button type="button" class="ps-tb go" disabled={sending} onclick={() => void take([])}>{sending ? 'Starting…' : 'Done'}</button>
+				{/if}
+			</div>
 		</div>
 	{:else if busy && now}
 		<p class="s-hint" role="status">Taking {songsWord(now.total)} from {phone}: {now.done.toLocaleString()} done. Keep it plugged in.</p>
@@ -195,28 +278,54 @@
 </div>
 
 <style>
-	.ps { padding-bottom: 0; }
-	.ps-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 10px; }
+	.ps-sub { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-top: 0; }
+	.ps-link { height: 28px; padding: 0 8px; border-radius: 8px; color: var(--acc-text); font: 600 13px/1 var(--font-body); }
+	.ps-link:hover { background: var(--wp-hover); }
+	.ps-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 12px; }
 	.ps-find { display: flex; align-items: center; gap: 8px; width: 280px; max-width: 100%; height: 36px; padding: 0 12px; border-radius: 12px; background: var(--wp-hover); color: var(--wp-text-2); }
 	.ps-find :global(svg) { width: 18px; height: 18px; fill: currentColor; flex: none; }
 	.ps-find input { flex: 1; min-width: 0; background: none; border: 0; outline: none; color: var(--wp-text); font: 400 13.5px/1 var(--font-body); }
-	.ps-n { color: var(--wp-text-2); font-weight: 500; font-variant-numeric: tabular-nums; }
-	.ps-gap { width: 1px; height: 20px; margin: 0 4px; background: var(--wp-line-2); }
-	.ps-reset { height: 32px; padding: 0 10px; border-radius: 8px; color: var(--acc-text); font: 600 13px/1 var(--font-body); }
-	.ps-reset:hover { background: var(--wp-hover); }
-	.ps-list { margin: 6px 0 0; border-top: 1px solid var(--wp-line-2); }
-	.ps-h, .ps-r { display: grid; grid-template-columns: 20px 36px minmax(0, 1fr) 128px 64px; align-items: center; gap: 12px; padding: 4px 8px; border-radius: 8px; font: 400 13.5px/1.35 var(--font-body); cursor: pointer; }
-	.ps-h { grid-template-columns: 20px minmax(0, 1fr); min-height: 40px; color: var(--wp-text-2); font-weight: 500; }
-	.ps-r { min-height: 48px; content-visibility: auto; contain-intrinsic-size: auto 48px; }
-	@media (hover: hover) and (pointer: fine) { .ps-r:hover { background: var(--wp-hover); } }
-	.ps-h input, .ps-r input { width: 16px; height: 16px; accent-color: var(--acc); }
-	.ps-off > :not(input) { opacity: 0.45; }
+	.ps-find:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
+	.ps-chip { padding-right: 10px; }
+	.ps-chip :global(svg) { width: 16px; height: 16px; fill: currentColor; transition: rotate var(--dur-short); }
+	.ps-chip.open { border-color: var(--acc); color: var(--wp-text); }
+	.ps-chip.open :global(svg) { rotate: 180deg; }
+	.ps-pills { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 12px; }
+	.ps-pill { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 4px 0 12px; border-radius: 999px; background: var(--acc-wash); color: var(--wp-text); font: 600 12.5px/1 var(--font-body); }
+	.ps-pill i { font-style: normal; font-weight: 500; color: var(--wp-text-2); }
+	.ps-pill button { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; color: var(--wp-text-2); }
+	.ps-pill button:hover { background: var(--wp-hover); color: var(--wp-text); }
+	.ps-pill :global(svg) { width: 14px; height: 14px; fill: currentColor; }
+	.ps-head { position: sticky; top: 0; z-index: 4; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin: 0 -8px 4px; padding: 10px 8px; background: var(--wp-main); border-bottom: 1px solid var(--wp-line-2); }
+	.ps-head-l { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; }
+	.ps-seg { display: inline-flex; padding: 3px; border-radius: 12px; background: var(--wp-hover); }
+	.ps-seg button { height: 30px; padding: 0 12px; border-radius: 9px; color: var(--wp-text-2); font: 600 13px/1 var(--font-body); font-variant-numeric: tabular-nums; }
+	.ps-seg button.on { background: var(--wp-field); color: var(--wp-text); box-shadow: 0 1px 2px rgb(0 0 0 / .4); }
+	.ps-n { color: var(--wp-text-2); font: 400 13px/1.3 var(--font-body); font-variant-numeric: tabular-nums; }
+	.ps-r { display: grid; grid-template-columns: 20px 36px minmax(0, 1fr) 128px 64px; align-items: center; gap: 12px; min-height: 48px; padding: 4px 8px; border-radius: 8px; font: 400 13.5px/1.35 var(--font-body); cursor: pointer; content-visibility: auto; contain-intrinsic-size: auto 48px; }
+	@media (hover: hover) and (pointer: fine) { .ps-r:hover { background: var(--wp-hover); } .ps-on:hover { background: color-mix(in oklab, var(--acc) 22%, transparent); } }
+	.ps-r input { width: 16px; height: 16px; margin: 0; accent-color: var(--acc); cursor: pointer; }
+	.ps-on { background: var(--acc-wash); }
+	.ps-here { cursor: default; }
+	.ps-here > :not(input) { opacity: 0.5; }
 	.ps-r :global(.ps-art) { display: block; width: 36px; height: 36px; border-radius: 6px; object-fit: cover; }
 	.ps-song { display: grid; min-width: 0; }
 	.ps-song b { font-weight: 500; color: var(--wp-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.ps-song span, .ps-fmt, .ps-size { color: var(--wp-text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.ps-song span { font-size: 12.5px; }
-	.ps-here { margin-left: 8px; padding: 1px 7px; border-radius: 999px; background: var(--wp-hover); color: var(--wp-text-2); font: 500 11.5px/1.4 var(--font-body); font-style: normal; vertical-align: 1px; }
+	.ps-tag { margin-left: 8px; padding: 1px 7px; border-radius: 999px; background: var(--wp-hover); color: var(--wp-text-2); font: 500 11.5px/1.4 var(--font-body); font-style: normal; vertical-align: 1px; }
 	.ps-size { text-align: right; font-variant-numeric: tabular-nums; }
-	.ps-bar { position: sticky; bottom: 0; z-index: 5; display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 8px -8px 0; padding: 12px 8px 16px; background: var(--wp-main); border-top: 1px solid var(--wp-line-2); }
+	.ps-take { position: sticky; z-index: 6; bottom: calc(var(--bar-clear, 0px) + 16px); display: flex; justify-content: center; margin-top: 16px; pointer-events: none; }
+	.ps-take-in { pointer-events: auto; display: flex; align-items: center; gap: 4px; max-width: 100%; padding: 4px 4px 4px 18px; border-radius: 999px; background: var(--wp-field); border: 1px solid var(--wp-line-2); box-shadow: var(--shadow-card); font: 500 13px/1 var(--font-body); color: var(--wp-text); animation: ps-in 180ms var(--ease-out-expo) both; }
+	@keyframes ps-in { from { opacity: 0; translate: 0 6px; } }
+	@media (prefers-reduced-motion: reduce) { .ps-take-in { animation: none; } }
+	.ps-take-n { margin-right: 8px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+	.ps-take-q { margin-right: 8px; color: var(--wp-text-2); white-space: nowrap; }
+	.ps-bad { margin-right: 8px; color: var(--red); }
+	.ps-tb { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 14px; border-radius: 999px; font-weight: 600; white-space: nowrap; transition: background-color var(--dur-short); }
+	.ps-tb:hover { background: var(--wp-hover); }
+	.ps-tb.go { background: var(--action); color: var(--on-action); }
+	.ps-tb.go:hover { background: var(--action-hover); }
+	.ps-tb.x { width: 36px; padding: 0; justify-content: center; color: var(--wp-text-2); }
+	.ps-tb.x :global(svg) { width: 20px; height: 20px; fill: currentColor; }
 </style>
