@@ -29,14 +29,16 @@
 		here: number;
 		left: number;
 		cleared: boolean;
-		/** Every song is in, but the send's list is still on the phone: the computer removes it at its next look. */
+		/** Every song is in, but the send's list is still on the phone: the computer removes it at a look (by itself while `trying_again`, else once the phone is plugged in again). */
 		list_left: boolean;
-		/** The songs not taken come in at the next look, with no need to send them again. */
+		/** The next look carries the send on by itself: the songs not taken come in, or the list that stayed goes. */
 		trying_again: boolean;
 		at_ms: number;
-		/** Why songs can't be saved here, and where they go. */
+		/** Why songs can't be saved here, and where they go; or (`library`) why Stash's library can't keep them, and the drive it is on. */
 		error: string | null;
 		folder: string | null;
+		library: boolean;
+		drive: string | null;
 	};
 	let now = $state<Now | null>(null);
 	let closedAt = $state(0);
@@ -122,7 +124,7 @@
 						// Every song in, and only the list left on the phone: nothing more comes in, the computer finishes with it.
 						now.list_left && now.done === now.total
 							? `${allIn(now.total)}Plug the phone back in so the computer can finish with it.`
-							: `${now.total ? `${now.done} of ${now.total} songs came in. ` : ''}Unplug the phone and plug it back in, or in its USB notification choose No data transfer, then File transfer${now.total ? ': the rest come in by themselves' : ''}.`
+							: `${now.total ? `${now.done - now.failed} of ${now.total} songs came in. ` : ''}Unplug the phone and plug it back in, or in its USB notification choose No data transfer, then File transfer${now.total ? ': the rest come in by themselves' : ''}.`
 					],
 					bar: undefined
 				};
@@ -132,14 +134,21 @@
 					lines: now.total ? [`${now.done - now.failed} of ${now.total} songs came in.`] : [],
 					bar: undefined
 				};
-			case 'cannot_save':
-				return {
-					title: `Songs from ${from} can't be saved`,
-					lines: [
-						`${now.total ? `${now.done} of ${now.total} songs came in. ` : ''}They can't be saved in ${now.folder ?? 'your downloads folder'}: ${now.error ?? "it can't be written"}. Free some space or reconnect the drive, then plug the phone back in.`
-					],
-					bar: undefined
-				};
+			case 'cannot_save': {
+				const came = now.total ? `${now.done - now.failed} of ${now.total} songs came in. ` : '';
+				const why = now.error ?? "it can't be written";
+				return now.library
+					? {
+							title: `Songs from ${from} can't be kept`,
+							lines: [`${came}Stash's library can't keep them: ${why}. Free some space on ${now.drive ?? 'its drive'}, or check that drive, then plug the phone back in.`],
+							bar: undefined
+						}
+					: {
+							title: `Songs from ${from} can't be saved`,
+							lines: [`${came}They can't be saved in ${now.folder ?? 'your downloads folder'}: ${why}. Free some space or reconnect the drive, then plug the phone back in.`],
+							bar: undefined
+						};
+			}
 			case 'done': {
 				const lines = [`${songs(now.taken)} added to your downloads.`];
 				if (now.had) lines.push(`${songs(now.had)} you had here already.`);
@@ -147,7 +156,8 @@
 				if (now.left) lines.push(now.left === 1 ? 'The other song stays in Stash on the phone.' : `The other ${now.left.toLocaleString()} stay in Stash on the phone.`);
 				if (now.failed && now.trying_again) lines.push(`${songs(now.failed)} didn't come in yet: the computer tries ${now.failed === 1 ? 'it' : 'them'} again.`);
 				else if (now.failed) lines.push(`${songs(now.failed)} didn't come in. Send again from the phone to try them.`);
-				else if (now.list_left) lines.push('Keep the phone plugged in: the computer finishes with it in a moment.');
+				else if (now.list_left && now.trying_again) lines.push('Keep the phone plugged in: the computer finishes with it in a moment.');
+				else if (now.list_left) lines.push('Unplug the phone and plug it back in so the computer can finish with it.');
 				else if (now.cleared || now.left) lines.push('You can unplug the phone.');
 				return { title: now.failed ? `Songs from ${from}, with trouble` : `Songs from ${from} are here`, lines, bar: undefined };
 			}

@@ -16,6 +16,9 @@
 		total: number;
 		here: number;
 		folder: string | null;
+		/** Stash's library is what can't keep the songs (on `drive`), not the downloads folder. */
+		library: boolean;
+		drive: string | null;
 		answered: number;
 		phones: Phone[];
 	};
@@ -81,6 +84,8 @@
 		if (now.state === 'ready') return `${now.phone ?? 'Your phone'} has ${songs(now.total)} waiting${now.here ? ` (${now.here.toLocaleString()} on this computer already)` : ''}. Choose which come in.`;
 		if (now.state === 'stalled') return `${now.phone ?? 'Your phone'} stopped sending. Asking it again…`;
 		if (now.state === 'stopped') return `Lost contact with ${now.phone ?? 'your phone'}. Unplug it and plug it back in, or in its USB notification choose No data transfer, then File transfer.`;
+		if (now.state === 'cannot_save' && now.library)
+			return `Songs from ${now.phone ?? 'your phone'} can't be kept in Stash's library. Free some space on ${now.drive ?? 'its drive'}, or check that drive, then plug the phone back in.`;
 		if (now.state === 'cannot_save') return `Songs from ${now.phone ?? 'your phone'} can't be saved in ${now.folder ?? 'your downloads folder'}. Free some space or reconnect the drive, then plug the phone back in.`;
 		const phone = now.phones[0];
 		if (!phone) return 'No phone found. Plug it in, then choose File transfer in its USB notification.';

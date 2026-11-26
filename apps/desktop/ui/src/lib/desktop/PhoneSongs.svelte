@@ -28,8 +28,10 @@
 		trying_again: boolean;
 		error: string | null;
 		folder: string | null;
+		library: boolean;
+		drive: string | null;
 	};
-	const QUIET: Now = { state: 'idle', phone: null, ready: 0, done: 0, total: 0, taken: 0, had: 0, not_kept: 0, failed: 0, left: 0, list_left: false, trying_again: false, error: null, folder: null };
+	const QUIET: Now = { state: 'idle', phone: null, ready: 0, done: 0, total: 0, taken: 0, had: 0, not_kept: 0, failed: 0, left: 0, list_left: false, trying_again: false, error: null, folder: null, library: false, drive: null };
 
 	let offer = $state.raw<Offer | null>(null);
 	let now = $state.raw<Now | null>(null);
@@ -334,7 +336,7 @@
 		</p>
 	{:else if now?.state === 'stopped'}
 		<p class="s-hint" role="status">
-			Lost contact with {phone}. {now.total ? `${now.done.toLocaleString()} of ${songsWord(now.total)} came in. ` : ''}Unplug the phone and plug it back in, or in its USB notification choose No data
+			Lost contact with {phone}. {now.total ? `${(now.done - now.failed).toLocaleString()} of ${songsWord(now.total)} came in. ` : ''}Unplug the phone and plug it back in, or in its USB notification choose No data
 			transfer, then File transfer{now.total ? ': the rest come in by themselves' : ''}.
 		</p>
 	{:else if now?.state === 'withdrawn'}
@@ -342,8 +344,15 @@
 		<button type="button" class="btn ghost" onclick={() => void goto('/library')}>Go to your library</button>
 	{:else if now?.state === 'cannot_save'}
 		<p class="pg-status bad" role="alert">
-			Songs from {phone} can't be saved in {now.folder ?? 'your downloads folder'}: {now.error ?? "it can't be written"}. {now.total ? `${now.done.toLocaleString()} of ${songsWord(now.total)} came in. ` : ''}Free some space
-			or reconnect the drive, then plug the phone back in.
+			{#if now.library}
+				Songs from {phone} can't be kept in Stash's library: {now.error ?? "it can't be written"}. {now.total
+					? `${(now.done - now.failed).toLocaleString()} of ${songsWord(now.total)} came in. `
+					: ''}Free some space on {now.drive ?? 'its drive'}, or check that drive, then plug the phone back in.
+			{:else}
+				Songs from {phone} can't be saved in {now.folder ?? 'your downloads folder'}: {now.error ?? "it can't be written"}. {now.total
+					? `${(now.done - now.failed).toLocaleString()} of ${songsWord(now.total)} came in. `
+					: ''}Free some space or reconnect the drive, then plug the phone back in.
+			{/if}
 		</p>
 	{:else if now?.state === 'preparing'}
 		<p class="s-hint" role="status">{Phone} is getting songs ready: {songsWord(now.ready)} so far. They show up here to choose from.</p>
@@ -365,7 +374,11 @@
 					? `${songsWord(now.failed)} didn't: send again from the phone to try them.`
 					: ''}
 			{now.left === 1 ? `The other song stays in Stash on ${phone}.` : now.left ? `The other ${now.left.toLocaleString()} stay in Stash on ${phone}.` : ''}
-			{now.list_left && !now.failed ? 'Keep the phone plugged in: the computer finishes with it in a moment.' : ''}
+			{now.list_left && !now.failed
+				? now.trying_again
+					? 'Keep the phone plugged in: the computer finishes with it in a moment.'
+					: 'Unplug the phone and plug it back in so the computer can finish with it.'
+				: ''}
 		</p>
 		<button type="button" class="btn ghost" onclick={() => void goto('/library')}>Go to your library</button>
 	{:else if !looked}
