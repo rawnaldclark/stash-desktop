@@ -11,12 +11,18 @@
 	import { artUrl, get, post, said, type Mode } from '../core';
 	import Cover from '../ui/Cover.svelte';
 	import Icon from '../ui/Icon.svelte';
+	import { ui } from '../ui/state.svelte';
 	import { folders } from './folders.svelte';
 	import { firstPicks, flip, gb, lines, listLine, n, ownLists, syncedLists, takeBody, tally, type PhoneLibrary, type Picks, type SentList } from './bring-in';
 	import type { Offer } from './phone-songs';
 
-	type Now = { state: string; phone: string | null; sent_at_ms: number | null };
+	/** `first`: the first time Stash opens (how it runs is set by what is brought in); else a later send, from the corner card. */
+	let { first = true }: { first?: boolean } = $props();
 
+	type Now = { state: string; phone: string | null; sent_at_ms: number | null; with_library?: boolean };
+
+	/** Songs on their way, but how Stash runs could not be set: set again (and only that) with Try again. */
+	let owed = $state<Mode | null>(null);
 	let now = $state<Now | null>(null);
 	let offer = $state<Offer | null>(null);
 	let lib = $state<PhoneLibrary | null>(null);
@@ -38,6 +44,8 @@
 		offer = sent;
 		lib = library && library.sent_at_ms === sent.sent_at_ms ? library : null;
 		picks = firstPicks(sent, lib);
+		// Stash offline for good (on the listener's own files): a song not downloaded could never play, so none comes.
+		if (!first && ui.local) picks = { ...picks, onlyHere: true };
 		q = '';
 		all = false;
 	}
@@ -51,7 +59,9 @@
 				if (!alive) return;
 				now = told;
 				if (!busy) {
-					if (told.state === 'ready' && told.sent_at_ms && told.sent_at_ms !== offer?.sent_at_ms) await load();
+					// A new send; or this one's library, read only after its songs were offered (the phone answered late).
+					const late = told.state === 'ready' && !!told.with_library && !lib && told.sent_at_ms === offer?.sent_at_ms;
+					if (told.state === 'ready' && told.sent_at_ms && (told.sent_at_ms !== offer?.sent_at_ms || late)) await load();
 					else if (told.state !== 'ready' && offer) {
 						offer = null;
 						lib = null;
@@ -101,14 +111,33 @@
 	const art = (u: string) => [{ url: artUrl(u) ?? '' }];
 	const initial = (name: string) => name.match(/[A-Za-z0-9]/)?.[0].toUpperCase() ?? '#';
 
-	/** Takes the send as ticked, sets how Stash runs (offline for good with songs downloaded only), and opens Library. */
+	/**
+	 * Takes the send as ticked and opens Library. The first time, also sets how Stash runs (offline for good with songs
+	 * downloaded only); if that fails once the songs are on their way, only that is tried again.
+	 */
 	async function bring() {
 		if (!offer || !picks || busy || t?.nothing) return;
 		busy = true;
 		trouble = null;
+		const mode: Mode = picks.onlyHere ? 'local' : 'everything';
 		try {
 			await post('/api/phone/take', takeBody(offer, lib, picks));
-			await setMode(picks.onlyHere ? 'local' : 'everything');
+		} catch (e) {
+			trouble = said(e);
+			busy = false;
+			return;
+		}
+		if (first) owed = mode;
+		await finish();
+	}
+
+	/** Sets how Stash runs, if that is owed, and opens Library. */
+	async function finish() {
+		busy = true;
+		trouble = null;
+		try {
+			if (owed) await setMode(owed);
+			owed = null;
 			void goto('/library');
 		} catch (e) {
 			trouble = said(e);
@@ -157,8 +186,31 @@
 	</button>
 {/snippet}
 
+{#snippet others(title: string, line: string)}
+	<div class="bi-sec"><div><h2>{title}</h2><p>{line}</p></div></div>
+	<div class="bi-alts">
+		<button type="button" class="bi-alt" disabled={busy} onclick={() => void start('local', () => folders.add())}>
+			<span class="bi-alt-ic" aria-hidden="true"><Icon name="folder" /></span>
+			<span><b>Use music files on this computer</b><i>Pick a folder. Stash stays offline.</i></span>
+		</button>
+		<button type="button" class="bi-alt" disabled={busy} onclick={() => void start('everything')}>
+			<span class="bi-alt-ic" aria-hidden="true"><Icon name="radio" /></span>
+			<span><b>Start with streaming</b><i>Search, play and discover. Add your own music later.</i></span>
+		</button>
+		<button type="button" class="bi-alt" disabled={busy} onclick={() => void start('everything', () => goto('/settings?c=library'))}>
+			<span class="bi-alt-ic" aria-hidden="true"><Icon name="library_add" /></span>
+			<span><b>Import a backup file</b><i>A library file saved from Stash on your phone or the web.</i></span>
+		</button>
+	</div>
+{/snippet}
+
 <section class="bi" aria-labelledby="bi-h">
-	{#if !offer || !picks}
+	{#if owed}
+		<div class="bi-owed" role="alert">
+			<span>Your music is coming in, but Stash couldn’t finish setting up{trouble ? `: ${trouble}` : '.'}</span>
+			<button type="button" class="bi-go" disabled={busy} onclick={() => void finish()}>{busy ? 'Trying…' : 'Try again'}</button>
+		</div>
+	{:else if !offer || !picks}
 		<div class="bi-hero">
 			<div class="bi-wall" aria-hidden="true">
 				{#each GHOST as g, i (i)}<span class="bi-ghost" style="--d:{g.d}ms;background:{g.t}"></span>{/each}
@@ -180,21 +232,7 @@
 			<li class:done={plugged}><span class="k">{#if plugged}<Icon name="check" />{:else}2{/if}</span><b>Choose File transfer</b><span>On the phone, tap the USB notification, then File transfer.</span></li>
 			<li><span class="k">3</span><b>Tap Send to computer</b><span>In Stash on the phone: Settings › Library &amp; Storage › Send to computer.</span></li>
 		</ol>
-		<div class="bi-sec"><div><h2>No phone with Stash?</h2><p>Start another way. You can bring your phone’s music in later.</p></div></div>
-		<div class="bi-alts">
-			<button type="button" class="bi-alt" disabled={busy} onclick={() => void start('local', () => folders.add())}>
-				<span class="bi-alt-ic" aria-hidden="true"><Icon name="folder" /></span>
-				<span><b>Use music files on this computer</b><i>Pick a folder. Stash stays offline.</i></span>
-			</button>
-			<button type="button" class="bi-alt" disabled={busy} onclick={() => void start('everything')}>
-				<span class="bi-alt-ic" aria-hidden="true"><Icon name="radio" /></span>
-				<span><b>Start with streaming</b><i>Search, play and discover. Add your own music later.</i></span>
-			</button>
-			<button type="button" class="bi-alt" disabled={busy} onclick={() => void start('everything', () => goto('/settings?c=library'))}>
-				<span class="bi-alt-ic" aria-hidden="true"><Icon name="library_add" /></span>
-				<span><b>Import a backup file</b><i>A library file saved from Stash on your phone or the web.</i></span>
-			</button>
-		</div>
+		{#if first}{@render others('No phone with Stash?', 'Start another way. You can bring your phone’s music in later.')}{/if}
 		{#if trouble}<p class="bi-trouble" role="alert">{trouble}</p>{/if}
 	{:else}
 		<div class="bi-hero">
@@ -210,12 +248,14 @@
 						<span>·</span> <b>{n(lib.likes.songs)}</b> liked <span>·</span> <b>{n(lib.playlists.length)}</b> playlists <span>·</span> <b>{n(lib.plays)}</b> plays
 					{/if}
 				</p>
-				{#if lib}
+				{#if lib && !first && ui.local}
+					<p class="bi-old">Stash plays only your own files, so only songs you downloaded come in.</p>
+				{:else if lib}
 					<button type="button" role="switch" class="bi-sw" class:on={picks.onlyHere} aria-checked={picks.onlyHere} disabled={busy} onclick={() => picks && (picks = { ...picks, onlyHere: !picks.onlyHere })}>
-						<span class="bi-sw-k" aria-hidden="true"></span>{picks.onlyHere ? 'Only songs you downloaded. Nothing streams, and Stash stays offline.' : 'Bring only the songs I downloaded'}
+						<span class="bi-sw-k" aria-hidden="true"></span>{picks.onlyHere ? `Only songs you downloaded. Nothing streams${first ? ', and Stash stays offline' : ''}.` : 'Bring only the songs I downloaded'}
 					</button>
 				{:else}
-					<p class="bi-old">Update Stash on your phone to bring your likes, playlists and plays too.</p>
+					<p class="bi-old">{phone} sent its songs only. To bring your likes, playlists and plays too, update Stash on the phone and send again.</p>
 				{/if}
 			</div>
 		</div>
@@ -279,7 +319,9 @@
 			</div>
 		{/if}
 
-		{#if bar}
+		{#if first}{@render others('Or start another way', 'Leave this send on the phone for now. You can bring it in later.')}{/if}
+
+		{#if bar && !owed}
 			<div class="bi-take">
 				<div class="bi-take-in" role="region" aria-label="What comes in">
 					<span class="bi-take-t" aria-live="polite"><b>{bar.top}</b><i>{trouble ?? bar.sub}</i></span>
@@ -363,6 +405,8 @@
 	.bi-alt b { font: 600 14px/1.3 var(--font-body); }
 	.bi-alt i { font: 400 12.5px/1.35 var(--font-body); font-style: normal; color: var(--wp-text-2); }
 	.bi-trouble { margin-top: 12px; color: #f87171; }
+	.bi-owed { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 0 0 16px; padding: 12px 12px 12px 16px; border-radius: 12px; background: rgb(251 191 36 / .12); color: var(--wp-text); font: 500 14px/1.4 var(--font-body); }
+	.bi-owed span { flex: 1; min-width: 240px; }
 
 	.bi-take { position: fixed; z-index: 45; left: 0; right: 0; bottom: calc(var(--bar-clear, 100px) + 16px); display: flex; justify-content: center; pointer-events: none; padding: 0 24px; }
 	.bi-take-in { pointer-events: auto; display: flex; align-items: center; gap: 14px; min-width: 0; max-width: 100%; padding: 8px 8px 8px 20px; border-radius: 999px; background: color-mix(in oklab, var(--wp-field) 92%, transparent); backdrop-filter: saturate(150%) blur(18px); border: 1px solid var(--wp-line-2); box-shadow: var(--shadow-card); animation: bi-in 180ms var(--ease-out-expo) both; }

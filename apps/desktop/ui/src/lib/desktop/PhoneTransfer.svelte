@@ -40,6 +40,10 @@
 		folder: string | null;
 		library: boolean;
 		drive: string | null;
+		/** The send waiting carries the phone's library (likes, plays, playlists): chosen from on Bring in your music. */
+		with_library?: boolean;
+		/** What of a library comes in was chosen before for this phone: a take with no choice brings in the same. */
+		library_choice_kept?: boolean;
 	};
 	let now = $state<Now | null>(null);
 	let closedAt = $state(0);
@@ -84,7 +88,7 @@
 	const gb = (bytes: number) => (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`);
 	/** Every song of a send in, said so (one song, or none, as such). */
 	const allIn = (n: number) => (n === 0 ? '' : n === 1 ? 'The song came in. ' : `All ${songs(n)} came in. `);
-	const shown = $derived(!!now && now.state !== 'idle' && now.at_ms > closedAt && page.url.pathname !== '/phone' && ui.mode !== null);
+	const shown = $derived(!!now && now.state !== 'idle' && now.at_ms > closedAt && page.url.pathname !== '/phone' && page.url.pathname !== '/bring-in' && ui.mode !== null);
 	const from = $derived(now?.phone ?? 'Your phone');
 	/** The card's heading, its lines, and its bar (a share from 0 to 1, null for one that moves on its own, undefined for none). */
 	const card = $derived.by((): { title: string; lines: string[]; bar: number | null | undefined } | null => {
@@ -96,6 +100,12 @@
 				return { title: `${from} is getting songs ready`, lines: [`${songs(now.ready)} ready so far. You choose which come in next.`], bar: null };
 			case 'ready': {
 				const fresh = now.total - now.here;
+				if (now.with_library)
+					return {
+						title: now.total ? `Your music is waiting on ${from}` : `Your likes, playlists and plays are waiting on ${from}`,
+						lines: [now.total ? `${songs(now.total)}${fresh ? ` · ${gb(now.bytes_total)}` : ', all on this computer already'}, with your likes, playlists and plays.` : 'Choose what comes in.', trouble ?? ''].filter(Boolean),
+						bar: undefined
+					};
 				return {
 					title: `${songs(now.total)} waiting on ${from}`,
 					lines: [fresh ? `${now.here ? `${now.here.toLocaleString()} on this computer already · ` : ''}${gb(now.bytes_total)} in all` : 'All of them are on this computer already.', trouble ?? ''].filter(Boolean),
@@ -182,8 +192,12 @@
 			{/if}
 			{#if now.state === 'ready'}
 				<div class="ph-do">
-					<button type="button" class="btn" onclick={() => void goto('/phone')}>Choose songs</button>
-					{#if now.total > now.here}
+					{#if now.with_library}
+						<button type="button" class="btn" onclick={() => void goto('/bring-in')}>Choose what comes in</button>
+					{:else}
+						<button type="button" class="btn" onclick={() => void goto('/phone')}>Choose songs</button>
+					{/if}
+					{#if now.total > now.here && (!now.with_library || now.library_choice_kept)}
 						<button type="button" class="btn ghost" disabled={starting} onclick={takeNew}>{starting ? 'Starting…' : `Take all ${(now.total - now.here).toLocaleString()} new`}</button>
 					{/if}
 				</div>
