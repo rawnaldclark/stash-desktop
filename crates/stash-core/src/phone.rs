@@ -184,19 +184,32 @@ mod imp {
         pub files: Vec<PhoneFile>,
     }
 
-    fn name_of(props: &IPortableDeviceProperties, object: &str) -> Option<(String, u64)> {
+    /// What the phone says when an object it listed is no longer there (deleted since: the phone clearing its copies
+    /// as the computer lists them).
+    fn gone(e: &windows::core::Error) -> bool {
+        // HRESULT_FROM_WIN32(ERROR_NOT_FOUND), HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)
+        matches!(e.code().0 as u32, 0x8007_0490 | 0x8007_0002)
+    }
+
+    /// An object's name and size: Ok(None) for an object with no name, or one gone since it was listed; Err when the
+    /// phone did not say (its properties could not be read), so a listing that left it out is not all of them.
+    fn name_of(props: &IPortableDeviceProperties, object: &str) -> windows::core::Result<Option<(String, u64)>> {
         unsafe {
             let keys: IPortableDeviceKeyCollection =
-                CoCreateInstance(&PortableDeviceKeyCollection, None, CLSCTX_INPROC_SERVER).ok()?;
+                CoCreateInstance(&PortableDeviceKeyCollection, None, CLSCTX_INPROC_SERVER)?;
             for key in [
                 &WPD_OBJECT_ORIGINAL_FILE_NAME,
                 &WPD_OBJECT_NAME,
                 &WPD_OBJECT_SIZE,
             ] {
-                keys.Add(key as *const PROPERTYKEY).ok()?;
+                keys.Add(key as *const PROPERTYKEY)?;
             }
             let wide = HSTRING::from(object);
-            let values = props.GetValues(PCWSTR(wide.as_ptr()), &keys).ok()?;
+            let values = match props.GetValues(PCWSTR(wide.as_ptr()), &keys) {
+                Ok(values) => values,
+                Err(e) if gone(&e) => return Ok(None),
+                Err(e) => return Err(e),
+            };
             let text = |key: &PROPERTYKEY| {
                 values
                     .GetStringValue(key)
@@ -204,18 +217,21 @@ mod imp {
                     .map(|p| taken(p))
                     .filter(|s| !s.is_empty())
             };
-            let name = text(&WPD_OBJECT_ORIGINAL_FILE_NAME).or_else(|| text(&WPD_OBJECT_NAME))?;
+            let Some(name) = text(&WPD_OBJECT_ORIGINAL_FILE_NAME).or_else(|| text(&WPD_OBJECT_NAME)) else {
+                return Ok(None);
+            };
             let size = values
                 .GetUnsignedLargeIntegerValue(&WPD_OBJECT_SIZE)
                 .unwrap_or(0);
-            Some((name, size))
+            Ok(Some((name, size)))
         }
     }
 
     /// The objects inside `parent`, with their names and sizes, and whether that is all of them: a listing the phone
-    /// stopped part way (it failed to say what comes next) can leave any of them out.
+    /// stopped part way (it failed to say what comes next, or what one of them is) can leave any of them out.
     fn children(content: &IPortableDeviceContent, parent: &str) -> (Vec<PhoneFile>, bool) {
         let mut out = Vec::new();
+        let mut all = true;
         unsafe {
             let Ok(props) = content.Properties() else {
                 return (out, false);
@@ -230,8 +246,10 @@ mod imp {
                 let hr = found.Next(&mut ids, &mut fetched);
                 for raw in ids.into_iter().take(fetched as usize) {
                     let object = taken(raw);
-                    if let Some((name, size)) = name_of(&props, &object) {
-                        out.push(PhoneFile { object, name, size });
+                    match name_of(&props, &object) {
+                        Ok(Some((name, size))) => out.push(PhoneFile { object, name, size }),
+                        Ok(None) => {}
+                        Err(_) => all = false,
                     }
                 }
                 if hr.is_err() {
@@ -239,7 +257,7 @@ mod imp {
                 }
                 // S_FALSE: fewer than asked for, the last of them.
                 if fetched == 0 || hr.0 != 0 {
-                    return (out, true);
+                    return (out, all);
                 }
             }
         }

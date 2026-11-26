@@ -2014,10 +2014,10 @@ fn unlisted(now: &mut Option<Now>, listed: &dyn Fn(&str) -> bool) {
 }
 
 /// What was said of a phone, once it is out of reach (unplugged, or not answering): a transfer said to be taken from it
-/// was cut short ([`cut_short`]), and one whose list stayed on it is to be plugged in again so the computer can finish
-/// with it. The rest stays as it was said.
+/// was cut short ([`cut_short`]), and one whose list stayed on it, or with songs the computer was to try again by
+/// itself, is to be plugged in again: nothing more comes in until then. The rest stays as it was said.
 fn out_of_reach(n: &mut Now) {
-    if n.state == "done" && n.list_left {
+    if n.state == "done" && (n.list_left || n.trying_again) {
         n.state = "stopped";
         n.trying_again = false;
         n.at_ms = now_ms();
@@ -3689,6 +3689,12 @@ mod tests {
         nothing_sent(&board, "A", false, false, 0);
         let n = board.now.lock().unwrap().clone().unwrap();
         assert_eq!((n.state, n.list_left, n.trying_again, n.done), ("stopped", true, false, 5));
+        assert!(n.at_ms > 5);
+        // Songs the computer was to try again by itself can't come in while the phone doesn't answer: plugged in again.
+        *board.now.lock().unwrap() = Some(Now { failed: 1, trying_again: true, ..card("done") });
+        nothing_sent(&board, "A", false, false, 0);
+        let n = board.now.lock().unwrap().clone().unwrap();
+        assert_eq!((n.state, n.failed, n.trying_again, n.done), ("stopped", 1, false, 2));
         assert!(n.at_ms > 5);
     }
 

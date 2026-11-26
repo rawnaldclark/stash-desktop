@@ -10,11 +10,14 @@
 
 	type Phone = { name: string; has_songs: boolean | null };
 	type Now = {
-		state: 'idle' | 'connected' | 'preparing' | 'ready' | 'taking' | 'stalled' | 'done' | 'stopped' | 'cannot_save';
+		state: 'idle' | 'connected' | 'preparing' | 'ready' | 'taking' | 'stalled' | 'done' | 'stopped' | 'withdrawn' | 'cannot_save';
 		phone: string | null;
 		done: number;
 		total: number;
 		here: number;
+		/** Every song is in, but the send's list is still on the phone (removed at a look: by itself while `trying_again`). */
+		list_left: boolean;
+		trying_again: boolean;
 		folder: string | null;
 		/** Stash's library is what can't keep the songs (on `drive`), not the downloads folder. */
 		library: boolean;
@@ -83,6 +86,13 @@
 		if (now.state === 'preparing') return `${now.phone ?? 'Your phone'} is getting songs ready…`;
 		if (now.state === 'ready') return `${now.phone ?? 'Your phone'} has ${songs(now.total)} waiting${now.here ? ` (${now.here.toLocaleString()} on this computer already)` : ''}. Choose which come in.`;
 		if (now.state === 'stalled') return `${now.phone ?? 'Your phone'} stopped sending. Asking it again…`;
+		if (now.state === 'done' && now.list_left) {
+			const from = now.phone ?? 'your phone';
+			const allIn = now.total === 1 ? `The song from ${from} came in.` : `All ${now.total.toLocaleString()} songs from ${from} came in.`;
+			return now.trying_again
+				? `${allIn} Keep the phone plugged in: the computer finishes with it in a moment.`
+				: `${allIn} Unplug the phone and plug it back in so the computer can finish with it.`;
+		}
 		if (now.state === 'stopped') return `Lost contact with ${now.phone ?? 'your phone'}. Unplug it and plug it back in, or in its USB notification choose No data transfer, then File transfer.`;
 		if (now.state === 'cannot_save' && now.library)
 			return `Songs from ${now.phone ?? 'your phone'} can't be kept in Stash's library. Free some space on ${now.drive ?? 'its drive'}, or check that drive, then plug the phone back in.`;
