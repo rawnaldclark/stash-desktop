@@ -4517,6 +4517,7 @@ dependencies = [
  "md-5",
  "rfd",
  "ring",
+ "rusqlite",
  "rustls",
  "serde",
  "serde_json",

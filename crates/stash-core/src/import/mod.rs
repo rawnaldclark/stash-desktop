@@ -148,7 +148,8 @@ pub fn read_file(path: &std::path::Path) -> Result<Incoming, ImportError> {
 }
 
 /// The library's row that is the song known by `words` (its [`words_key`]) and `isrc`, when it has one: by the ISRC, else
-/// by the words (one song, unless both have an ISRC and they differ). A file before a description.
+/// by the words (one song, unless both have an ISRC and they differ). A file here before one gone missing, and a file
+/// before a description.
 pub(crate) fn same_song(
     conn: &rusqlite::Connection,
     words: &str,
@@ -157,7 +158,8 @@ pub(crate) fn same_song(
     if let Some(isrc) = isrc {
         let found = conn
             .prepare_cached(
-                "SELECT id FROM tracks WHERE isrc = ?1 ORDER BY origin = 'file' DESC, id LIMIT 1",
+                "SELECT id FROM tracks WHERE isrc = ?1
+                 ORDER BY (origin = 'file' AND missing_since IS NULL) DESC, origin = 'file' DESC, id LIMIT 1",
             )?
             .query_row([isrc], |r| r.get(0))
             .optional()?;
@@ -166,7 +168,8 @@ pub(crate) fn same_song(
         }
     }
     let mut same_words = conn.prepare_cached(
-        "SELECT id, isrc FROM tracks WHERE words_key = ?1 ORDER BY origin = 'file' DESC, id",
+        "SELECT id, isrc FROM tracks WHERE words_key = ?1
+         ORDER BY (origin = 'file' AND missing_since IS NULL) DESC, origin = 'file' DESC, id",
     )?;
     let mut rows = same_words.query([words])?;
     while let Some(row) = rows.next()? {
@@ -395,14 +398,33 @@ impl Merger<'_> {
 }
 
 impl Library {
+    /// For each of `songs`, whether the library has it as a file already: the row [`Self::adopt_songs`] would find
+    /// for it (by ISRC, then by its words), when that row is a file or saved as one. Changes nothing.
+    pub fn songs_here(&self, songs: &[Song]) -> crate::Result<Vec<bool>> {
+        songs
+            .iter()
+            .map(|song| {
+                let words = words_key(&song.title, &song.artist);
+                match same_song(&self.conn, &words, song.isrc.as_deref())? {
+                    Some(id) => Ok(!self.wants_file(id)?),
+                    None => Ok(false),
+                }
+            })
+            .collect()
+    }
+
     /// The library's rows for `songs`, in their order: for each the row the library has for that song, or a new one
-    /// known by its description.
+    /// known by its description. Another connection writing (a scan's) is waited for, as it reads before it writes.
     pub fn adopt_songs(&mut self, songs: &[Song]) -> crate::Result<Vec<i64>> {
         let now_s = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let tx = self.conn.transaction()?;
+        // Writing from the start: one that only read first could not wait its turn to write (SQLite says busy at
+        // once), so a scan writing meanwhile would fail it.
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let ids = {
             let mut merger = Merger {
                 tx: &tx,

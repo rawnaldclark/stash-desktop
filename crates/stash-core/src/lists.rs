@@ -611,23 +611,27 @@ impl Library {
     }
 
     /// A file for song `id` is coming in from somewhere other than an add-on (a phone's transfer): its download is
-    /// "saving", for [`Self::download_saved`] to finish. False when the song is a file already.
+    /// "saving", for [`Self::download_saved`] to finish. False when the song is a file already (one gone missing, a
+    /// scan found, is not: the file coming in takes its place).
     pub fn download_arriving(&mut self, id: i64, now_ms: i64) -> Result<bool> {
         let n = self.conn.execute(
             "INSERT INTO downloads(track_id, state, asked_at)
-             SELECT id, 'saving', ?2 FROM tracks WHERE id = ?1 AND origin <> 'file'
-             ON CONFLICT(track_id) DO UPDATE SET state = 'saving', error = NULL WHERE downloads.state <> 'saved'",
+             SELECT id, 'saving', ?2 FROM tracks WHERE id = ?1 AND (origin <> 'file' OR missing_since IS NOT NULL)
+             ON CONFLICT(track_id) DO UPDATE SET state = 'saving', error = NULL
+             WHERE downloads.state <> 'saved'
+                OR (SELECT missing_since FROM tracks WHERE id = downloads.track_id) IS NOT NULL",
             params![id, now_ms],
         )?;
         Ok(n > 0)
     }
 
     /// Whether a file coming in for song `id` would be taken: what [`Self::download_arriving`] would say, changing
-    /// nothing. False when the song is a file already (or has been saved as one).
+    /// nothing. False when the song is a file already (or has been saved as one), and that file has not gone missing.
     pub fn wants_file(&self, id: i64) -> Result<bool> {
         let n: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM tracks t LEFT JOIN downloads d ON d.track_id = t.id
-             WHERE t.id = ?1 AND t.origin <> 'file' AND COALESCE(d.state, '') <> 'saved'",
+             WHERE t.id = ?1 AND (t.origin <> 'file' OR t.missing_since IS NOT NULL)
+               AND (COALESCE(d.state, '') <> 'saved' OR t.missing_since IS NOT NULL)",
             [id],
             |r| r.get(0),
         )?;
@@ -645,13 +649,17 @@ impl Library {
     /// The song `id` is a file now: its row becomes the file's (its likes, playlists, plays and ISRC stay), its
     /// download is saved. With `cover_inside` the file's own picture is shown before the add-on's cover address, so
     /// it shows with no network (the address is kept for when the file is given back). False (and nothing changed) when the song was taken off the list meanwhile.
+    /// Another connection writing (a scan's) is waited for, as it reads before it writes.
     pub fn download_saved(
         &mut self,
         id: i64,
         file: &crate::library::NewTrack,
         saved: &SavedDownload,
     ) -> Result<bool> {
-        let tx = self.conn.transaction()?;
+        // Writing from the start: one that only read first could not wait its turn to write (SQLite says busy at once).
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let still: bool = tx
             .query_row(
                 "SELECT COUNT(*) FROM downloads WHERE track_id = ?1 AND state = 'saving'",
@@ -2486,6 +2494,228 @@ mod tests {
         assert!(!library.wants_file(ids[1]).unwrap());
         assert!(!library.download_arriving(ids[1], 7).unwrap());
         assert_eq!(state(&library, ids[1]), None);
+        // Which of a phone's songs are here already, found as adopting them would find them, changing nothing: the
+        // saved one and the file are; the one coming in and one the library has never met are not.
+        let asked = [song("Alpha"), song("Bravo"), song("Charlie"), song("Delta")];
+        let tracks = |library: &Library| -> i64 {
+            library.conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0)).unwrap()
+        };
+        let before = tracks(&library);
+        assert_eq!(library.songs_here(&asked).unwrap(), vec![true, true, false, false]);
+        assert_eq!(tracks(&library), before, "asking added no song");
+    }
+
+    #[test]
+    fn a_song_whose_file_has_gone_missing_is_not_here_and_a_file_from_a_phone_takes_its_place() {
+        let mut library = Library::open_in_memory().unwrap();
+        let song = |title: &str| crate::import::Song {
+            title: title.into(),
+            artist: "Someone".into(),
+            ..Default::default()
+        };
+        let ids = library.adopt_songs(&[song("Alpha"), song("Bravo")]).unwrap();
+        // A song from the music folders, and one saved here before: a scan found both files gone.
+        library
+            .conn
+            .execute(
+                "UPDATE tracks SET origin = 'file', locator = 'C:/Music/' || id || '.flac', missing_since = 5",
+                [],
+            )
+            .unwrap();
+        library
+            .conn
+            .execute(
+                "INSERT INTO downloads(track_id, state, asked_at, path) VALUES (?1, 'saved', 1, 'C:/Music/2.flac')",
+                [ids[1]],
+            )
+            .unwrap();
+        let asked = [song("Alpha"), song("Bravo")];
+        assert_eq!(library.songs_here(&asked).unwrap(), vec![false, false], "neither is here");
+        for (n, &id) in ids.iter().enumerate() {
+            assert!(library.wants_file(id).unwrap());
+            assert!(library.download_arriving(id, 6).unwrap());
+            let file = crate::library::NewTrack {
+                title: if n == 0 { "Alpha" } else { "Bravo" }.into(),
+                artist: "Someone".into(),
+                album_artist: None,
+                album: None,
+                year: None,
+                disc_no: 0,
+                track_no: 0,
+                duration_ms: 1_000,
+                isrc: None,
+                origin: crate::library::Origin::File,
+                addon_id: None,
+                locator: format!("C:/Stash/{id}.flac"),
+                codec: Some("flac".into()),
+                sample_rate: Some(44_100),
+                bit_depth: Some(16),
+                added_at: 0,
+                file_size: Some(10),
+                file_mtime: Some(0),
+            };
+            let saved = SavedDownload {
+                addon: "phone".into(),
+                tier: None,
+                at_ms: 7,
+                fetched: false,
+                cover_inside: false,
+            };
+            assert!(library.download_saved(id, &file, &saved).unwrap());
+            let (locator, missing): (String, Option<i64>) = library
+                .conn
+                .query_row("SELECT locator, missing_since FROM tracks WHERE id = ?1", [id], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .unwrap();
+            assert_eq!((locator, missing), (format!("C:/Stash/{id}.flac"), None), "the file taken is the song's now");
+            assert!(!library.wants_file(id).unwrap());
+        }
+        assert_eq!(library.songs_here(&asked).unwrap(), vec![true, true], "here now");
+    }
+
+    #[test]
+    fn a_song_found_or_saved_waits_for_another_writer_rather_than_failing() {
+        let dir = std::env::temp_dir().join(format!("stash-busy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("library.db");
+        {
+            let mut library = Library::open(&db).unwrap();
+            let song = |title: &str| crate::import::Song {
+                title: title.into(),
+                artist: "Someone".into(),
+                ..Default::default()
+            };
+            let id = library.adopt_songs(&[song("Alpha")]).unwrap()[0];
+            assert!(library.download_arriving(id, 1).unwrap());
+            // Another connection writing for a moment (a scan's): each of these reads before it writes, and waits its
+            // turn rather than failing.
+            let writing_a_moment = || {
+                let (held, holding) = std::sync::mpsc::channel();
+                let db = db.clone();
+                let writer = std::thread::spawn(move || {
+                    let other = rusqlite::Connection::open(&db).unwrap();
+                    other
+                        .execute_batch(
+                            "BEGIN IMMEDIATE;
+                             INSERT INTO settings(key, value) VALUES ('scan', '1')
+                                 ON CONFLICT(key) DO UPDATE SET value = value || '1';",
+                        )
+                        .unwrap();
+                    held.send(()).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    other.execute_batch("COMMIT").unwrap();
+                });
+                holding.recv().unwrap();
+                writer
+            };
+            let writer = writing_a_moment();
+            assert_eq!(library.adopt_songs(&[song("Bravo")]).unwrap().len(), 1);
+            writer.join().unwrap();
+            let file = crate::library::NewTrack {
+                title: "Alpha".into(),
+                artist: "Someone".into(),
+                album_artist: None,
+                album: None,
+                year: None,
+                disc_no: 0,
+                track_no: 0,
+                duration_ms: 1_000,
+                isrc: None,
+                origin: crate::library::Origin::File,
+                addon_id: None,
+                locator: "C:/Stash/alpha.flac".into(),
+                codec: Some("flac".into()),
+                sample_rate: Some(44_100),
+                bit_depth: Some(16),
+                added_at: 0,
+                file_size: Some(10),
+                file_mtime: Some(0),
+            };
+            let saved = SavedDownload {
+                addon: "phone".into(),
+                tier: None,
+                at_ms: 7,
+                fetched: false,
+                cover_inside: false,
+            };
+            let writer = writing_a_moment();
+            assert!(library.download_saved(id, &file, &saved).unwrap());
+            writer.join().unwrap();
+            assert_eq!(library.file().as_deref(), Some(db.as_path()), "where it is kept");
+        }
+        assert_eq!(Library::open_in_memory().unwrap().file(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trouble_in_the_library_is_told_apart_by_whose_it_is() {
+        let failing = |code| {
+            crate::Error::Db(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None))
+        };
+        for code in [
+            rusqlite::ffi::SQLITE_FULL,
+            rusqlite::ffi::SQLITE_IOERR,
+            rusqlite::ffi::SQLITE_CANTOPEN,
+            rusqlite::ffi::SQLITE_READONLY,
+            rusqlite::ffi::SQLITE_CORRUPT,
+            rusqlite::ffi::SQLITE_NOTADB,
+        ] {
+            assert!(failing(code).of_the_file() && !failing(code).busy(), "{code}: the file's or its drive's");
+        }
+        for code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_LOCKED] {
+            assert!(failing(code).busy() && !failing(code).of_the_file(), "{code}: another writer's, for a moment");
+        }
+        let constraint = failing(rusqlite::ffi::SQLITE_CONSTRAINT);
+        assert!(!constraint.of_the_file() && !constraint.busy(), "a row in the way: one song's");
+        let mut refused = Library::open_in_memory().unwrap();
+        refused.refuse_writes().unwrap();
+        let e = refused.set_setting("a", "b").unwrap_err();
+        assert!(e.of_the_file(), "a write refused, as on a full disk: {e}");
+    }
+
+    #[test]
+    fn a_song_is_found_as_its_file_here_before_a_file_gone_missing() {
+        let mut library = Library::open_in_memory().unwrap();
+        let song = |title: &str| crate::import::Song {
+            title: title.into(),
+            artist: "Someone".into(),
+            ..Default::default()
+        };
+        let ids = library.adopt_songs(&[song("Alpha"), song("Other")]).unwrap();
+        let (old, moved) = (ids[0], ids[1]);
+        // The same song twice as files (moved within the music folders and scanned again): the old one gone missing.
+        let words: String = library
+            .conn
+            .query_row("SELECT words_key FROM tracks WHERE id = ?1", [old], |r| r.get(0))
+            .unwrap();
+        library
+            .conn
+            .execute(
+                "UPDATE tracks SET origin = 'file', locator = 'C:/Music/old.flac', missing_since = 5 WHERE id = ?1",
+                [old],
+            )
+            .unwrap();
+        library
+            .conn
+            .execute(
+                "UPDATE tracks SET origin = 'file', locator = 'C:/Music/new.flac', words_key = ?2 WHERE id = ?1",
+                params![moved, words],
+            )
+            .unwrap();
+        assert_eq!(crate::import::same_song(&library.conn, &words, None).unwrap(), Some(moved));
+        assert_eq!(library.songs_here(&[song("Alpha")]).unwrap(), vec![true]);
+        assert_eq!(library.adopt_songs(&[song("Alpha")]).unwrap(), vec![moved]);
+        // Found by its ISRC the same way: the file here first, though the one gone missing came first.
+        library
+            .conn
+            .execute("UPDATE tracks SET isrc = 'USABC1234567' WHERE id IN (?1, ?2)", params![old, moved])
+            .unwrap();
+        assert_eq!(
+            crate::import::same_song(&library.conn, "other words", Some("USABC1234567")).unwrap(),
+            Some(moved)
+        );
     }
 
     #[test]

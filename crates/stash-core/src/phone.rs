@@ -1,6 +1,6 @@
 //! A phone plugged in over USB ("File transfer"), through Windows Portable Devices (MTP): the phones connected, the
 //! folder Stash for Android's "Send to computer" leaves (`Download/Stash transfer/`, with `stash-transfer.json`), its
-//! files read to this computer, and the folder deleted once taken.
+//! files read to this computer and deleted from the phone once taken, and the folder once empty.
 //!
 //! Every call is blocking and uses COM on the calling thread (initialised here, multithreaded); a [`Transfer`] stays on
 //! the thread that opened it. Other systems have no phones here.
@@ -32,6 +32,19 @@ pub const LIST: &str = "stash-transfer.json";
 pub const STALL: std::time::Duration = std::time::Duration::from_secs(20);
 /// What a read called off for sending nothing says: the caller opens the phone again rather than give up on the song.
 pub const STALLED: &str = "the phone stopped sending mid-song";
+/// What trouble on this computer's side of a copy starts with when it is the drive's (the file could not be made,
+/// written or kept: a full disk, a drive gone): not the phone's doing, so not a phone lost, and every song would meet
+/// it.
+pub const HERE: &str = "on this computer: ";
+/// What trouble on this computer's side starts with when it is one song's alone (its file held by another program
+/// past a few tries, say): not the phone's doing either, and that song is not taken while the rest are.
+pub const ONE_SONG: &str = "for this song, on this computer: ";
+
+/// Whether another program has the file open (Windows' sharing and lock violations): an antivirus or a sync client
+/// looking at a file just written, which lets it go in a moment.
+pub fn held_by_another(e: &std::io::Error) -> bool {
+    cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33))
+}
 
 /// What a read tells as it goes: how much of the file has come so far, and (once) that the file has sent nothing for
 /// `stall_after`, when its read is called off. `stalled` is told from another thread.
@@ -82,7 +95,7 @@ mod imp {
     use windows::Win32::System::Variant::VT_LPWSTR;
     use windows::core::{HSTRING, Interface, PCWSTR, PWSTR};
 
-    use super::{FOLDER, Phone, PhoneFile, STALLED, Watch};
+    use super::{FOLDER, HERE, ONE_SONG, Phone, PhoneFile, STALLED, Watch, held_by_another};
 
     fn com() {
         // Already initialised on this thread (in either mode) is fine.
@@ -171,19 +184,32 @@ mod imp {
         pub files: Vec<PhoneFile>,
     }
 
-    fn name_of(props: &IPortableDeviceProperties, object: &str) -> Option<(String, u64)> {
+    /// What the phone says when an object it listed is no longer there (deleted since: the phone clearing its copies
+    /// as the computer lists them).
+    fn gone(e: &windows::core::Error) -> bool {
+        // HRESULT_FROM_WIN32(ERROR_NOT_FOUND), HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)
+        matches!(e.code().0 as u32, 0x8007_0490 | 0x8007_0002)
+    }
+
+    /// An object's name and size: Ok(None) for an object with no name, or one gone since it was listed; Err when the
+    /// phone did not say (its properties could not be read), so a listing that left it out is not all of them.
+    fn name_of(props: &IPortableDeviceProperties, object: &str) -> windows::core::Result<Option<(String, u64)>> {
         unsafe {
             let keys: IPortableDeviceKeyCollection =
-                CoCreateInstance(&PortableDeviceKeyCollection, None, CLSCTX_INPROC_SERVER).ok()?;
+                CoCreateInstance(&PortableDeviceKeyCollection, None, CLSCTX_INPROC_SERVER)?;
             for key in [
                 &WPD_OBJECT_ORIGINAL_FILE_NAME,
                 &WPD_OBJECT_NAME,
                 &WPD_OBJECT_SIZE,
             ] {
-                keys.Add(key as *const PROPERTYKEY).ok()?;
+                keys.Add(key as *const PROPERTYKEY)?;
             }
             let wide = HSTRING::from(object);
-            let values = props.GetValues(PCWSTR(wide.as_ptr()), &keys).ok()?;
+            let values = match props.GetValues(PCWSTR(wide.as_ptr()), &keys) {
+                Ok(values) => values,
+                Err(e) if gone(&e) => return Ok(None),
+                Err(e) => return Err(e),
+            };
             let text = |key: &PROPERTYKEY| {
                 values
                     .GetStringValue(key)
@@ -191,24 +217,28 @@ mod imp {
                     .map(|p| taken(p))
                     .filter(|s| !s.is_empty())
             };
-            let name = text(&WPD_OBJECT_ORIGINAL_FILE_NAME).or_else(|| text(&WPD_OBJECT_NAME))?;
+            let Some(name) = text(&WPD_OBJECT_ORIGINAL_FILE_NAME).or_else(|| text(&WPD_OBJECT_NAME)) else {
+                return Ok(None);
+            };
             let size = values
                 .GetUnsignedLargeIntegerValue(&WPD_OBJECT_SIZE)
                 .unwrap_or(0);
-            Some((name, size))
+            Ok(Some((name, size)))
         }
     }
 
-    /// The objects inside `parent`, with their names and sizes.
-    fn children(content: &IPortableDeviceContent, parent: &str) -> Vec<PhoneFile> {
+    /// The objects inside `parent`, with their names and sizes, and whether that is all of them: a listing the phone
+    /// stopped part way (it failed to say what comes next, or what one of them is) can leave any of them out.
+    fn children(content: &IPortableDeviceContent, parent: &str) -> (Vec<PhoneFile>, bool) {
         let mut out = Vec::new();
+        let mut all = true;
         unsafe {
             let Ok(props) = content.Properties() else {
-                return out;
+                return (out, false);
             };
             let wide = HSTRING::from(parent);
             let Ok(found) = content.EnumObjects(0, PCWSTR(wide.as_ptr()), None) else {
-                return out;
+                return (out, false);
             };
             loop {
                 let mut ids = [PWSTR::null(); 32];
@@ -216,20 +246,27 @@ mod imp {
                 let hr = found.Next(&mut ids, &mut fetched);
                 for raw in ids.into_iter().take(fetched as usize) {
                     let object = taken(raw);
-                    if let Some((name, size)) = name_of(&props, &object) {
-                        out.push(PhoneFile { object, name, size });
+                    match name_of(&props, &object) {
+                        Ok(Some((name, size))) => out.push(PhoneFile { object, name, size }),
+                        Ok(None) => {}
+                        Err(_) => all = false,
                     }
                 }
-                if hr.is_err() || fetched == 0 || hr.0 != 0 {
-                    break;
+                if hr.is_err() {
+                    return (out, false);
+                }
+                // S_FALSE: fewer than asked for, the last of them.
+                if fetched == 0 || hr.0 != 0 {
+                    return (out, all);
                 }
             }
         }
-        out
     }
 
-    /// The transfer folder on `phone`, when it is there (in any of its storages); None when the phone has none, or
-    /// shows no storage (it is charging only: "File transfer" is not chosen).
+    /// The transfer folder on `phone`, when it is there (in any of its storages), with every file in it; None when the
+    /// phone has none, or shows no storage (it is charging only: "File transfer" is not chosen). A phone that stopped
+    /// listing part way has not answered: what it listed can leave out any file, its list among them, so it is never
+    /// taken to say the list is gone.
     pub fn open_transfer(phone: &str) -> Result<Option<Transfer>, String> {
         com();
         unsafe {
@@ -244,23 +281,27 @@ mod imp {
                 CoCreateInstance(&PortableDeviceFTM, None, CLSCTX_INPROC_SERVER).map_err(said)?;
             device.Open(&HSTRING::from(phone), &info).map_err(said)?;
             let content = device.Content().map_err(said)?;
-            for storage in children(&content, "DEVICE") {
+            let part_way = || Err("the phone stopped listing its files part way".to_string());
+            let (storages, mut whole) = children(&content, "DEVICE");
+            for storage in storages {
                 let mut at = storage.object.clone();
                 let mut found = true;
                 for step in FOLDER {
-                    match children(&content, &at)
-                        .into_iter()
-                        .find(|c| c.name.eq_ignore_ascii_case(step))
-                    {
+                    let (inside, all) = children(&content, &at);
+                    match inside.into_iter().find(|c| c.name.eq_ignore_ascii_case(step)) {
                         Some(next) => at = next.object,
                         None => {
+                            whole &= all;
                             found = false;
                             break;
                         }
                     }
                 }
                 if found {
-                    let files = children(&content, &at);
+                    let (files, all) = children(&content, &at);
+                    if !all {
+                        return part_way();
+                    }
                     return Ok(Some(Transfer {
                         _device: device,
                         content,
@@ -269,7 +310,7 @@ mod imp {
                     }));
                 }
             }
-            Ok(None)
+            if whole { Ok(None) } else { part_way() }
         }
     }
 
@@ -287,18 +328,27 @@ mod imp {
             Ok(out)
         }
 
-        /// Copies `file` to `to` (a new file), telling `watch` how much has come; how many bytes. Nothing is left at
-        /// `to` when it fails; one called off for sending nothing fails with [`STALLED`].
+        /// Copies `file` to `to` (a new file), telling `watch` how much has come; how many bytes, once they are on the
+        /// disk (not only in Windows' cache: the phone's copy may be deleted next). Nothing is left at `to` when it
+        /// fails; one called off for sending nothing fails with [`STALLED`], and trouble writing here starts with
+        /// [`HERE`] ([`ONE_SONG`] when another program holds `to`).
         pub fn copy(&self, file: &PhoneFile, to: &Path, watch: &Watch) -> Result<u64, String> {
-            let mut out = std::fs::File::create(to).map_err(|e| e.to_string())?;
+            let here = |e: std::io::Error| {
+                if held_by_another(&e) {
+                    format!("{ONE_SONG}another program has the file open: {e}")
+                } else {
+                    format!("{HERE}{e}")
+                }
+            };
+            let mut out = std::fs::File::create(to).map_err(here)?;
             let mut n = 0u64;
             let done = self.each_block(file, watch, &mut |block| {
                 n += block.len() as u64;
-                out.write_all(block).map_err(|e| e.to_string())?;
+                out.write_all(block).map_err(here)?;
                 (watch.progress)(n);
                 Ok(())
             });
-            if let Err(e) = done.and_then(|_| out.flush().map_err(|e| e.to_string())) {
+            if let Err(e) = done.and_then(|_| out.sync_all().map_err(here)) {
                 drop(out);
                 let _ = std::fs::remove_file(to);
                 return Err(e);
@@ -398,17 +448,18 @@ mod imp {
             })
         }
 
-        /// Deletes the transfer folder and everything in it from the phone.
-        pub fn remove(&self) -> Result<(), String> {
-            self.delete(&self.folder)
+        /// Deletes the transfer folder from the phone when it is empty; fails, deleting nothing, when anything is in
+        /// it (a file this computer has not seen: never deleted with it).
+        pub fn remove_if_empty(&self) -> Result<(), String> {
+            self.delete(&self.folder, PORTABLE_DEVICE_DELETE_NO_RECURSION)
         }
 
         /// Deletes one file of the transfer from the phone (one taken: the phone counts what is left).
         pub fn remove_file(&self, file: &PhoneFile) -> Result<(), String> {
-            self.delete(&file.object)
+            self.delete(&file.object, PORTABLE_DEVICE_DELETE_WITH_RECURSION)
         }
 
-        fn delete(&self, object: &str) -> Result<(), String> {
+        fn delete(&self, object: &str, how: DELETE_OBJECT_OPTIONS) -> Result<(), String> {
             unsafe {
                 let ids: IPortableDevicePropVariantCollection = CoCreateInstance(
                     &PortableDevicePropVariantCollection,
@@ -426,11 +477,7 @@ mod imp {
                 inner.Anonymous.pwszVal = PWSTR(wide.as_ptr() as *mut u16);
                 ids.Add(&*one).map_err(said)?;
                 self.content
-                    .Delete(
-                        PORTABLE_DEVICE_DELETE_WITH_RECURSION.0 as u32,
-                        &ids,
-                        std::ptr::null_mut(),
-                    )
+                    .Delete(how.0 as u32, &ids, std::ptr::null_mut())
                     .map_err(said)
             }
         }

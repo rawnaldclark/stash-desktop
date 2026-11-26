@@ -71,4 +71,22 @@ pub enum Error {
     NewerSchema { found: i64, supported: i64 },
 }
 
+impl Error {
+    /// Whether this is the library's file or the drive it is on failing (full, failing to read or write, not opening,
+    /// read-only, damaged, not a library at all): every write fails the same way until that is seen to.
+    pub fn of_the_file(&self) -> bool {
+        use rusqlite::ErrorCode::*;
+        matches!(self, Error::Db(e) if matches!(
+            e.sqlite_error_code(),
+            Some(DiskFull | SystemIoFailure | CannotOpen | ReadOnly | DatabaseCorrupt | NotADatabase)
+        ))
+    }
+
+    /// Whether another writer kept the library past the wait for it (busy, locked): over in a moment.
+    pub fn busy(&self) -> bool {
+        use rusqlite::ErrorCode::*;
+        matches!(self, Error::Db(e) if matches!(e.sqlite_error_code(), Some(DatabaseBusy | DatabaseLocked)))
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
