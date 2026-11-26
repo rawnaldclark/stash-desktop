@@ -13,8 +13,23 @@
 	import PhoneFacet from './PhoneFacet.svelte';
 	import { FACETS, bytesOf, detailOf, facet, narrowed as isNarrowed, noFilters, shows, size, toTake, type FacetId, type Filters, type Offer, type Offered } from './phone-songs';
 
-	type Now = { state: string; phone: string | null; ready: number; done: number; total: number; taken: number; had: number; not_kept: number; failed: number; left: number; error: string | null; folder: string | null };
-	const QUIET: Now = { state: 'idle', phone: null, ready: 0, done: 0, total: 0, taken: 0, had: 0, not_kept: 0, failed: 0, left: 0, error: null, folder: null };
+	type Now = {
+		state: string;
+		phone: string | null;
+		ready: number;
+		done: number;
+		total: number;
+		taken: number;
+		had: number;
+		not_kept: number;
+		failed: number;
+		left: number;
+		list_left: boolean;
+		trying_again: boolean;
+		error: string | null;
+		folder: string | null;
+	};
+	const QUIET: Now = { state: 'idle', phone: null, ready: 0, done: 0, total: 0, taken: 0, had: 0, not_kept: 0, failed: 0, left: 0, list_left: false, trying_again: false, error: null, folder: null };
 
 	let offer = $state.raw<Offer | null>(null);
 	let now = $state.raw<Now | null>(null);
@@ -313,11 +328,18 @@
 			{/if}
 		</p>
 		<button type="button" class="btn ghost" onclick={() => void goto('/library')}>Go to your library</button>
+	{:else if now?.state === 'stopped' && now.list_left && now.done === now.total}
+		<p class="s-hint" role="status">
+			Lost contact with {phone}. {now.total === 1 ? 'The song came in. ' : now.total ? `All ${songsWord(now.total)} came in. ` : ''}Plug the phone back in so the computer can finish with it.
+		</p>
 	{:else if now?.state === 'stopped'}
 		<p class="s-hint" role="status">
 			Lost contact with {phone}. {now.total ? `${now.done.toLocaleString()} of ${songsWord(now.total)} came in. ` : ''}Unplug the phone and plug it back in, or in its USB notification choose No data
 			transfer, then File transfer{now.total ? ': the rest come in by themselves' : ''}.
 		</p>
+	{:else if now?.state === 'withdrawn'}
+		<p class="s-hint" role="status">{Phone} stopped the send.{now.total ? ` ${(now.done - now.failed).toLocaleString()} of ${songsWord(now.total)} came in.` : ''}</p>
+		<button type="button" class="btn ghost" onclick={() => void goto('/library')}>Go to your library</button>
 	{:else if now?.state === 'cannot_save'}
 		<p class="pg-status bad" role="alert">
 			Songs from {phone} can't be saved in {now.folder ?? 'your downloads folder'}: {now.error ?? "it can't be written"}. {now.total ? `${now.done.toLocaleString()} of ${songsWord(now.total)} came in. ` : ''}Free some space
@@ -337,8 +359,13 @@
 				{songsWord(now.had)} you had already.
 			{/if}
 			{now.not_kept ? `${songsWord(now.not_kept)} ${now.not_kept === 1 ? 'is' : 'are'} in your library to download here: their files can't be kept.` : ''}
-			{now.failed ? `${songsWord(now.failed)} didn't: send again from the phone to try them.` : ''}
+			{now.failed && now.trying_again
+				? `${songsWord(now.failed)} didn't come in yet: the computer tries ${now.failed === 1 ? 'it' : 'them'} again.`
+				: now.failed
+					? `${songsWord(now.failed)} didn't: send again from the phone to try them.`
+					: ''}
 			{now.left === 1 ? `The other song stays in Stash on ${phone}.` : now.left ? `The other ${now.left.toLocaleString()} stay in Stash on ${phone}.` : ''}
+			{now.list_left && !now.failed ? 'Keep the phone plugged in: the computer finishes with it in a moment.' : ''}
 		</p>
 		<button type="button" class="btn ghost" onclick={() => void goto('/library')}>Go to your library</button>
 	{:else if !looked}

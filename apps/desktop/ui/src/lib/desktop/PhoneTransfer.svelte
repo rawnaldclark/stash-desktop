@@ -1,9 +1,9 @@
 <!-- Songs coming in from Stash for Android over USB (the core's `phone_transfer.rs`), told at every step in a card in
      the corner: a phone plugged in (and what to tap on it), the phone getting its songs ready, its songs waiting to be
      chosen from (the page From your phone, or every new one at once), the songs coming in (how many, how much, which),
-     and what came of it, or that the phone was unplugged (or its songs can't be saved here) and how to finish. Asks the
-     core every second while something is happening, every few seconds otherwise. Not shown on the page that chooses the
-     songs: it says the same. -->
+     and what came of it, or that the phone was unplugged (or stopped the send, or its songs can't be saved here) and how
+     to finish. Asks the core every second while something is happening, every few seconds otherwise. Not shown on the
+     page that chooses the songs: it says the same. -->
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
@@ -14,7 +14,7 @@
 	import type { Offer } from './phone-songs';
 
 	type Now = {
-		state: 'idle' | 'connected' | 'preparing' | 'ready' | 'taking' | 'stalled' | 'done' | 'stopped' | 'cannot_save';
+		state: 'idle' | 'connected' | 'preparing' | 'ready' | 'taking' | 'stalled' | 'done' | 'stopped' | 'withdrawn' | 'cannot_save';
 		phone: string | null;
 		ready: number;
 		done: number;
@@ -29,6 +29,10 @@
 		here: number;
 		left: number;
 		cleared: boolean;
+		/** Every song is in, but the send's list is still on the phone: the computer removes it at its next look. */
+		list_left: boolean;
+		/** The songs not taken come in at the next look, with no need to send them again. */
+		trying_again: boolean;
 		at_ms: number;
 		/** Why songs can't be saved here, and where they go. */
 		error: string | null;
@@ -75,6 +79,8 @@
 	});
 
 	const gb = (bytes: number) => (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`);
+	/** Every song of a send in, said so (one song, or none, as such). */
+	const allIn = (n: number) => (n === 0 ? '' : n === 1 ? 'The song came in. ' : `All ${songs(n)} came in. `);
 	const shown = $derived(!!now && now.state !== 'idle' && now.at_ms > closedAt && page.url.pathname !== '/phone');
 	const from = $derived(now?.phone ?? 'Your phone');
 	/** The card's heading, its lines, and its bar (a share from 0 to 1, null for one that moves on its own, undefined for none). */
@@ -113,8 +119,17 @@
 				return {
 					title: `Lost contact with ${from}`,
 					lines: [
-						`${now.total ? `${now.done} of ${now.total} songs came in. ` : ''}Unplug the phone and plug it back in, or in its USB notification choose No data transfer, then File transfer${now.total ? ': the rest come in by themselves' : ''}.`
+						// Every song in, and only the list left on the phone: nothing more comes in, the computer finishes with it.
+						now.list_left && now.done === now.total
+							? `${allIn(now.total)}Plug the phone back in so the computer can finish with it.`
+							: `${now.total ? `${now.done} of ${now.total} songs came in. ` : ''}Unplug the phone and plug it back in, or in its USB notification choose No data transfer, then File transfer${now.total ? ': the rest come in by themselves' : ''}.`
 					],
+					bar: undefined
+				};
+			case 'withdrawn':
+				return {
+					title: `${from} stopped the send`,
+					lines: now.total ? [`${now.done - now.failed} of ${now.total} songs came in.`] : [],
 					bar: undefined
 				};
 			case 'cannot_save':
@@ -130,7 +145,9 @@
 				if (now.had) lines.push(`${songs(now.had)} you had here already.`);
 				if (now.not_kept) lines.push(`${songs(now.not_kept)} in your library to download here: their files can't be kept.`);
 				if (now.left) lines.push(now.left === 1 ? 'The other song stays in Stash on the phone.' : `The other ${now.left.toLocaleString()} stay in Stash on the phone.`);
-				if (now.failed) lines.push(`${songs(now.failed)} didn't come in. Send again from the phone to try them.`);
+				if (now.failed && now.trying_again) lines.push(`${songs(now.failed)} didn't come in yet: the computer tries ${now.failed === 1 ? 'it' : 'them'} again.`);
+				else if (now.failed) lines.push(`${songs(now.failed)} didn't come in. Send again from the phone to try them.`);
+				else if (now.list_left) lines.push('Keep the phone plugged in: the computer finishes with it in a moment.');
 				else if (now.cleared || now.left) lines.push('You can unplug the phone.');
 				return { title: now.failed ? `Songs from ${from}, with trouble` : `Songs from ${from} are here`, lines, bar: undefined };
 			}
@@ -138,7 +155,9 @@
 				return null;
 		}
 	});
-	const closable = $derived(!!now && (now.state === 'connected' || now.state === 'ready' || now.state === 'done' || now.state === 'stopped' || now.state === 'cannot_save'));
+	const closable = $derived(
+		!!now && (now.state === 'connected' || now.state === 'ready' || now.state === 'done' || now.state === 'stopped' || now.state === 'withdrawn' || now.state === 'cannot_save')
+	);
 </script>
 
 {#if shown && now && card}
