@@ -1,6 +1,6 @@
 //! A phone plugged in over USB ("File transfer"), through Windows Portable Devices (MTP): the phones connected, the
 //! folder Stash for Android's "Send to computer" leaves (`Download/Stash transfer/`, with `stash-transfer.json`), its
-//! files read to this computer, and the folder deleted once taken.
+//! files read to this computer and deleted from the phone once taken, and the folder once empty.
 //!
 //! Every call is blocking and uses COM on the calling thread (initialised here, multithreaded); a [`Transfer`] stays on
 //! the thread that opened it. Other systems have no phones here.
@@ -32,6 +32,9 @@ pub const LIST: &str = "stash-transfer.json";
 pub const STALL: std::time::Duration = std::time::Duration::from_secs(20);
 /// What a read called off for sending nothing says: the caller opens the phone again rather than give up on the song.
 pub const STALLED: &str = "the phone stopped sending mid-song";
+/// What trouble on this computer's side of a copy starts with (the file could not be made, written or kept: a full
+/// disk, a drive gone): not the phone's doing, so not a phone lost.
+pub const HERE: &str = "on this computer: ";
 
 /// What a read tells as it goes: how much of the file has come so far, and (once) that the file has sent nothing for
 /// `stall_after`, when its read is called off. `stalled` is told from another thread.
@@ -82,7 +85,7 @@ mod imp {
     use windows::Win32::System::Variant::VT_LPWSTR;
     use windows::core::{HSTRING, Interface, PCWSTR, PWSTR};
 
-    use super::{FOLDER, Phone, PhoneFile, STALLED, Watch};
+    use super::{FOLDER, HERE, Phone, PhoneFile, STALLED, Watch};
 
     fn com() {
         // Already initialised on this thread (in either mode) is fine.
@@ -287,18 +290,21 @@ mod imp {
             Ok(out)
         }
 
-        /// Copies `file` to `to` (a new file), telling `watch` how much has come; how many bytes. Nothing is left at
-        /// `to` when it fails; one called off for sending nothing fails with [`STALLED`].
+        /// Copies `file` to `to` (a new file), telling `watch` how much has come; how many bytes, once they are on the
+        /// disk (not only in Windows' cache: the phone's copy may be deleted next). Nothing is left at `to` when it
+        /// fails; one called off for sending nothing fails with [`STALLED`], and trouble writing here starts with
+        /// [`HERE`].
         pub fn copy(&self, file: &PhoneFile, to: &Path, watch: &Watch) -> Result<u64, String> {
-            let mut out = std::fs::File::create(to).map_err(|e| e.to_string())?;
+            let here = |e: std::io::Error| format!("{HERE}{e}");
+            let mut out = std::fs::File::create(to).map_err(here)?;
             let mut n = 0u64;
             let done = self.each_block(file, watch, &mut |block| {
                 n += block.len() as u64;
-                out.write_all(block).map_err(|e| e.to_string())?;
+                out.write_all(block).map_err(here)?;
                 (watch.progress)(n);
                 Ok(())
             });
-            if let Err(e) = done.and_then(|_| out.flush().map_err(|e| e.to_string())) {
+            if let Err(e) = done.and_then(|_| out.sync_all().map_err(here)) {
                 drop(out);
                 let _ = std::fs::remove_file(to);
                 return Err(e);
@@ -398,17 +404,18 @@ mod imp {
             })
         }
 
-        /// Deletes the transfer folder and everything in it from the phone.
-        pub fn remove(&self) -> Result<(), String> {
-            self.delete(&self.folder)
+        /// Deletes the transfer folder from the phone when it is empty; fails, deleting nothing, when anything is in
+        /// it (a file this computer has not seen: never deleted with it).
+        pub fn remove_if_empty(&self) -> Result<(), String> {
+            self.delete(&self.folder, PORTABLE_DEVICE_DELETE_NO_RECURSION)
         }
 
         /// Deletes one file of the transfer from the phone (one taken: the phone counts what is left).
         pub fn remove_file(&self, file: &PhoneFile) -> Result<(), String> {
-            self.delete(&file.object)
+            self.delete(&file.object, PORTABLE_DEVICE_DELETE_WITH_RECURSION)
         }
 
-        fn delete(&self, object: &str) -> Result<(), String> {
+        fn delete(&self, object: &str, how: DELETE_OBJECT_OPTIONS) -> Result<(), String> {
             unsafe {
                 let ids: IPortableDevicePropVariantCollection = CoCreateInstance(
                     &PortableDevicePropVariantCollection,
@@ -426,11 +433,7 @@ mod imp {
                 inner.Anonymous.pwszVal = PWSTR(wide.as_ptr() as *mut u16);
                 ids.Add(&*one).map_err(said)?;
                 self.content
-                    .Delete(
-                        PORTABLE_DEVICE_DELETE_WITH_RECURSION.0 as u32,
-                        &ids,
-                        std::ptr::null_mut(),
-                    )
+                    .Delete(how.0 as u32, &ids, std::ptr::null_mut())
                     .map_err(said)
             }
         }
