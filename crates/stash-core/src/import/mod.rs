@@ -414,13 +414,17 @@ impl Library {
     }
 
     /// The library's rows for `songs`, in their order: for each the row the library has for that song, or a new one
-    /// known by its description.
+    /// known by its description. Another connection writing (a scan's) is waited for, as it reads before it writes.
     pub fn adopt_songs(&mut self, songs: &[Song]) -> crate::Result<Vec<i64>> {
         let now_s = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let tx = self.conn.transaction()?;
+        // Writing from the start: one that only read first could not wait its turn to write (SQLite says busy at
+        // once), so a scan writing meanwhile would fail it.
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let ids = {
             let mut merger = Merger {
                 tx: &tx,

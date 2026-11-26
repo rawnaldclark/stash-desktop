@@ -649,13 +649,17 @@ impl Library {
     /// The song `id` is a file now: its row becomes the file's (its likes, playlists, plays and ISRC stay), its
     /// download is saved. With `cover_inside` the file's own picture is shown before the add-on's cover address, so
     /// it shows with no network (the address is kept for when the file is given back). False (and nothing changed) when the song was taken off the list meanwhile.
+    /// Another connection writing (a scan's) is waited for, as it reads before it writes.
     pub fn download_saved(
         &mut self,
         id: i64,
         file: &crate::library::NewTrack,
         saved: &SavedDownload,
     ) -> Result<bool> {
-        let tx = self.conn.transaction()?;
+        // Writing from the start: one that only read first could not wait its turn to write (SQLite says busy at once).
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let still: bool = tx
             .query_row(
                 "SELECT COUNT(*) FROM downloads WHERE track_id = ?1 AND state = 'saving'",
@@ -2568,6 +2572,107 @@ mod tests {
             assert!(!library.wants_file(id).unwrap());
         }
         assert_eq!(library.songs_here(&asked).unwrap(), vec![true, true], "here now");
+    }
+
+    #[test]
+    fn a_song_found_or_saved_waits_for_another_writer_rather_than_failing() {
+        let dir = std::env::temp_dir().join(format!("stash-busy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("library.db");
+        {
+            let mut library = Library::open(&db).unwrap();
+            let song = |title: &str| crate::import::Song {
+                title: title.into(),
+                artist: "Someone".into(),
+                ..Default::default()
+            };
+            let id = library.adopt_songs(&[song("Alpha")]).unwrap()[0];
+            assert!(library.download_arriving(id, 1).unwrap());
+            // Another connection writing for a moment (a scan's): each of these reads before it writes, and waits its
+            // turn rather than failing.
+            let writing_a_moment = || {
+                let (held, holding) = std::sync::mpsc::channel();
+                let db = db.clone();
+                let writer = std::thread::spawn(move || {
+                    let other = rusqlite::Connection::open(&db).unwrap();
+                    other
+                        .execute_batch(
+                            "BEGIN IMMEDIATE;
+                             INSERT INTO settings(key, value) VALUES ('scan', '1')
+                                 ON CONFLICT(key) DO UPDATE SET value = value || '1';",
+                        )
+                        .unwrap();
+                    held.send(()).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    other.execute_batch("COMMIT").unwrap();
+                });
+                holding.recv().unwrap();
+                writer
+            };
+            let writer = writing_a_moment();
+            assert_eq!(library.adopt_songs(&[song("Bravo")]).unwrap().len(), 1);
+            writer.join().unwrap();
+            let file = crate::library::NewTrack {
+                title: "Alpha".into(),
+                artist: "Someone".into(),
+                album_artist: None,
+                album: None,
+                year: None,
+                disc_no: 0,
+                track_no: 0,
+                duration_ms: 1_000,
+                isrc: None,
+                origin: crate::library::Origin::File,
+                addon_id: None,
+                locator: "C:/Stash/alpha.flac".into(),
+                codec: Some("flac".into()),
+                sample_rate: Some(44_100),
+                bit_depth: Some(16),
+                added_at: 0,
+                file_size: Some(10),
+                file_mtime: Some(0),
+            };
+            let saved = SavedDownload {
+                addon: "phone".into(),
+                tier: None,
+                at_ms: 7,
+                fetched: false,
+                cover_inside: false,
+            };
+            let writer = writing_a_moment();
+            assert!(library.download_saved(id, &file, &saved).unwrap());
+            writer.join().unwrap();
+            assert_eq!(library.file().as_deref(), Some(db.as_path()), "where it is kept");
+        }
+        assert_eq!(Library::open_in_memory().unwrap().file(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trouble_in_the_library_is_told_apart_by_whose_it_is() {
+        let failing = |code| {
+            crate::Error::Db(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None))
+        };
+        for code in [
+            rusqlite::ffi::SQLITE_FULL,
+            rusqlite::ffi::SQLITE_IOERR,
+            rusqlite::ffi::SQLITE_CANTOPEN,
+            rusqlite::ffi::SQLITE_READONLY,
+            rusqlite::ffi::SQLITE_CORRUPT,
+            rusqlite::ffi::SQLITE_NOTADB,
+        ] {
+            assert!(failing(code).of_the_file() && !failing(code).busy(), "{code}: the file's or its drive's");
+        }
+        for code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_LOCKED] {
+            assert!(failing(code).busy() && !failing(code).of_the_file(), "{code}: another writer's, for a moment");
+        }
+        let constraint = failing(rusqlite::ffi::SQLITE_CONSTRAINT);
+        assert!(!constraint.of_the_file() && !constraint.busy(), "a row in the way: one song's");
+        let mut refused = Library::open_in_memory().unwrap();
+        refused.refuse_writes().unwrap();
+        let e = refused.set_setting("a", "b").unwrap_err();
+        assert!(e.of_the_file(), "a write refused, as on a full disk: {e}");
     }
 
     #[test]

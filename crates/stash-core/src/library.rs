@@ -373,6 +373,21 @@ impl Library {
         Ok(())
     }
 
+    /// Tests only: how long a write here waits for another connection's to be done (`busy_timeout`: 5 s as opened).
+    #[doc(hidden)]
+    pub fn wait_for_writers(&self, wait: std::time::Duration) -> Result<()> {
+        self.conn.busy_timeout(wait)?;
+        Ok(())
+    }
+
+    /// The file the library is kept in (None for one in memory): where it is, and on which drive.
+    pub fn file(&self) -> Option<std::path::PathBuf> {
+        self.conn
+            .path()
+            .filter(|p| !p.is_empty())
+            .map(std::path::PathBuf::from)
+    }
+
     pub fn counts(&self) -> Result<Counts> {
         let count = |sql: &str| -> Result<u64> {
             Ok(self.conn.query_row(sql, [], |r| r.get::<_, i64>(0))? as u64)

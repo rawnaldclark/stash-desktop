@@ -32,9 +32,19 @@ pub const LIST: &str = "stash-transfer.json";
 pub const STALL: std::time::Duration = std::time::Duration::from_secs(20);
 /// What a read called off for sending nothing says: the caller opens the phone again rather than give up on the song.
 pub const STALLED: &str = "the phone stopped sending mid-song";
-/// What trouble on this computer's side of a copy starts with (the file could not be made, written or kept: a full
-/// disk, a drive gone): not the phone's doing, so not a phone lost.
+/// What trouble on this computer's side of a copy starts with when it is the drive's (the file could not be made,
+/// written or kept: a full disk, a drive gone): not the phone's doing, so not a phone lost, and every song would meet
+/// it.
 pub const HERE: &str = "on this computer: ";
+/// What trouble on this computer's side starts with when it is one song's alone (its file held by another program
+/// past a few tries, say): not the phone's doing either, and that song is not taken while the rest are.
+pub const ONE_SONG: &str = "for this song, on this computer: ";
+
+/// Whether another program has the file open (Windows' sharing and lock violations): an antivirus or a sync client
+/// looking at a file just written, which lets it go in a moment.
+pub fn held_by_another(e: &std::io::Error) -> bool {
+    cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33))
+}
 
 /// What a read tells as it goes: how much of the file has come so far, and (once) that the file has sent nothing for
 /// `stall_after`, when its read is called off. `stalled` is told from another thread.
@@ -85,7 +95,7 @@ mod imp {
     use windows::Win32::System::Variant::VT_LPWSTR;
     use windows::core::{HSTRING, Interface, PCWSTR, PWSTR};
 
-    use super::{FOLDER, HERE, Phone, PhoneFile, STALLED, Watch};
+    use super::{FOLDER, HERE, ONE_SONG, Phone, PhoneFile, STALLED, Watch, held_by_another};
 
     fn com() {
         // Already initialised on this thread (in either mode) is fine.
@@ -202,16 +212,17 @@ mod imp {
         }
     }
 
-    /// The objects inside `parent`, with their names and sizes.
-    fn children(content: &IPortableDeviceContent, parent: &str) -> Vec<PhoneFile> {
+    /// The objects inside `parent`, with their names and sizes, and whether that is all of them: a listing the phone
+    /// stopped part way (it failed to say what comes next) can leave any of them out.
+    fn children(content: &IPortableDeviceContent, parent: &str) -> (Vec<PhoneFile>, bool) {
         let mut out = Vec::new();
         unsafe {
             let Ok(props) = content.Properties() else {
-                return out;
+                return (out, false);
             };
             let wide = HSTRING::from(parent);
             let Ok(found) = content.EnumObjects(0, PCWSTR(wide.as_ptr()), None) else {
-                return out;
+                return (out, false);
             };
             loop {
                 let mut ids = [PWSTR::null(); 32];
@@ -223,16 +234,21 @@ mod imp {
                         out.push(PhoneFile { object, name, size });
                     }
                 }
-                if hr.is_err() || fetched == 0 || hr.0 != 0 {
-                    break;
+                if hr.is_err() {
+                    return (out, false);
+                }
+                // S_FALSE: fewer than asked for, the last of them.
+                if fetched == 0 || hr.0 != 0 {
+                    return (out, true);
                 }
             }
         }
-        out
     }
 
-    /// The transfer folder on `phone`, when it is there (in any of its storages); None when the phone has none, or
-    /// shows no storage (it is charging only: "File transfer" is not chosen).
+    /// The transfer folder on `phone`, when it is there (in any of its storages), with every file in it; None when the
+    /// phone has none, or shows no storage (it is charging only: "File transfer" is not chosen). A phone that stopped
+    /// listing part way has not answered: what it listed can leave out any file, its list among them, so it is never
+    /// taken to say the list is gone.
     pub fn open_transfer(phone: &str) -> Result<Option<Transfer>, String> {
         com();
         unsafe {
@@ -247,23 +263,27 @@ mod imp {
                 CoCreateInstance(&PortableDeviceFTM, None, CLSCTX_INPROC_SERVER).map_err(said)?;
             device.Open(&HSTRING::from(phone), &info).map_err(said)?;
             let content = device.Content().map_err(said)?;
-            for storage in children(&content, "DEVICE") {
+            let part_way = || Err("the phone stopped listing its files part way".to_string());
+            let (storages, mut whole) = children(&content, "DEVICE");
+            for storage in storages {
                 let mut at = storage.object.clone();
                 let mut found = true;
                 for step in FOLDER {
-                    match children(&content, &at)
-                        .into_iter()
-                        .find(|c| c.name.eq_ignore_ascii_case(step))
-                    {
+                    let (inside, all) = children(&content, &at);
+                    match inside.into_iter().find(|c| c.name.eq_ignore_ascii_case(step)) {
                         Some(next) => at = next.object,
                         None => {
+                            whole &= all;
                             found = false;
                             break;
                         }
                     }
                 }
                 if found {
-                    let files = children(&content, &at);
+                    let (files, all) = children(&content, &at);
+                    if !all {
+                        return part_way();
+                    }
                     return Ok(Some(Transfer {
                         _device: device,
                         content,
@@ -272,7 +292,7 @@ mod imp {
                     }));
                 }
             }
-            Ok(None)
+            if whole { Ok(None) } else { part_way() }
         }
     }
 
@@ -293,9 +313,15 @@ mod imp {
         /// Copies `file` to `to` (a new file), telling `watch` how much has come; how many bytes, once they are on the
         /// disk (not only in Windows' cache: the phone's copy may be deleted next). Nothing is left at `to` when it
         /// fails; one called off for sending nothing fails with [`STALLED`], and trouble writing here starts with
-        /// [`HERE`].
+        /// [`HERE`] ([`ONE_SONG`] when another program holds `to`).
         pub fn copy(&self, file: &PhoneFile, to: &Path, watch: &Watch) -> Result<u64, String> {
-            let here = |e: std::io::Error| format!("{HERE}{e}");
+            let here = |e: std::io::Error| {
+                if held_by_another(&e) {
+                    format!("{ONE_SONG}another program has the file open: {e}")
+                } else {
+                    format!("{HERE}{e}")
+                }
+            };
             let mut out = std::fs::File::create(to).map_err(here)?;
             let mut n = 0u64;
             let done = self.each_block(file, watch, &mut |block| {
