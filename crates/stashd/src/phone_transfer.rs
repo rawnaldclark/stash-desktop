@@ -13,12 +13,19 @@
 //! its read called off, and the phone is opened again and the song taken from the start (see
 //! [`stash_core::phone::STALL`]). What each transfer did goes into `phone.log` beside the library.
 //!
+//! A send can come with the phone's library ([`stash_core::phone::LIBRARY`]: its likes, playlists and plays), which
+//! [`library`] reads, sums up, and brings in as chosen, before the songs. A send without one is its songs, as before.
+//!
 //! - `GET /api/phone`: what is happening: nothing, a send waiting to be chosen from, songs being taken from a phone
 //!   (how many of how many), or what the last transfer did; and the phones plugged in now (with "File transfer"
 //!   chosen), each with whether it has songs sent.
 //! - `GET /api/phone/songs`: the send waiting to be chosen from: each song as the phone describes it (its format and
 //!   quality, its tags, the playlists it is in), its size, and whether it is here already.
+//! - `GET /api/phone/library`: the library that came with the send waiting to be chosen from, summed up (404 when none
+//!   did).
 //! - `POST /api/phone/take` `{sent_at_ms, files}` (or `all: true`, or `files: [], none: true`): takes those songs.
+//!   With `library: {likes, plays, playlists, only_here}`, those parts of the phone's library come in first, and from
+//!   each later send's library too.
 //! - `GET`/`POST /api/settings/phone` `{take_all}`: every send taken whole as it comes, or offered (the default).
 //! - `POST /api/phone/look`: looks at the phones now, and tries again a send that had songs not taken; answers the
 //!   look's number, which `answered` in `GET /api/phone` reaches once it is done.
@@ -40,6 +47,8 @@ use stash_core::phone::{HERE, ONE_SONG, PhoneFile, STALL, STALLED, Watch, held_b
 use tiny_http::{Method, Request};
 
 use crate::serve::{Reply, State, body_json, now_ms, refuse, reply_json};
+
+mod library;
 
 /// How often the phones are looked at, and how often again a phone with no transfer on it.
 const LOOK_EVERY: Duration = Duration::from_secs(2);
@@ -132,6 +141,9 @@ pub(crate) struct Now {
     failed: usize,
     /// Of the songs offered, how many are here already.
     here: usize,
+    /// The send waiting to be chosen from ("ready") came with the phone's library: `GET /api/phone/library` says what
+    /// is in it.
+    with_library: bool,
     /// Songs left on the phone because they were not chosen.
     left: usize,
     /// The send's list went from the phone with none of its songs left there (the phone then has nothing sent).
@@ -252,6 +264,9 @@ struct Offer {
     /// Each song as taking it would find it in the library, for asking again whether it is here.
     #[serde(skip)]
     asked: Vec<import::Song>,
+    /// The phone's library that came with the send, when one did that can be used.
+    #[serde(skip)]
+    library: Option<std::sync::Arc<import::web_library::FromPhone>>,
 }
 
 /// One song offered: what the phone says of it, its size on the phone, and whether it is here already.
@@ -334,6 +349,8 @@ struct Board {
     offer: Mutex<Option<Offer>>,
     /// What was chosen from each send (by its `sent_at_ms`), until it is taken.
     chosen: Mutex<Option<HashMap<i64, Choice>>>,
+    /// The library each phone's last send came with, as read (once for the send).
+    library: Mutex<Vec<library::Read>>,
     /// Each thing said, and the time it was said at.
     #[cfg(test)]
     states: Mutex<Vec<&'static str>>,
@@ -347,6 +364,7 @@ impl Board {
             now: Mutex::new(None),
             offer: Mutex::new(None),
             chosen: Mutex::new(None),
+            library: Mutex::new(Vec::new()),
             #[cfg(test)]
             states: Mutex::new(Vec::new()),
             #[cfg(test)]
@@ -814,10 +832,11 @@ const LOST_AFTER: usize = 3;
 /// Takes a phone's transfer, if it has a whole one (its list is there) not taken before, and while it has not been
 /// tried [`TRIES`] times in a row with nothing coming in.
 fn take(ctx: &Ctx, phone: &dyn Plugged, folder: Box<dyn Folder>, tries: &mut Tries, stop: &AtomicBool) {
-    let Some(list_file) = folder
-        .files()
-        .into_iter()
+    let listing = folder.files();
+    let Some(list_file) = listing
+        .iter()
         .find(|f| f.name == stash_core::phone::LIST)
+        .cloned()
     else {
         return;
     };
@@ -872,6 +891,12 @@ fn take(ctx: &Ctx, phone: &dyn Plugged, folder: Box<dyn Folder>, tries: &mut Tri
         // often as a transfer is), so the phone knows this computer is done.
         if tried < TRIES {
             tries.tried.insert(list.sent_at_ms, tried + 1);
+            // The library that came with it goes first, as at the end of a take.
+            if let Some(file) = listing.iter().find(|f| f.name == stash_core::phone::LIBRARY)
+                && let Err(e) = folder.remove_file(file)
+            {
+                (ctx.log)(&format!("the library that came with a transfer taken before stayed on the phone, for it to clear: {e}"));
+            }
             match folder.remove_file(&list_file) {
                 Ok(()) => (ctx.log)("the list of a transfer taken before went from the phone"),
                 Err(e) => (ctx.log)(&format!("the list of a transfer taken before stayed on the phone: {e}")),
@@ -901,7 +926,22 @@ fn take(ctx: &Ctx, phone: &dyn Plugged, folder: Box<dyn Folder>, tries: &mut Tri
     tries.tried.insert(list.sent_at_ms, tried + 1);
     let last_try = tried + 1 >= TRIES;
     let earlier = tries.earlier(ctx.board, phone.name(), list.sent_at_ms);
-    let now = take_songs(ctx, phone, folder, &list_file, &list, &choice, earlier, &mut tries.stalls, last_try, stop);
+    // The parts of the phone's library to bring in before the songs, while they are still to come in from this send:
+    // read from the phone (once for the send) before the take holds anything.
+    let library = library::due(ctx, phone.name(), folder.as_ref(), &listing, list.sent_at_ms);
+    let now = take_songs(
+        ctx,
+        phone,
+        folder,
+        &list_file,
+        &list,
+        &choice,
+        library,
+        earlier,
+        &mut tries.stalls,
+        last_try,
+        stop,
+    );
     if is_over(now.state) {
         tries.ended.insert(phone.name().to_string(), now.clone());
     }
@@ -927,6 +967,7 @@ fn ready_now(offer: &Offer, at_ms: i64) -> Now {
         phone: Some(offer.phone.clone()),
         total: offer.songs.len(),
         here: offer.songs.iter().filter(|s| s.here).count(),
+        with_library: offer.library.is_some(),
         bytes_total: offer.songs.iter().map(|s| s.bytes).sum(),
         at_ms,
         sent_at_ms: Some(offer.sent_at_ms),
@@ -935,27 +976,51 @@ fn ready_now(offer: &Offer, at_ms: i64) -> Now {
 }
 
 /// Offers `list`'s songs still on the phone to choose from, each said to be here already or not (found as taking it
-/// would find it, changing nothing). Worked out once for a send, and again when what is on the phone changes. One
-/// send is offered at a time: another phone's waits until that one is chosen from or unplugged.
+/// would find it, changing nothing), with the phone's library when one came with the send (read once for the send:
+/// one the phone did not answer for is read again at the next look, and offered once it is). Worked out once for a
+/// send, and again when what is on the phone changes. A send of no songs with a library is offered too. One send is
+/// offered at a time: another phone's waits until that one is chosen from or unplugged.
 fn offer(ctx: &Ctx, phone: &dyn Plugged, folder: &dyn Folder, list: &List) {
-    let sizes: HashMap<String, u64> = folder.files().into_iter().map(|f| (f.name, f.size)).collect();
+    let listing = folder.files();
+    let sizes: HashMap<&str, u64> = listing.iter().map(|f| (f.name.as_str(), f.size)).collect();
     let on_phone: Vec<&Sent> = list
         .songs
         .iter()
-        .filter(|s| sizes.contains_key(&s.file))
+        .filter(|s| sizes.contains_key(s.file.as_str()))
         .collect();
+    if ctx.board.offer.lock().unwrap().as_ref().is_some_and(|o| o.phone != phone.name()) {
+        return;
+    }
+    // Read with no lock held: a phone reads slowly.
+    let library = library::of_send(ctx, phone.name(), folder, &listing, list.sent_at_ms);
+    // Chosen from as its library was read: not offered again.
+    if ctx
+        .board
+        .chosen
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|c| c.contains_key(&list.sent_at_ms))
     {
-        let offered = ctx.board.offer.lock().unwrap();
-        if let Some(o) = offered.as_ref() {
+        return;
+    }
+    {
+        let mut offered = ctx.board.offer.lock().unwrap();
+        if let Some(o) = offered.as_mut() {
             if o.phone != phone.name() {
                 return;
             }
             if o.sent_at_ms == list.sent_at_ms && o.songs.len() == on_phone.len() {
+                // Its library read since it was offered: offered with it now.
+                let late = o.library.is_none() && library.is_some();
+                if late {
+                    o.library = library;
+                }
                 // Offered already; said again when something else was said over it: on this phone, or what another
                 // phone did (its transfer done or stopped), but not over another phone's send being chosen or taken.
                 let mut now = ctx.board.now.lock().unwrap();
                 let shown = now.as_ref().is_some_and(|n| n.state == "ready");
-                if !shown && !busy_elsewhere(now.as_ref(), phone.name()) {
+                if (!shown || late) && !busy_elsewhere(now.as_ref(), phone.name()) {
                     let at_ms = now.as_ref().map_or_else(now_ms, |n| n.at_ms);
                     *now = Some(ready_now(o, at_ms));
                 }
@@ -986,7 +1051,7 @@ fn offer(ctx: &Ctx, phone: &dyn Plugged, folder: &dyn Folder, list: &List) {
             art_url: s.art_url.clone().filter(|u| u.starts_with("https://")),
             liked: s.liked,
             playlists: s.playlists.clone(),
-            bytes: sizes[&s.file],
+            bytes: sizes[s.file.as_str()],
             here,
         })
         .collect();
@@ -995,6 +1060,7 @@ fn offer(ctx: &Ctx, phone: &dyn Plugged, folder: &dyn Folder, list: &List) {
         sent_at_ms: list.sent_at_ms,
         songs,
         asked,
+        library,
     };
     // The same send offered again (fewer of its songs on the phone) keeps its time, so a card closed on it stays
     // closed.
@@ -1008,10 +1074,11 @@ fn offer(ctx: &Ctx, phone: &dyn Plugged, folder: &dyn Folder, list: &List) {
         .map_or_else(now_ms, |n| n.at_ms);
     let now = ready_now(&offer, at_ms);
     (ctx.log)(&format!(
-        "offering {} songs, {} MB ({} here already)",
+        "offering {} songs, {} MB ({} here already){}",
         now.total,
         now.bytes_total / 1_000_000,
-        now.here
+        now.here,
+        if now.with_library { ", with the phone's library" } else { "" }
     ));
     *ctx.board.offer.lock().unwrap() = Some(offer);
     // Not said over another phone's send being chosen from or taken: it is said once that one is done (above).
@@ -1108,8 +1175,10 @@ fn looked_again(phone: &dyn Plugged, sent_at_ms: i64) -> Option<Listed> {
 /// the computer is done. Songs that can't be saved here stop it at once ("cannot_save"), as the phone stopping the send
 /// does ("withdrawn"); a song only this computer can't keep fails alone. A try that carries on a send that ended before
 /// (`earlier`) counts on from what was said of it, at the time it was said until more comes in; one that only finishes
-/// it says nothing new ([`finish`]). `last_try`: another try comes only if this one takes songs off the phone. What the
-/// transfer came to.
+/// it says nothing new ([`finish`]). `last_try`: another try comes only if this one takes songs off the phone. The parts
+/// of the phone's library chosen (`library`, with the library) come in before the first song ([`library::bring_in`]);
+/// trouble with that is never the songs' unless it is the library's file here, which stops the take as songs that
+/// can't be saved do. What the transfer came to.
 #[allow(clippy::too_many_arguments)]
 fn take_songs(
     ctx: &Ctx,
@@ -1118,6 +1187,7 @@ fn take_songs(
     list_file: &PhoneFile,
     list: &List,
     choice: &Choice,
+    library: Option<(library::Parts, std::sync::Arc<import::web_library::FromPhone>)>,
     earlier: Option<Now>,
     stalls: &mut HashMap<(i64, String), u32>,
     last_try: bool,
@@ -1192,6 +1262,17 @@ fn take_songs(
         now.bytes_total / 1_000_000,
         now.done
     ));
+    // The phone's library, before any song: a song sent that it names then lands on the row it made.
+    if let Some((parts, from)) = &library {
+        if stop.load(Ordering::Relaxed) {
+            return now;
+        }
+        match library::bring_in(ctx, list, choice, parts, from) {
+            Ok(()) => {}
+            Err(why) if why.starts_with(LIBRARY) => return cannot_save(ctx, now, &why),
+            Err(why) => (ctx.log)(&format!("the phone's library did not come in, its songs do: {why}")),
+        }
+    }
     let started = Instant::now();
     let summary = |now: &Now| {
         (ctx.log)(&format!(
@@ -1454,6 +1535,7 @@ fn is_over(state: &str) -> bool {
 /// The end of a take with every song chosen in. The copies of songs counted in that stayed on the phone are deleted
 /// once more (one left there once the list goes reads on the phone as a song not chosen; one that stays even so is
 /// left for the phone to clear), those of songs not chosen that are here already go too ([`drop_here_already`]), then
+/// the phone's library (one that stays is the phone's to clear), then
 /// the list read (`list_file`), by its object: never the folder with what is in it, which can hold songs this computer
 /// has not seen (a listing can leave one out; the phone may have sent again since). The folder goes too once nothing
 /// is left in it (only if it is empty). How the take ends: done, or stopped when the phone went as its list was
@@ -1499,6 +1581,18 @@ fn end_of_take(
         .iter()
         .filter(|s| !choice.includes(&s.file) && files.contains_key(&s.file))
         .count();
+    // The phone's library goes before the list (whatever of it was brought in: that was before the songs). One that
+    // stays is no trouble: the phone clears it.
+    if let Some(file) = files.get(stash_core::phone::LIBRARY).cloned() {
+        match folder.remove_file(&file) {
+            Ok(()) => {
+                files.remove(stash_core::phone::LIBRARY);
+            }
+            Err(e) => (ctx.log)(&format!(
+                "the library that came with the send stayed on the phone, for it to clear: {e}"
+            )),
+        }
+    }
     match folder.remove_file(list_file) {
         Ok(()) => {
             files.remove(stash_core::phone::LIST);
@@ -1511,6 +1605,7 @@ fn end_of_take(
                 }
             }
             ctx.board.chosen_taken(ctx.library, list.sent_at_ms);
+            library::let_go(ctx.board, list.sent_at_ms);
             Ok("done")
         }
         Err(e) => {
@@ -1873,8 +1968,11 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
                     sent.insert(phone.id.clone(), has);
                     seen_inside(&phone.name, has);
                     // Songs coming into the folder with no list yet: the phone is still copying them out. Songs
-                    // there that are not growing in number are copies left from a send taken already.
-                    let ready = transfer.as_ref().map_or(0, |t| t.files.len());
+                    // there that are not growing in number are copies left from a send taken already. The phone's
+                    // library is not a song.
+                    let ready = transfer.as_ref().map_or(0, |t| {
+                        t.files.iter().filter(|f| f.name != stash_core::phone::LIBRARY).count()
+                    });
                     if has {
                         grew.remove(&phone.id);
                     } else {
@@ -2091,14 +2189,17 @@ fn chosen(body: &serde_json::Value) -> Result<(i64, Choice), &'static str> {
     Ok((sent_at_ms, Choice::These(files)))
 }
 
-/// Takes from the send offered now what was chosen from it: how many songs that is. Refused when a song chosen is not
-/// offered now (gone from the phone since the window read the songs), so the window reads them again rather than that
-/// song quietly not coming in. The window is told at once that they are being taken.
+/// Takes from the send offered now what was chosen from it: how many songs that is, with the `parts` of the phone's
+/// library chosen, when they are (kept: they come in from each later send's library too). Refused when a song chosen
+/// is not offered now (gone from the phone since the window read the songs), or a playlist chosen is not in the library
+/// the send came with (or it came with none), so the window reads them again rather than that song or playlist quietly
+/// not coming in. The window is told at once that they are being taken.
 fn choose_from(
     library: &Mutex<Library>,
     board: &Board,
     sent_at_ms: i64,
     choice: Choice,
+    parts: Option<library::Parts>,
 ) -> Result<usize, &'static str> {
     let offer = board
         .offer
@@ -2116,6 +2217,11 @@ fn choose_from(
             Choice::These(files)
         }
     };
+    if let Some(parts) = &parts {
+        library::can_bring(&offer, parts)?;
+        // Kept before the send is chosen from: the take that follows brings these parts in.
+        library::keep(library, parts);
+    }
     let taking = match &choice {
         Choice::All => offer.songs.len(),
         Choice::These(files) => files.len(),
@@ -2155,10 +2261,20 @@ pub(crate) fn route(state: &State, request: &mut Request, path: &str) -> Result<
             }
             Ok(Some(reply_json(200, json!(offer))))
         }
+        (Method::Get, "/api/phone/library") => {
+            let Some(offer) = BOARD.offer.lock().unwrap().clone() else {
+                return Ok(Some(refuse(404, "no songs are waiting on a phone")));
+            };
+            let Some(from) = offer.library.clone() else {
+                return Ok(Some(refuse(404, "the phone sent no library with these songs")));
+            };
+            Ok(Some(reply_json(200, library::summary(&state.library, &offer, &from))))
+        }
         (Method::Post, "/api/phone/take") => {
             let body = body_json(request)?;
-            Ok(Some(match chosen(&body) {
-                Ok((sent_at_ms, choice)) => match choose_from(&state.library, &BOARD, sent_at_ms, choice) {
+            let asked = chosen(&body).and_then(|(at, choice)| Ok((at, choice, library::asked(&body)?)));
+            Ok(Some(match asked {
+                Ok((sent_at_ms, choice, parts)) => match choose_from(&state.library, &BOARD, sent_at_ms, choice, parts) {
                     Ok(taking) => {
                         // The transfer starts now, not at the next look.
                         ASKED.fetch_add(1, Ordering::Relaxed);
@@ -2611,7 +2727,7 @@ mod tests {
 
         fn choose(&self, sent_at_ms: i64, files: &[&str]) -> Result<usize, &'static str> {
             let files = files.iter().map(|f| f.to_string()).collect();
-            choose_from(&self.library, &self.board, sent_at_ms, Choice::These(files))
+            choose_from(&self.library, &self.board, sent_at_ms, Choice::These(files), None)
         }
 
         /// The song files saved here (not the unfinished copies).
@@ -2856,7 +2972,7 @@ mod tests {
         let phone = three("Test phone");
         here.take(&phone, &mut Tries::default());
         let (at, choice) = chosen(&json!({ "sent_at_ms": 8, "files": [], "none": true })).unwrap();
-        assert_eq!(choose_from(&here.library, &here.board, at, choice), Ok(0));
+        assert_eq!(choose_from(&here.library, &here.board, at, choice, None), Ok(0));
         let now = here.take(&phone, &mut Tries::default()).unwrap();
         assert_eq!((now.state, now.taken, now.left), ("done", 0, 3));
         assert!(phone.reads.lock().unwrap().is_empty());
@@ -3104,7 +3220,7 @@ mod tests {
         let phone = three("Test phone");
         here.take(&phone, &mut Tries::default());
         let (at, choice) = chosen(&json!({ "sent_at_ms": 8, "files": [], "none": true })).unwrap();
-        assert_eq!(choose_from(&here.library, &here.board, at, choice), Ok(0));
+        assert_eq!(choose_from(&here.library, &here.board, at, choice, None), Ok(0));
         here.library.lock().unwrap().refuse_writes().unwrap();
         let now = here.take(&phone, &mut Tries::default()).unwrap();
         assert_eq!(now.state, "cannot_save");
@@ -3714,7 +3830,7 @@ mod tests {
         assert_eq!(board.now.lock().unwrap().as_ref().unwrap().state, "taking");
         // A unplugged: every send is tried again (a song that stops every time is still left), A's transfer cut short,
         // and its send no longer offered.
-        *board.offer.lock().unwrap() = Some(Offer { phone: "A".into(), sent_at_ms: 7, songs: Vec::new(), asked: Vec::new() });
+        *board.offer.lock().unwrap() = Some(Offer { phone: "A".into(), sent_at_ms: 7, songs: Vec::new(), asked: Vec::new(), library: None });
         phones_now(&board, &mut tries, [&a, &b], &[phone("b-id", "B")]);
         assert!(tries.tried.is_empty() && tries.held.is_empty());
         assert_eq!(tries.stalls.len(), 1);
