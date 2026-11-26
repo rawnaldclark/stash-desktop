@@ -22,7 +22,7 @@
 	import DeleteSongs from '../lib/desktop/DeleteSongs.svelte';
 	import EditTags from '../lib/desktop/EditTags.svelte';
 	import FillTags from '../lib/desktop/FillTags.svelte';
-	import HowStashRuns from '../lib/desktop/HowStashRuns.svelte';
+	import BringIn from '../lib/desktop/BringIn.svelte';
 	import Toast from '../lib/ui/Toast.svelte';
 	import { R } from '../lib/desktop/radio.svelte';
 	import PickBar from '../lib/ui/PickBar.svelte';
@@ -243,7 +243,8 @@
 		<main class="main" id="main" tabindex="-1" bind:this={mainEl}>
 			<div class="main-in">
 				<Wash palette={forScheme(palette, ui.light)} />
-				<div class="views">{@render children()}</div>
+				<!-- The first time Stash opens: bringing in the music on the listener's phone (or another way to start). -->
+				<div class="views">{#if ui.mode === null}<BringIn />{:else}{@render children()}{/if}</div>
 			</div>
 		</main>
 		<Panel />
@@ -261,7 +262,5 @@
 	{#if ui.deleting}<DeleteSongs />{/if}
 	{#if ui.editing}<EditTags />{/if}
 	{#if ui.filling}<FillTags />{/if}
-	<!-- The first time Stash opens: how it is to run. -->
-	{#if ui.mode === null}<HowStashRuns first />{/if}
 </div>
 {/if}

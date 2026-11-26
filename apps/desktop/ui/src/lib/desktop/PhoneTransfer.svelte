@@ -10,6 +10,7 @@
 	import { onMount } from 'svelte';
 	import { get, post, said } from '../core';
 	import Icon from '../ui/Icon.svelte';
+	import { ui } from '../ui/state.svelte';
 	import { songs } from '../ui/format';
 	import type { Offer } from './phone-songs';
 
@@ -83,7 +84,7 @@
 	const gb = (bytes: number) => (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`);
 	/** Every song of a send in, said so (one song, or none, as such). */
 	const allIn = (n: number) => (n === 0 ? '' : n === 1 ? 'The song came in. ' : `All ${songs(n)} came in. `);
-	const shown = $derived(!!now && now.state !== 'idle' && now.at_ms > closedAt && page.url.pathname !== '/phone');
+	const shown = $derived(!!now && now.state !== 'idle' && now.at_ms > closedAt && page.url.pathname !== '/phone' && ui.mode !== null);
 	const from = $derived(now?.phone ?? 'Your phone');
 	/** The card's heading, its lines, and its bar (a share from 0 to 1, null for one that moves on its own, undefined for none). */
 	const card = $derived.by((): { title: string; lines: string[]; bar: number | null | undefined } | null => {
