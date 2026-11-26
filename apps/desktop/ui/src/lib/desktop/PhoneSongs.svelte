@@ -13,8 +13,8 @@
 	import PhoneFacet from './PhoneFacet.svelte';
 	import { FACETS, bytesOf, detailOf, facet, narrowed as isNarrowed, noFilters, shows, size, toTake, type FacetId, type Filters, type Offer, type Offered } from './phone-songs';
 
-	type Now = { state: string; phone: string | null; ready: number; done: number; total: number; taken: number; had: number; not_kept: number; failed: number; left: number };
-	const QUIET: Now = { state: 'idle', phone: null, ready: 0, done: 0, total: 0, taken: 0, had: 0, not_kept: 0, failed: 0, left: 0 };
+	type Now = { state: string; phone: string | null; ready: number; done: number; total: number; taken: number; had: number; not_kept: number; failed: number; left: number; error: string | null; folder: string | null };
+	const QUIET: Now = { state: 'idle', phone: null, ready: 0, done: 0, total: 0, taken: 0, had: 0, not_kept: 0, failed: 0, left: 0, error: null, folder: null };
 
 	let offer = $state.raw<Offer | null>(null);
 	let now = $state.raw<Now | null>(null);
@@ -317,6 +317,11 @@
 		<p class="s-hint" role="status">
 			Lost contact with {phone}. {now.total ? `${now.done.toLocaleString()} of ${songsWord(now.total)} came in. ` : ''}Unplug the phone and plug it back in, or in its USB notification choose No data
 			transfer, then File transfer{now.total ? ': the rest come in by themselves' : ''}.
+		</p>
+	{:else if now?.state === 'cannot_save'}
+		<p class="pg-status bad" role="alert">
+			Songs from {phone} can't be saved in {now.folder ?? 'your downloads folder'}: {now.error ?? "it can't be written"}. {now.total ? `${now.done.toLocaleString()} of ${songsWord(now.total)} came in. ` : ''}Free some space
+			or reconnect the drive, then plug the phone back in.
 		</p>
 	{:else if now?.state === 'preparing'}
 		<p class="s-hint" role="status">{Phone} is getting songs ready: {songsWord(now.ready)} so far. They show up here to choose from.</p>

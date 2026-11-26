@@ -1,8 +1,9 @@
 <!-- Songs coming in from Stash for Android over USB (the core's `phone_transfer.rs`), told at every step in a card in
      the corner: a phone plugged in (and what to tap on it), the phone getting its songs ready, its songs waiting to be
      chosen from (the page From your phone, or every new one at once), the songs coming in (how many, how much, which),
-     and what came of it, or that the phone was unplugged and how to finish. Asks the core every second while something
-     is happening, every few seconds otherwise. Not shown on the page that chooses the songs: it says the same. -->
+     and what came of it, or that the phone was unplugged (or its songs can't be saved here) and how to finish. Asks the
+     core every second while something is happening, every few seconds otherwise. Not shown on the page that chooses the
+     songs: it says the same. -->
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
@@ -13,7 +14,7 @@
 	import type { Offer } from './phone-songs';
 
 	type Now = {
-		state: 'idle' | 'connected' | 'preparing' | 'ready' | 'taking' | 'stalled' | 'done' | 'stopped';
+		state: 'idle' | 'connected' | 'preparing' | 'ready' | 'taking' | 'stalled' | 'done' | 'stopped' | 'cannot_save';
 		phone: string | null;
 		ready: number;
 		done: number;
@@ -29,6 +30,9 @@
 		left: number;
 		cleared: boolean;
 		at_ms: number;
+		/** Why songs can't be saved here, and where they go. */
+		error: string | null;
+		folder: string | null;
 	};
 	let now = $state<Now | null>(null);
 	let closedAt = $state(0);
@@ -113,6 +117,14 @@
 					],
 					bar: undefined
 				};
+			case 'cannot_save':
+				return {
+					title: `Songs from ${from} can't be saved`,
+					lines: [
+						`${now.total ? `${now.done} of ${now.total} songs came in. ` : ''}They can't be saved in ${now.folder ?? 'your downloads folder'}: ${now.error ?? "it can't be written"}. Free some space or reconnect the drive, then plug the phone back in.`
+					],
+					bar: undefined
+				};
 			case 'done': {
 				const lines = [`${songs(now.taken)} added to your downloads.`];
 				if (now.had) lines.push(`${songs(now.had)} you had here already.`);
@@ -126,7 +138,7 @@
 				return null;
 		}
 	});
-	const closable = $derived(!!now && (now.state === 'connected' || now.state === 'ready' || now.state === 'done' || now.state === 'stopped'));
+	const closable = $derived(!!now && (now.state === 'connected' || now.state === 'ready' || now.state === 'done' || now.state === 'stopped' || now.state === 'cannot_save'));
 </script>
 
 {#if shown && now && card}

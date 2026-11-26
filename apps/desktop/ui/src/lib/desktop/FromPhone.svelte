@@ -10,11 +10,12 @@
 
 	type Phone = { name: string; has_songs: boolean | null };
 	type Now = {
-		state: 'idle' | 'connected' | 'preparing' | 'ready' | 'taking' | 'stalled' | 'done' | 'stopped';
+		state: 'idle' | 'connected' | 'preparing' | 'ready' | 'taking' | 'stalled' | 'done' | 'stopped' | 'cannot_save';
 		phone: string | null;
 		done: number;
 		total: number;
 		here: number;
+		folder: string | null;
 		answered: number;
 		phones: Phone[];
 	};
@@ -80,6 +81,7 @@
 		if (now.state === 'ready') return `${now.phone ?? 'Your phone'} has ${songs(now.total)} waiting${now.here ? ` (${now.here.toLocaleString()} on this computer already)` : ''}. Choose which come in.`;
 		if (now.state === 'stalled') return `${now.phone ?? 'Your phone'} stopped sending. Asking it again…`;
 		if (now.state === 'stopped') return `Lost contact with ${now.phone ?? 'your phone'}. Unplug it and plug it back in, or in its USB notification choose No data transfer, then File transfer.`;
+		if (now.state === 'cannot_save') return `Songs from ${now.phone ?? 'your phone'} can't be saved in ${now.folder ?? 'your downloads folder'}. Free some space or reconnect the drive, then plug the phone back in.`;
 		const phone = now.phones[0];
 		if (!phone) return 'No phone found. Plug it in, then choose File transfer in its USB notification.';
 		if (phone.has_songs === null) return `${phone.name} is plugged in. Looking for songs…`;
