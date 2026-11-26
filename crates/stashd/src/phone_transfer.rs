@@ -971,8 +971,117 @@ fn take_songs(
     now
 }
 
+/// A folder on this computer standing in for a phone's transfer folder (`STASH_PHONE_FOLDER`): to try the transfer
+/// and its window with no phone. While it is set, no phone is looked at.
+struct LocalFolder(std::path::PathBuf);
+
+impl Folder for LocalFolder {
+    fn files(&self) -> Vec<PhoneFile> {
+        std::fs::read_dir(&self.0)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+                    .map(|e| PhoneFile {
+                        object: e.path().to_string_lossy().into_owned(),
+                        name: e.file_name().to_string_lossy().into_owned(),
+                        size: e.metadata().map_or(0, |m| m.len()),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    fn bytes(&self, file: &PhoneFile, cap: u64) -> Result<Vec<u8>, String> {
+        let mut bytes = Vec::new();
+        std::fs::File::open(&file.object)
+            .and_then(|f| std::io::Read::read_to_end(&mut std::io::Read::take(f, cap), &mut bytes))
+            .map_err(|e| e.to_string())?;
+        Ok(bytes)
+    }
+    fn copy(&self, file: &PhoneFile, to: &Path, watch: &Watch) -> Result<u64, String> {
+        let copied = (|| -> std::io::Result<u64> {
+            let mut from = std::fs::File::open(&file.object)?;
+            let mut into = std::fs::File::create(to)?;
+            let (mut block, mut n) = (vec![0u8; 1 << 20], 0u64);
+            loop {
+                let got = std::io::Read::read(&mut from, &mut block)?;
+                if got == 0 {
+                    return Ok(n);
+                }
+                into.write_all(&block[..got])?;
+                n += got as u64;
+                (watch.progress)(n);
+            }
+        })();
+        copied.map_err(|e| {
+            let _ = std::fs::remove_file(to);
+            e.to_string()
+        })
+    }
+    fn remove_file(&self, file: &PhoneFile) -> Result<(), String> {
+        std::fs::remove_file(&file.object).map_err(|e| e.to_string())
+    }
+    fn remove(&self) -> Result<(), String> {
+        std::fs::remove_dir_all(&self.0).map_err(|e| e.to_string())
+    }
+}
+
+impl Plugged for LocalFolder {
+    fn name(&self) -> &str {
+        "Test folder"
+    }
+    fn open_again(&self) -> Option<Box<dyn Folder>> {
+        self.0
+            .join(stash_core::phone::LIST)
+            .is_file()
+            .then(|| Box::new(LocalFolder(self.0.clone())) as Box<dyn Folder>)
+    }
+    fn still_there(&self) -> bool {
+        self.0.is_dir()
+    }
+}
+
+/// [`run`] with a folder for a phone (`STASH_PHONE_FOLDER`).
+fn run_folder(state: &State, stop: &AtomicBool, dir: std::path::PathBuf) {
+    let phone = LocalFolder(dir);
+    let mut tried: HashMap<i64, u32> = HashMap::new();
+    while !stop.load(Ordering::Relaxed) {
+        let asked = ASKED.load(Ordering::Relaxed);
+        if asked > ANSWERED.load(Ordering::Relaxed) {
+            tried.clear();
+        }
+        let has = phone.0.join(stash_core::phone::LIST).is_file();
+        *SEEN.lock().unwrap() = vec![(phone.name().to_string(), Some(has))];
+        if has {
+            let edited = || state.edited();
+            let note = |line: &str| log(state, line);
+            let ctx = Ctx {
+                library: &state.library,
+                board: &BOARD,
+                edited: &edited,
+                log: &note,
+            };
+            take(&ctx, &phone, Box::new(LocalFolder(phone.0.clone())), &mut tried, stop);
+        } else {
+            *BOARD.offer.lock().unwrap() = None;
+        }
+        ANSWERED.fetch_max(asked, Ordering::Relaxed);
+        let until = Instant::now() + LOOK_EVERY;
+        while Instant::now() < until && ASKED.load(Ordering::Relaxed) <= ANSWERED.load(Ordering::Relaxed) {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+}
+
 /// Looks for a phone with a transfer on it, every few seconds, and takes it.
 pub(crate) fn run(state: &State, stop: &AtomicBool) {
+    if let Some(dir) = std::env::var_os("STASH_PHONE_FOLDER") {
+        log(state, "STASH_PHONE_FOLDER is set: a folder stands in for a phone, and no phone is looked at");
+        return run_folder(state, stop, dir.into());
+    }
     let mut looked: HashMap<String, Instant> = HashMap::new();
     let mut sent: HashMap<String, bool> = HashMap::new();
     let mut tried: HashMap<i64, u32> = HashMap::new();

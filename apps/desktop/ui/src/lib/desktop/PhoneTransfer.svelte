@@ -1,15 +1,19 @@
 <!-- Songs coming in from Stash for Android over USB (the core's `phone_transfer.rs`), told at every step in a card in
-     the corner: a phone plugged in (and what to tap on it), the phone getting its songs ready, the songs coming in (how
-     many, how much, which), and what came of it, or that the phone was unplugged and how to finish. Asks the core every
-     second while something is happening, every few seconds otherwise. -->
+     the corner: a phone plugged in (and what to tap on it), the phone getting its songs ready, its songs waiting to be
+     chosen from (the page From your phone, or every new one at once), the songs coming in (how many, how much, which),
+     and what came of it, or that the phone was unplugged and how to finish. Asks the core every second while something
+     is happening, every few seconds otherwise. Not shown on the page that chooses the songs: it says the same. -->
 <script lang="ts">
+	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import { onMount } from 'svelte';
-	import { get } from '../core';
+	import { get, post, said } from '../core';
 	import Icon from '../ui/Icon.svelte';
 	import { songs } from '../ui/format';
+	import type { Offer } from './phone-songs';
 
 	type Now = {
-		state: 'idle' | 'connected' | 'preparing' | 'taking' | 'stalled' | 'done' | 'stopped';
+		state: 'idle' | 'connected' | 'preparing' | 'ready' | 'taking' | 'stalled' | 'done' | 'stopped';
 		phone: string | null;
 		ready: number;
 		done: number;
@@ -21,11 +25,30 @@
 		had: number;
 		not_kept: number;
 		failed: number;
+		here: number;
+		left: number;
 		cleared: boolean;
 		at_ms: number;
 	};
 	let now = $state<Now | null>(null);
 	let closedAt = $state(0);
+	let starting = $state(false);
+	let trouble = $state<string | null>(null);
+
+	/** Takes every song of the send waiting that is not on this computer yet. */
+	async function takeNew() {
+		starting = true;
+		trouble = null;
+		try {
+			const offer = await get<Offer>('/api/phone/songs');
+			const files = offer.songs.filter((s) => !s.here).map((s) => s.file);
+			if (files.length) await post('/api/phone/take', { sent_at_ms: offer.sent_at_ms, files });
+		} catch (e) {
+			trouble = said(e);
+		} finally {
+			starting = false;
+		}
+	}
 
 	onMount(() => {
 		let alive = true;
@@ -48,7 +71,7 @@
 	});
 
 	const gb = (bytes: number) => (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`);
-	const shown = $derived(!!now && now.state !== 'idle' && now.at_ms > closedAt);
+	const shown = $derived(!!now && now.state !== 'idle' && now.at_ms > closedAt && page.url.pathname !== '/phone');
 	const from = $derived(now?.phone ?? 'Your phone');
 	/** The card's heading, its lines, and its bar (a share from 0 to 1, null for one that moves on its own, undefined for none). */
 	const card = $derived.by((): { title: string; lines: string[]; bar: number | null | undefined } | null => {
@@ -57,7 +80,15 @@
 			case 'connected':
 				return { title: `${from} is connected`, lines: ['In Stash on your phone, open Settings › Library & Storage and tap Send to computer.'], bar: undefined };
 			case 'preparing':
-				return { title: `${from} is getting songs ready`, lines: [`${songs(now.ready)} ready so far. They come in here next.`], bar: null };
+				return { title: `${from} is getting songs ready`, lines: [`${songs(now.ready)} ready so far. You choose which come in next.`], bar: null };
+			case 'ready': {
+				const fresh = now.total - now.here;
+				return {
+					title: `${songs(now.total)} waiting on ${from}`,
+					lines: [fresh ? `${now.here ? `${now.here.toLocaleString()} on this computer already · ` : ''}${gb(now.bytes_total)} in all` : 'All of them are on this computer already.', trouble ?? ''].filter(Boolean),
+					bar: undefined
+				};
+			}
 			case 'taking':
 				return {
 					title: `Taking songs from ${from}`,
@@ -86,15 +117,16 @@
 				const lines = [`${songs(now.taken)} added to your downloads.`];
 				if (now.had) lines.push(`${songs(now.had)} you had here already.`);
 				if (now.not_kept) lines.push(`${songs(now.not_kept)} in your library to download here: their files can't be kept.`);
+				if (now.left) lines.push(now.left === 1 ? 'The other song stays in Stash on the phone.' : `The other ${now.left.toLocaleString()} stay in Stash on the phone.`);
 				if (now.failed) lines.push(`${songs(now.failed)} didn't come in. Send again from the phone to try them.`);
-				else if (now.cleared) lines.push('You can unplug the phone.');
+				else if (now.cleared || now.left) lines.push('You can unplug the phone.');
 				return { title: now.failed ? `Songs from ${from}, with trouble` : `Songs from ${from} are here`, lines, bar: undefined };
 			}
 			default:
 				return null;
 		}
 	});
-	const closable = $derived(!!now && (now.state === 'connected' || now.state === 'done' || now.state === 'stopped'));
+	const closable = $derived(!!now && (now.state === 'connected' || now.state === 'ready' || now.state === 'done' || now.state === 'stopped'));
 </script>
 
 {#if shown && now && card}
@@ -105,6 +137,14 @@
 			{#each card.lines as line, i (i)}<span class:ph-song={now.state === 'taking' && i === 1}>{line}</span>{/each}
 			{#if card.bar !== undefined}
 				<div class="ph-bar" class:ph-wait={card.bar === null} aria-hidden="true"><i style:width={card.bar === null ? undefined : `${100 * card.bar}%`}></i></div>
+			{/if}
+			{#if now.state === 'ready'}
+				<div class="ph-do">
+					<button type="button" class="btn" onclick={() => void goto('/phone')}>Choose songs</button>
+					{#if now.total > now.here}
+						<button type="button" class="btn ghost" disabled={starting} onclick={takeNew}>{starting ? 'Starting…' : `Take all ${(now.total - now.here).toLocaleString()} new`}</button>
+					{/if}
+				</div>
 			{/if}
 		</div>
 		{#if closable}
@@ -125,6 +165,8 @@
 	.ph-wait i { position: absolute; width: 35%; animation: ph-move 1.2s var(--ease-standard) infinite; }
 	@keyframes ph-move { from { left: -35%; } to { left: 100%; } }
 	@media (prefers-reduced-motion: reduce) { .ph-wait i { animation: none; left: 0; width: 100%; opacity: 0.5; } }
+	.ph-do { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+	.ph-do .btn { height: 32px; padding: 0 14px; }
 	.ph-x { flex: none; width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; color: var(--wp-text-2); }
 	.ph-x:hover { background: var(--wp-hover); color: var(--wp-text); }
 	.ph-x :global(svg) { width: 18px; height: 18px; fill: currentColor; }
