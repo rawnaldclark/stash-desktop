@@ -622,6 +622,18 @@ impl Library {
         Ok(n > 0)
     }
 
+    /// Whether a file coming in for song `id` would be taken: what [`Self::download_arriving`] would say, changing
+    /// nothing. False when the song is a file already (or has been saved as one).
+    pub fn wants_file(&self, id: i64) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM tracks t LEFT JOIN downloads d ON d.track_id = t.id
+             WHERE t.id = ?1 AND t.origin <> 'file' AND COALESCE(d.state, '') <> 'saved'",
+            [id],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
     pub fn download_failed(&mut self, id: i64, why: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE downloads SET state = 'failed', error = ?2 WHERE track_id = ?1 AND state = 'saving'",
@@ -2445,8 +2457,11 @@ mod tests {
             )
             .unwrap();
         for &id in &ids {
+            // Asking first changes nothing, and agrees.
+            assert!(library.wants_file(id).unwrap());
             assert!(library.download_arriving(id, 5).unwrap());
             assert_eq!(state(&library, id).as_deref(), Some("saving"));
+            assert!(library.wants_file(id).unwrap());
         }
         // Saved already: left as it is.
         library
@@ -2456,6 +2471,7 @@ mod tests {
                 [ids[0]],
             )
             .unwrap();
+        assert!(!library.wants_file(ids[0]).unwrap());
         assert!(!library.download_arriving(ids[0], 6).unwrap());
         assert_eq!(state(&library, ids[0]).as_deref(), Some("saved"));
         // A song from the music folders is a file already: no download.
@@ -2467,6 +2483,7 @@ mod tests {
             .conn
             .execute("DELETE FROM downloads WHERE track_id = ?1", [ids[1]])
             .unwrap();
+        assert!(!library.wants_file(ids[1]).unwrap());
         assert!(!library.download_arriving(ids[1], 7).unwrap());
         assert_eq!(state(&library, ids[1]), None);
     }

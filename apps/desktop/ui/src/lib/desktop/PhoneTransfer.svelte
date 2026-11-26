@@ -9,7 +9,7 @@
 	import { songs } from '../ui/format';
 
 	type Now = {
-		state: 'idle' | 'connected' | 'preparing' | 'taking' | 'done' | 'stopped';
+		state: 'idle' | 'connected' | 'preparing' | 'taking' | 'stalled' | 'done' | 'stopped';
 		phone: string | null;
 		ready: number;
 		done: number;
@@ -37,7 +37,7 @@
 			} catch {
 				/* the core is not answering: nothing to say */
 			}
-			const busy = now && (now.state === 'preparing' || now.state === 'taking');
+			const busy = now && (now.state === 'preparing' || now.state === 'taking' || now.state === 'stalled');
 			if (alive) timer = setTimeout(ask, busy ? 1000 : 3000);
 		};
 		void ask();
@@ -55,7 +55,7 @@
 		if (!now) return null;
 		switch (now.state) {
 			case 'connected':
-				return { title: `${from} is connected`, lines: ['In Stash on your phone, open Settings › Library & storage and tap Send to computer.'], bar: undefined };
+				return { title: `${from} is connected`, lines: ['In Stash on your phone, open Settings › Library & Storage and tap Send to computer.'], bar: undefined };
 			case 'preparing':
 				return { title: `${from} is getting songs ready`, lines: [`${songs(now.ready)} ready so far. They come in here next.`], bar: null };
 			case 'taking':
@@ -64,11 +64,21 @@
 					lines: [`${now.done} of ${now.total} · ${gb(now.bytes_done)} of ${gb(now.bytes_total)}`, now.song ?? '', 'Keep the phone plugged in.'].filter(Boolean),
 					bar: now.total ? now.done / now.total : 0
 				};
+			case 'stalled':
+				return {
+					title: `Waiting on ${from}`,
+					lines: [
+						`${now.done} of ${now.total} · ${gb(now.bytes_done)} of ${gb(now.bytes_total)}`,
+						'It stopped sending. Asking it again…',
+						'If this stays, in the phone’s USB notification choose No data transfer, then File transfer.'
+					],
+					bar: now.total ? now.done / now.total : 0
+				};
 			case 'stopped':
 				return {
 					title: `Lost contact with ${from}`,
 					lines: [
-						`${now.total ? `${now.done} of ${now.total} songs came in. ` : ''}Unplug the phone, plug it back in and choose File transfer: the rest come in by themselves.`
+						`${now.total ? `${now.done} of ${now.total} songs came in. ` : ''}Unplug the phone and plug it back in, or in its USB notification choose No data transfer, then File transfer: the rest come in by themselves.`
 					],
 					bar: undefined
 				};
