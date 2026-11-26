@@ -19,11 +19,16 @@
 	/** `first`: the first time Stash opens (how it runs is set by what is brought in); else a later send, from the corner card. */
 	let { first = true }: { first?: boolean } = $props();
 
-	type Now = { state: string; phone: string | null; sent_at_ms: number | null; with_library?: boolean };
+	/** What `/api/phone` says (it doesn't name the send: `/api/phone/songs` does). `at_ms`: when it last changed. */
+	type Now = { state: string; phone: string | null; at_ms: number; with_library?: boolean };
 
 	/** Songs on their way, but how Stash runs could not be set: set again (and only that) with Try again. */
 	let owed = $state<Mode | null>(null);
 	let now = $state<Now | null>(null);
+	/** The `at_ms` of what `/api/phone` said when the send on screen was loaded: a change may be another send. */
+	let seenAt = 0;
+	/** The send on screen was loaded once its library was said to be there: not loaded again for it. */
+	let libAsked = false;
 	let offer = $state<Offer | null>(null);
 	let lib = $state<PhoneLibrary | null>(null);
 	let picks = $state<Picks | null>(null);
@@ -41,8 +46,12 @@
 		} catch {
 			/* a phone too old to send its library, or one whose library could not be read: its songs alone */
 		}
+		const fresh = library && library.sent_at_ms === sent.sent_at_ms ? library : null;
+		// The same send again, with nothing new to show: what is ticked stays as the listener left it.
+		const same = !!offer && !!picks && offer.sent_at_ms === sent.sent_at_ms && (!!lib || !fresh);
 		offer = sent;
-		lib = library && library.sent_at_ms === sent.sent_at_ms ? library : null;
+		lib = fresh ?? (same ? lib : null);
+		if (same) return;
 		picks = firstPicks(sent, lib);
 		// Stash offline for good (on the listener's own files): a song not downloaded could never play, so none comes.
 		if (!first && ui.local) picks = { ...picks, onlyHere: true };
@@ -59,10 +68,13 @@
 				if (!alive) return;
 				now = told;
 				if (!busy) {
-					// A new send; or this one's library, read only after its songs were offered (the phone answered late).
-					const late = told.state === 'ready' && !!told.with_library && !lib && told.sent_at_ms === offer?.sent_at_ms;
-					if (told.state === 'ready' && told.sent_at_ms && (told.sent_at_ms !== offer?.sent_at_ms || late)) await load();
-					else if (told.state !== 'ready' && offer) {
+					// A send to load: the first, perhaps another (what is said changed), or this one's library, read only
+					// after its songs were offered (the phone answered late).
+					if (told.state === 'ready' && (!offer || told.at_ms !== seenAt || (!!told.with_library && !lib && !libAsked))) {
+						await load();
+						seenAt = told.at_ms;
+						libAsked = !!told.with_library;
+					} else if (told.state !== 'ready' && offer) {
 						offer = null;
 						lib = null;
 						picks = null;
