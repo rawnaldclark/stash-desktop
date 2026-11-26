@@ -279,6 +279,57 @@ fn a_playlist_that_is_here_gains_only_what_it_lacks() {
 }
 
 #[test]
+fn a_playlist_mirrored_is_what_the_file_says_it_is_now() {
+    let mut library = Library::open_in_memory().unwrap();
+    library.import(&read(GOLDEN, NOW_MS).unwrap()).unwrap();
+    // Night drive (app-2) has Ivy and Pink + White. Now the file has it as Nights and Ivy, renamed; and a new list.
+    let newer = serde_json::json!({
+        "kind": "stash-web-library", "v": 1,
+        "playlists": [
+            { "id": "app-2", "name": "Night drive (this week)", "items": [
+                { "title": "Nights", "artist": "Frank Ocean" },
+                { "title": "Ivy", "artist": "Frank Ocean" } ] },
+            { "id": "spotify-37i9dQZF1E39vTG3GurFPW", "name": "Daily Mix 1", "items": [
+                { "title": "Ivy", "artist": "Frank Ocean" } ] },
+            { "id": "app-6", "name": "Robin’s mix", "items": [{ "title": "Not Taken", "artist": "Nobody" }],
+              "follow": { "id": "Fw12ab34", "version": 4 } } ]
+    })
+    .to_string();
+    let incoming = read(newer.as_bytes(), NOW_MS).unwrap();
+    let mirrored: std::collections::HashSet<String> =
+        ["app-2", "spotify-37i9dQZF1E39vTG3GurFPW", "app-6"].map(String::from).into();
+    let summary = library.import_mirroring(&incoming, &mirrored).unwrap();
+    assert_eq!(
+        (summary.playlists_added, summary.playlists_merged, summary.playlist_songs_added),
+        (1, 1, 1),
+        "Nights is new to Night drive; the new list is added whole; the shared mix is left as it is"
+    );
+    let rows = library.playlists().unwrap();
+    let night = rows.iter().find(|p| p.external_id.as_deref() == Some("app-2")).unwrap();
+    assert_eq!(night.name, "Night drive (this week)");
+    let titles: Vec<String> = library
+        .playlist_tracks_at(night.id, 0, 10)
+        .unwrap()
+        .into_iter()
+        .map(|t| t.title)
+        .collect();
+    assert_eq!(titles, ["Nights", "Ivy"], "Pink + White is gone from it, and the file's order kept");
+    let robin = rows.iter().find(|p| p.external_id.as_deref() == Some("app-6")).unwrap();
+    assert_eq!(robin.tracks, 1);
+    assert!(library.search("not taken", 10).unwrap().is_empty());
+    // Imported as ever (mirroring nothing), a playlist only gains.
+    let summary = library.import(&read(GOLDEN, NOW_MS).unwrap()).unwrap();
+    assert_eq!(summary.playlist_songs_added, 1, "Pink + White back, at the end");
+    let titles: Vec<String> = library
+        .playlist_tracks_at(night.id, 0, 10)
+        .unwrap()
+        .into_iter()
+        .map(|t| t.title)
+        .collect();
+    assert_eq!(titles, ["Nights", "Ivy", "Pink + White"]);
+}
+
+#[test]
 fn what_is_not_a_stash_library_file_is_refused_and_what_does_not_fit_is_left_out() {
     assert!(matches!(
         read(b"not json", NOW_MS),

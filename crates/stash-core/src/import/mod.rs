@@ -294,7 +294,8 @@ impl Merger<'_> {
             .unwrap_or(false))
     }
 
-    fn playlist(&mut self, playlist: &Playlist) -> crate::Result<()> {
+    /// `mirror`: one that is here already takes the file's songs in place of its own (see [`Library::import_mirroring`]).
+    fn playlist(&mut self, playlist: &Playlist, mirror: bool) -> crate::Result<()> {
         let here: Option<i64> = match &playlist.follow_id {
             Some(follow) => self
                 .tx
@@ -352,6 +353,32 @@ impl Merger<'_> {
                 for song in &playlist.items {
                     self.track(song)?;
                 }
+            }
+            // One mirrored is what the file says it is now: its songs, in their order, and its name.
+            Some(id) if mirror => {
+                let had: HashSet<i64> = self
+                    .tx
+                    .prepare_cached("SELECT track_id FROM playlist_items WHERE playlist_id = ?1")?
+                    .query_map([id], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                self.tx
+                    .prepare_cached("DELETE FROM playlist_items WHERE playlist_id = ?1")?
+                    .execute([id])?;
+                for (position, song) in playlist.items.iter().enumerate() {
+                    let track = self.track(song)?;
+                    self.tx
+                        .prepare_cached(add_item)?
+                        .execute(params![id, position as i64, track])?;
+                    if !had.contains(&track) {
+                        self.summary.playlist_songs_added += 1;
+                    }
+                }
+                self.tx
+                    .prepare_cached(
+                        "UPDATE playlists SET name = ?2, updated_at_ms = COALESCE(?3, updated_at_ms) WHERE id = ?1",
+                    )?
+                    .execute(params![id, playlist.name, playlist.updated_at_ms])?;
+                self.summary.playlists_merged += 1;
             }
             // One that is here gains the songs it does not have, at the end.
             Some(id) => {
@@ -446,6 +473,19 @@ impl Library {
 
     /// Merges `incoming` into the library, all of it or (on an error) none of it.
     pub fn import(&mut self, incoming: &Incoming) -> crate::Result<Summary> {
+        self.import_mirroring(incoming, &HashSet::new())
+    }
+
+    /// Merges `incoming` as [`Self::import`] does, but for the playlists `mirrored` names (by their `external_id`):
+    /// one that is here already is made what the file says it is now, its songs in their order and its name, in place
+    /// of gaining what it lacks. For a list a streaming service keeps (a Daily Mix changes its songs), which the file
+    /// has as it is now. A shared mix someone else owns and a smart playlist are left as the import leaves them. All of
+    /// it or none of it.
+    pub fn import_mirroring(
+        &mut self,
+        incoming: &Incoming,
+        mirrored: &HashSet<String>,
+    ) -> crate::Result<Summary> {
         let now_s = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -465,7 +505,7 @@ impl Library {
                 merger.like(song, *liked_at_ms)?;
             }
             for playlist in &incoming.playlists {
-                merger.playlist(playlist)?;
+                merger.playlist(playlist, mirrored.contains(&playlist.external_id))?;
             }
             for (song, played_at_ms) in &incoming.plays {
                 merger.play(song, *played_at_ms)?;
