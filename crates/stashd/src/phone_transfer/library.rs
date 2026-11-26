@@ -6,8 +6,10 @@
 //! window's first-run screen (`GET /api/phone/library`). The parts the listener chooses (`library` in
 //! `POST /api/phone/take`) come in before the send's songs, in one import, once for the send. A song not sent as a file
 //! comes in as a song that streams; a file sent lands on its song, as every file a take brings in does. What was
-//! chosen is kept, and each later send with a library brings the same parts in by itself: a playlist not chosen never
-//! comes in uninvited.
+//! chosen is kept for the phone (by its name: a playlist's id is that phone's), and each later send of its with a
+//! library brings the same parts in by itself, in step: likes and the phone's own playlists gain, a playlist synced
+//! from a streaming service is made what the phone has it as now, and a playlist not chosen never comes in uninvited.
+//! Chosen without its likes, the songs taken do not bring the likes their list marks either.
 //!
 //! A library file missing, unreadable, too big or of another send changes nothing: the send is its songs, as before.
 
@@ -29,10 +31,13 @@ use crate::serve::now_ms;
 const CAP: u64 = 64 * 1024 * 1024;
 /// Reads of a library file the phone did not answer before its send is taken as one without.
 const READS: u32 = 3;
-/// What was chosen to bring in from a phone's library ([`Parts`]): kept, and brought in from each later send's too.
+/// What was chosen to bring in from each phone's library ([`Parts`]), by the phone's name (its playlists' ids are
+/// that phone's): kept, and brought in from each later send of that phone's too. `{"Pixel 6 Pro": {…}}`.
 pub(super) const CHOICE_SETTING: &str = "phone.library_choice";
-/// The last send whose library came in (its `sent_at_ms`): another try at that send does not bring it in again.
+/// The sends whose library came in, newest last, as `[phone, sent_at_ms]` (the last [`BROUGHT_KEPT`]): another try at
+/// one of them, from that phone or another (or another Stash on it), does not bring it in again.
 pub(super) const BROUGHT_SETTING: &str = "phone.library_taken";
+const BROUGHT_KEPT: usize = 50;
 /// How many songs are asked of the library at a time, with the library let go between: the window is answered
 /// meanwhile.
 const ASK_AT_ONCE: usize = 500;
@@ -211,53 +216,113 @@ pub(super) fn can_bring(offer: &Offer, parts: &Parts) -> Result<(), &'static str
     Ok(())
 }
 
-/// `parts` kept: brought in from the send chosen from now, and from each later send that comes with a library.
-pub(super) fn keep(library: &Mutex<Library>, parts: &Parts) {
-    let _ = library
-        .lock()
-        .unwrap()
-        .set_setting(CHOICE_SETTING, &json!(parts).to_string());
+/// The parts kept for each phone, by its name.
+fn kept_all(library: &Library) -> HashMap<String, Parts> {
+    library
+        .setting(CHOICE_SETTING)
+        .ok()
+        .flatten()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
 }
 
-/// What was chosen to bring in, as kept.
-fn kept(library: &Library) -> Option<Parts> {
-    let text = library.setting(CHOICE_SETTING).ok().flatten()?;
-    serde_json::from_str(&text).ok()
+/// `parts` kept for `phone`: brought in from the send chosen from now, and from each later send of the phone's that
+/// comes with a library. Another phone's stay as they are.
+pub(super) fn keep(library: &Mutex<Library>, phone: &str, parts: &Parts) {
+    let mut library = library.lock().unwrap();
+    let mut all = kept_all(&library);
+    all.insert(phone.to_string(), parts.clone());
+    let _ = library.set_setting(CHOICE_SETTING, &json!(all).to_string());
 }
 
-/// The parts kept to bring in, and the library that came with the send made at `sent_at_ms`, while they are still to
-/// come in from that send (once for a send): the library is read from the phone only then.
-pub(super) fn due(
+/// What was chosen to bring in from `phone`'s library, as kept.
+fn kept(library: &Library, phone: &str) -> Option<Parts> {
+    kept_all(library).remove(phone)
+}
+
+/// Whether a choice of what to bring in from `phone`'s library is kept (`library_choice_kept` in `GET /api/phone`):
+/// its sends' libraries then come in by themselves, as that choice says.
+pub(super) fn choice_kept(library: &Mutex<Library>, phone: &str) -> bool {
+    kept(&library.lock().unwrap(), phone).is_some()
+}
+
+/// The sends whose library came in, newest last.
+fn brought(library: &Library) -> Vec<(String, i64)> {
+    library
+        .setting(BROUGHT_SETTING)
+        .ok()
+        .flatten()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// The send made at `sent_at_ms` on `phone` has had its library brought in: kept with the last [`BROUGHT_KEPT`].
+fn mark_brought(library: &mut Library, phone: &str, sent_at_ms: i64) -> stash_core::Result<()> {
+    let mut sends = brought(library);
+    sends.retain(|(p, at)| !(p == phone && *at == sent_at_ms));
+    sends.push((phone.to_string(), sent_at_ms));
+    let over = sends.len().saturating_sub(BROUGHT_KEPT);
+    sends.drain(..over);
+    library.set_setting(BROUGHT_SETTING, &json!(sends).to_string())
+}
+
+/// What a take does with the phone's library: the parts kept for the phone (none chosen yet: the likes the list marks
+/// come in, as ever), and the library to bring them in from while they are still to come in from this send.
+pub(super) struct ForTake {
+    pub kept: Option<Parts>,
+    pub due: Option<Arc<FromPhone>>,
+}
+
+impl ForTake {
+    /// Whether the likes the list marks on its songs come in with them: unless the phone's library is brought in
+    /// without its likes.
+    pub fn likes(&self) -> bool {
+        self.kept.as_ref().is_none_or(|parts| parts.likes)
+    }
+}
+
+/// What a take of the send made at `sent_at_ms` on `phone` does with the phone's library ([`ForTake`]): the library
+/// is read from the phone only while parts are still to come in from it (once for a send).
+pub(super) fn for_take(
     ctx: &Ctx,
     phone: &str,
     folder: &dyn Folder,
     listing: &[PhoneFile],
     sent_at_ms: i64,
-) -> Option<(Parts, Arc<FromPhone>)> {
-    let (parts, brought) = {
+) -> ForTake {
+    let (kept, done) = {
         let library = ctx.library.lock().unwrap();
-        (kept(&library), library.setting(BROUGHT_SETTING).ok().flatten())
+        let done = brought(&library).iter().any(|(p, at)| p == phone && *at == sent_at_ms);
+        (kept(&library, phone), done)
     };
-    if brought.as_deref() == Some(sent_at_ms.to_string().as_str()) {
-        return None;
-    }
-    let parts = parts.filter(Parts::any)?;
-    Some((parts, of_send(ctx, phone, folder, listing, sent_at_ms)?))
+    let due = (!done && kept.as_ref().is_some_and(Parts::any))
+        .then(|| of_send(ctx, phone, folder, listing, sent_at_ms))
+        .flatten();
+    ForTake { kept, due }
 }
 
-/// Brings in the `parts` chosen of the phone's library (`from`) before the songs of `list` chosen (`songs`) are taken,
-/// in one import: its likes and plays when chosen, and the playlists chosen that it holds. With `only_here`, of each
-/// only the songs coming in now as files or files here already; a playlist left with none of its songs is not made.
-/// Then the send is marked as brought in, so another try at it does not bring it in again. Trouble in the library here
-/// as [`in_library`] says it.
+/// Brings in the `parts` chosen of `phone`'s library (`from`) before the songs of `list` chosen (`songs`) are taken,
+/// in one import: its likes and plays when chosen, and the playlists chosen that it holds. Likes and its own playlists
+/// only gain; a playlist synced from a streaming service is made what the phone has it as now (a Daily Mix changes
+/// its songs), here already or not. With `only_here`, of each only the songs coming in now as files or files here
+/// already; a playlist left with none of its songs is not made (but a synced one here already is emptied, as the
+/// phone has it). Then the send is marked as brought in, so another try at it does not bring it in again. Trouble in
+/// the library here as [`in_library`] says it.
 pub(super) fn bring_in(
     ctx: &Ctx,
+    phone: &str,
     list: &List,
     songs: &Choice,
     parts: &Parts,
     from: &FromPhone,
 ) -> Result<(), String> {
     let mut incoming = chosen_parts(&from.library, parts);
+    let mirrored: HashSet<String> = incoming
+        .playlists
+        .iter()
+        .filter(|p| from.from.contains_key(&p.external_id))
+        .map(|p| p.external_id.clone())
+        .collect();
     if parts.only_here {
         let coming: Vec<Song> = list
             .songs
@@ -266,12 +331,17 @@ pub(super) fn bring_in(
             .map(as_song)
             .collect();
         let downloaded = Downloaded::of(ctx.library, &Coming::of(&coming), songs_in(&incoming));
-        only_downloaded(&mut incoming, &downloaded);
+        let here: HashSet<String> = ctx
+            .library
+            .lock()
+            .unwrap()
+            .playlists()
+            .map(|rows| rows.into_iter().filter_map(|p| p.external_id).collect())
+            .unwrap_or_default();
+        only_downloaded(&mut incoming, &downloaded, |id| mirrored.contains(id) && here.contains(id));
     }
-    let summary = in_library(ctx.library, |library| library.import(&incoming))?;
-    in_library(ctx.library, |library| {
-        library.set_setting(BROUGHT_SETTING, &list.sent_at_ms.to_string())
-    })?;
+    let summary = in_library(ctx.library, |library| library.import_mirroring(&incoming, &mirrored))?;
+    in_library(ctx.library, |library| mark_brought(library, phone, list.sent_at_ms))?;
     (ctx.log)(&format!(
         "the phone's library came in: {} likes new here, {} playlists new and {} added to, {} plays new here, {} songs new here",
         summary.likes_added,
@@ -313,14 +383,15 @@ fn songs_in(incoming: &Incoming) -> impl Iterator<Item = &Song> {
         .chain(incoming.plays.iter().map(|(song, _)| song))
 }
 
-/// `incoming` with only its songs that are downloaded; a playlist left with none of its songs goes.
-fn only_downloaded(incoming: &mut Incoming, downloaded: &Downloaded) {
+/// `incoming` with only its songs that are downloaded; a playlist left with none of its songs goes, unless it is to be
+/// emptied (`emptied`, by its id).
+fn only_downloaded(incoming: &mut Incoming, downloaded: &Downloaded, emptied: impl Fn(&str) -> bool) {
     incoming.likes.retain(|(song, _)| downloaded.is(song));
     incoming.plays.retain(|(song, _)| downloaded.is(song));
     incoming.playlists.retain_mut(|p| {
         let had = p.items.len();
         p.items.retain(|song| downloaded.is(song));
-        had == 0 || !p.items.is_empty()
+        had == 0 || !p.items.is_empty() || emptied(&p.external_id)
     });
 }
 
@@ -430,7 +501,7 @@ fn here_of(library: &Mutex<Library>, songs: &[Song]) -> Vec<bool> {
 /// What the window's first-run screen draws of the send offered and the library it came with
 /// (`GET /api/phone/library`): the send's songs to come in (those not here already), the library's likes and
 /// playlists with how many of their songs are downloaded (sent as files now, or files here already), its plays, the
-/// albums the send's songs are from, and what was chosen before (`choice`: null the first time).
+/// albums the send's songs are from, and what was chosen before for this phone (`choice`: null the first time).
 pub(super) fn summary(library: &Mutex<Library>, offer: &Offer, from: &FromPhone) -> Value {
     // The send's songs asked again: songs may have come into the library since they were offered.
     let (mut songs, mut bytes, mut had) = (0, 0u64, 0);
@@ -480,7 +551,7 @@ pub(super) fn summary(library: &Mutex<Library>, offer: &Offer, from: &FromPhone)
             })
         })
         .collect();
-    let choice = kept(&library.lock().unwrap());
+    let choice = kept(&library.lock().unwrap(), &offer.phone);
     json!({
         "sent_at_ms": offer.sent_at_ms,
         "phone": offer.phone,
