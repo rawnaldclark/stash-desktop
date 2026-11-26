@@ -610,8 +610,17 @@ fn take(
     let bytes = match folder.bytes(&list_file, LIST_CAP) {
         Ok(bytes) => bytes,
         Err(why) => {
-            // Listed but not answering (its USB connection dropped): said once, as a transfer cut short.
-            if lost(&why) {
+            // Listed but not answering (its USB connection dropped): said once, as a transfer cut short. A send of this
+            // phone's waiting to be chosen from is left as it is: nothing was being taken, and the same send is offered
+            // again (with what the window chose from it) once the phone answers.
+            let waiting = ctx
+                .board
+                .offer
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|o| o.phone == phone.name());
+            if lost(&why) && !waiting {
                 let mut now = ctx.board.now.lock().unwrap();
                 let said = now.as_ref().is_some_and(|n| {
                     n.state == "stopped" && n.phone.as_deref() == Some(phone.name())
@@ -694,11 +703,11 @@ fn offer(ctx: &Ctx, phone: &dyn Plugged, folder: &dyn Folder, list: &List) {
                 return;
             }
             if o.sent_at_ms == list.sent_at_ms && o.songs.len() == on_phone.len() {
-                // Offered already; said again when something else was said over it on this phone.
+                // Offered already; said again when something else was said over it: on this phone, or what another
+                // phone did (its transfer done or stopped), but not over another phone's send being chosen or taken.
                 let mut now = ctx.board.now.lock().unwrap();
                 let shown = now.as_ref().is_some_and(|n| n.state == "ready");
-                let other = now.as_ref().is_some_and(|n| n.phone.as_deref() != Some(phone.name()));
-                if !shown && !other {
+                if !shown && !busy_elsewhere(now.as_ref(), phone.name()) {
                     let at_ms = now.as_ref().map_or_else(now_ms, |n| n.at_ms);
                     *now = Some(ready_now(o, at_ms));
                 }
@@ -757,7 +766,15 @@ fn offer(ctx: &Ctx, phone: &dyn Plugged, folder: &dyn Folder, list: &List) {
         now.here
     ));
     *ctx.board.offer.lock().unwrap() = Some(offer);
-    ctx.board.set(now);
+    // Not said over another phone's send being chosen from or taken: it is said once that one is done (above).
+    if !busy_elsewhere(ctx.board.now.lock().unwrap().as_ref(), phone.name()) {
+        ctx.board.set(now);
+    }
+}
+
+/// Whether `now` is another phone's send being chosen from or taken, which another phone's news is not said over.
+fn busy_elsewhere(now: Option<&Now>, phone: &str) -> bool {
+    now.is_some_and(|n| n.phone.as_deref() != Some(phone) && matches!(n.state, "ready" | "taking" | "stalled"))
 }
 
 /// The phone's transfer folder opened again after a read was called off, tried a few times a little apart. None
@@ -1486,6 +1503,8 @@ mod tests {
         answers_again: AtomicBool,
         reads: Mutex<Vec<String>>,
         opened_again: AtomicU64,
+        /// Still listed, but every read fails as when its USB connection dropped.
+        unreachable: AtomicBool,
     }
 
     impl Phone {
@@ -1543,6 +1562,9 @@ mod tests {
                 .collect()
         }
         fn bytes(&self, file: &PhoneFile, _cap: u64) -> Result<Vec<u8>, String> {
+            if self.0.unreachable.load(Ordering::Relaxed) {
+                return Err("the device is unreachable (0x80070141)".to_string());
+            }
             let files = self.0.files.lock().unwrap();
             Ok(files.iter().find(|(n, _)| *n == file.name).unwrap().1.clone())
         }
@@ -1910,6 +1932,47 @@ mod tests {
         let now = here.take(&b, &mut HashMap::new()).unwrap();
         assert_eq!(now.phone.as_deref(), Some("Phone A"), "Phone A's send is still the one shown");
         assert_eq!(here.board.offer.lock().unwrap().as_ref().unwrap().phone, "Phone A");
+    }
+
+    #[test]
+    fn a_send_waiting_to_be_chosen_from_stays_offered_while_the_phone_does_not_answer() {
+        let here = Here::asking("dropout");
+        let phone = three("Test phone");
+        let mut tried = HashMap::new();
+        assert_eq!(here.take(&phone, &mut tried).unwrap().state, "ready");
+        phone.unreachable.store(true, Ordering::Relaxed);
+        let now = here.take(&phone, &mut tried).unwrap();
+        assert_eq!(now.state, "ready", "nothing was being taken: not a transfer cut short");
+        assert!(here.board.offer.lock().unwrap().is_some(), "still offered, with what was chosen from it");
+        phone.unreachable.store(false, Ordering::Relaxed);
+        assert_eq!(here.take(&phone, &mut tried).unwrap().state, "ready");
+        // Chosen from, then not answering: that is a transfer cut short, which carries on once it answers.
+        assert_eq!(here.choose(8, &["2.wav"]), Ok(1));
+        phone.unreachable.store(true, Ordering::Relaxed);
+        assert_eq!(here.take(&phone, &mut tried).unwrap().state, "stopped");
+        phone.unreachable.store(false, Ordering::Relaxed);
+        let now = here.take(&phone, &mut tried).unwrap();
+        assert_eq!((now.state, now.taken), ("done", 1));
+    }
+
+    #[test]
+    fn a_send_waiting_behind_another_phones_is_offered_once_that_one_is_taken() {
+        let here = Here::asking("behind");
+        let a = three("Phone A");
+        let b = Phone::sending("Phone B", 9, &[("9.wav", wav())], vec![json!({ "file": "9.wav", "title": "B song", "artist": "Someone" })]);
+        let mut tried = HashMap::new();
+        assert_eq!(here.take(&a, &mut tried).unwrap().phone.as_deref(), Some("Phone A"));
+        here.take(&b, &mut tried);
+        assert_eq!(here.choose(8, &["2.wav"]), Ok(1));
+        // Windows lists B first: its send is kept to offer, but not said over A's being taken.
+        let now = here.take(&b, &mut tried).unwrap();
+        assert_eq!((now.state, now.phone.as_deref()), ("taking", Some("Phone A")));
+        let done = here.take(&a, &mut tried).unwrap();
+        assert_eq!((done.state, done.phone.as_deref(), done.taken), ("done", Some("Phone A"), 1));
+        // Then B's send is said, over A's result.
+        let now = here.take(&b, &mut tried).unwrap();
+        assert_eq!((now.state, now.phone.as_deref(), now.total), ("ready", Some("Phone B"), 1));
+        assert_eq!(here.board.offer.lock().unwrap().as_ref().unwrap().phone, "Phone B");
     }
 
     #[test]

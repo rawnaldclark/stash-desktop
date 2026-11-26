@@ -154,14 +154,17 @@
 		}
 	}
 
-	// Toasts rise above the bar with Take while it shows, as they do above the bar for songs picked in a list.
+	// Toasts rise above the bar with Take while it shows. Its own variable: `--pick-clear` (the bar for songs picked in
+	// a list, which floats) also pads the page's foot, which this bar (in the page's flow) has no need of.
 	let takeHeight = $state(0);
 	$effect(() => {
 		if (!offer || !takeHeight) return;
 		const root = document.documentElement;
-		root.style.setProperty('--pick-clear', `${takeHeight + 14}px`);
-		return () => root.style.removeProperty('--pick-clear');
+		root.style.setProperty('--take-clear', `${takeHeight + 14}px`);
+		return () => root.style.removeProperty('--take-clear');
 	});
+	// The sticky head's height (one line, or two when it wraps): a song reached by the keyboard is kept below it.
+	let headHeight = $state(0);
 
 	const phone = $derived(offer?.phone ?? now?.phone ?? 'your phone');
 	const Phone = $derived(offer?.phone ?? now?.phone ?? 'Your phone');
@@ -227,7 +230,7 @@
 			{/if}
 		{/if}
 
-		<div class="ps-head">
+		<div class="ps-head" bind:offsetHeight={headHeight}>
 			<div class="ps-head-l">
 				<div class="ps-seg" role="group" aria-label="Show">
 					<button type="button" class:on={show === 'new'} aria-pressed={show === 'new'} onclick={() => (show = 'new')}>New songs {fresh.length.toLocaleString()}</button>
@@ -244,8 +247,18 @@
 		</div>
 
 		<!-- A song reached by the keyboard comes out from under the sticky head or the bar with Take (the row's scroll-margin):
-		     focus alone leaves a row that is in the scroller's box where it is, even when the head covers it. -->
-		<div class="ps-list" role="group" aria-label="Songs" onfocusin={(e) => (e.target as HTMLElement).closest('.ps-r')?.scrollIntoView({ block: 'nearest' })}>
+		     focus alone leaves a row that is in the scroller's box where it is, even when the head covers it. Not on a
+		     click (the mouse focuses the box on press: the list moving under it would lose the click). -->
+		<div
+			class="ps-list"
+			role="group"
+			aria-label="Songs"
+			style:--ps-head={headHeight ? `${headHeight}px` : null}
+			onfocusin={(e) => {
+				const el = e.target as HTMLElement;
+				if (el.matches(':focus-visible')) el.closest('.ps-r')?.scrollIntoView({ block: 'nearest' });
+			}}
+		>
 			{#each shown as s (s.file)}
 				{@const on = !s.here && chosen.has(s.file)}
 				<label class="ps-r" class:ps-on={on} class:ps-here={s.here}>
@@ -303,7 +316,7 @@
 	{:else if now?.state === 'stopped'}
 		<p class="s-hint" role="status">
 			Lost contact with {phone}. {now.total ? `${now.done.toLocaleString()} of ${songsWord(now.total)} came in. ` : ''}Unplug the phone and plug it back in, or in its USB notification choose No data
-			transfer, then File transfer: the rest come in by themselves.
+			transfer, then File transfer{now.total ? ': the rest come in by themselves' : ''}.
 		</p>
 	{:else if now?.state === 'preparing'}
 		<p class="s-hint" role="status">{Phone} is getting songs ready: {songsWord(now.ready)} so far. They show up here to choose from.</p>
@@ -313,9 +326,12 @@
 		<p class="s-hint" role="status">
 			{#if now.taken}
 				{songsWord(now.taken)} came in{now.had ? `, ${now.had.toLocaleString()} you had already` : ''}.
-			{:else}
-				Nothing new came in{now.had ? `: you had all ${now.had.toLocaleString()} already` : ''}.
+			{:else if !now.not_kept && !now.failed}
+				Nothing new came in{now.had ? `: you had ${now.left ? '' : 'all '}${now.had.toLocaleString()} already` : ''}.
+			{:else if now.had}
+				{songsWord(now.had)} you had already.
 			{/if}
+			{now.not_kept ? `${songsWord(now.not_kept)} ${now.not_kept === 1 ? 'is' : 'are'} in your library to download here: their files can't be kept.` : ''}
 			{now.failed ? `${songsWord(now.failed)} didn't: send again from the phone to try them.` : ''}
 			{now.left === 1 ? `The other song stays in Stash on ${phone}.` : now.left ? `The other ${now.left.toLocaleString()} stay in Stash on ${phone}.` : ''}
 		</p>
@@ -355,10 +371,10 @@
 	.ps-seg button { height: 30px; padding: 0 12px; border-radius: 9px; color: var(--wp-text-2); font: 600 13px/1 var(--font-body); font-variant-numeric: tabular-nums; }
 	.ps-seg button.on { background: var(--wp-field); color: var(--wp-text); box-shadow: 0 1px 2px rgb(0 0 0 / .4); }
 	.ps-n { color: var(--wp-text-2); font: 400 13px/1.3 var(--font-body); font-variant-numeric: tabular-nums; }
-	.ps-r { display: grid; grid-template-columns: 20px 36px minmax(0, 1fr) 128px 64px; align-items: center; gap: 12px; min-height: 48px; padding: 4px 8px; border-radius: 8px; font: 400 13.5px/1.35 var(--font-body); cursor: pointer; content-visibility: auto; contain-intrinsic-size: auto 48px; scroll-margin: 72px 0 calc(var(--bar-clear, 0px) + var(--pick-clear, 0px) + 28px); }
+	.ps-r { display: grid; grid-template-columns: 20px 36px minmax(0, 1fr) 128px 64px; align-items: center; gap: 12px; min-height: 48px; padding: 4px 8px; border-radius: 8px; font: 400 13.5px/1.35 var(--font-body); cursor: pointer; content-visibility: auto; contain-intrinsic-size: auto 48px; scroll-margin: calc(var(--ps-head, 57px) + 15px) 0 calc(var(--bar-clear, 0px) + var(--take-clear, 0px) + 28px); }
 	/* A narrow window (the rail, Up next open): the title keeps its room, the format goes first. The head wraps taller. */
 	@container main (max-width: 640px) {
-		.ps-r { grid-template-columns: 20px 36px minmax(0, 1fr) 56px; scroll-margin-top: 150px; }
+		.ps-r { grid-template-columns: 20px 36px minmax(0, 1fr) 56px; }
 		.ps-fmt { display: none; }
 		.ps-take-q { display: none; }
 	}

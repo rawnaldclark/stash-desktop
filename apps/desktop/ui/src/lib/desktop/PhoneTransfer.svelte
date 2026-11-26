@@ -109,7 +109,7 @@
 				return {
 					title: `Lost contact with ${from}`,
 					lines: [
-						`${now.total ? `${now.done} of ${now.total} songs came in. ` : ''}Unplug the phone and plug it back in, or in its USB notification choose No data transfer, then File transfer: the rest come in by themselves.`
+						`${now.total ? `${now.done} of ${now.total} songs came in. ` : ''}Unplug the phone and plug it back in, or in its USB notification choose No data transfer, then File transfer${now.total ? ': the rest come in by themselves' : ''}.`
 					],
 					bar: undefined
 				};
