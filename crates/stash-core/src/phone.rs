@@ -26,6 +26,9 @@ pub struct PhoneFile {
 pub const FOLDER: [&str; 2] = ["Download", "Stash transfer"];
 /// The list of what each file is, written last by the phone.
 pub const LIST: &str = "stash-transfer.json";
+/// The phone's library sent with its songs (its likes, playlists and plays, as "Export for Stash on the web" writes
+/// them, with the send's `sent_at_ms`): written after the songs and before the list. Neither a song nor the list.
+pub const LIBRARY: &str = "stash-library.json";
 
 /// A file that sends nothing for this long is taken as stuck, and its read is called off. A phone's File transfer was
 /// seen to stop mid-file every hundred or so songs and never start again by itself, until it was unplugged.

@@ -1,11 +1,12 @@
 //! Reading the Stash library file (`stash-web-library`, version 1): what the web player writes with "Save a backup"
-//! and the Android app writes with "Export for Stash on the web".
+//! and the Android app writes with "Export for Stash on the web", and sends a computer with its songs over USB
+//! ([`read_from_phone`]).
 //!
 //! The file is someone else's input. Nothing is taken as it stands: every value is rebuilt from the fields the format
 //! names, text is cleaned and cut to size, and what does not fit the format is left out (a song without a title, an
 //! ISRC of the wrong shape, a cover that is not https). Unknown fields are ignored, as the format asks.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
@@ -136,6 +137,43 @@ fn playlist(value: &Value) -> Option<Playlist> {
 
 /// Reads the file's bytes. `now_ms` stands in for a time the file leaves out.
 pub fn read(bytes: &[u8], now_ms: i64) -> Result<Incoming, ImportError> {
+    Ok(walk(&parse(bytes)?, now_ms, |_, _| {}))
+}
+
+/// The library Stash for Android sends a computer beside its songs over USB (`stash-library.json`): the same file,
+/// with two things more. The send it goes with (its list's `sent_at_ms`), and which playlists the phone synced from a
+/// streaming service.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FromPhone {
+    pub library: Incoming,
+    pub sent_at_ms: Option<i64>,
+    /// By playlist (its `external_id`): "spotify" or "youtube", for one the phone synced from there. Its own
+    /// playlists and shared mixes have none.
+    pub from: HashMap<String, &'static str>,
+}
+
+/// Reads the library a phone sent with its songs: read as [`read`] reads the file, with its send and where each of its
+/// playlists came from.
+pub fn read_from_phone(bytes: &[u8], now_ms: i64) -> Result<FromPhone, ImportError> {
+    let file = parse(bytes)?;
+    let mut from = HashMap::new();
+    let library = walk(&file, now_ms, |raw, playlist| {
+        let service = match raw.get("from").and_then(Value::as_str) {
+            Some("spotify") => "spotify",
+            Some("youtube") => "youtube",
+            _ => return,
+        };
+        from.insert(playlist.external_id.clone(), service);
+    });
+    Ok(FromPhone {
+        library,
+        sent_at_ms: file.get("sent_at_ms").and_then(Value::as_i64),
+        from,
+    })
+}
+
+/// The file's JSON, when it is a library file of this version (and not too big to be one).
+fn parse(bytes: &[u8]) -> Result<Value, ImportError> {
     if bytes.len() > MAX_BYTES {
         return Err(ImportError::TooBig);
     }
@@ -146,6 +184,11 @@ pub fn read(bytes: &[u8], now_ms: i64) -> Result<Incoming, ImportError> {
     if file.get("v").and_then(Value::as_i64) != Some(1) {
         return Err(ImportError::Newer);
     }
+    Ok(file)
+}
+
+/// What the file holds. `each_playlist` is shown every playlist kept, beside the JSON it was read from.
+fn walk(file: &Value, now_ms: i64, mut each_playlist: impl FnMut(&Value, &Playlist)) -> Incoming {
     let list = |name: &str| {
         file.get(name)
             .and_then(Value::as_array)
@@ -167,12 +210,13 @@ pub fn read(bytes: &[u8], now_ms: i64) -> Result<Incoming, ImportError> {
 
     // Two playlists with one id: the first wins.
     let mut seen = HashSet::new();
-    let playlists = list("playlists")
-        .iter()
-        .take(MAX_PLAYLISTS)
-        .filter_map(playlist)
-        .filter(|p| seen.insert(p.external_id.clone()))
-        .collect();
+    let mut playlists = Vec::new();
+    for raw in list("playlists").iter().take(MAX_PLAYLISTS) {
+        if let Some(p) = playlist(raw).filter(|p| seen.insert(p.external_id.clone())) {
+            each_playlist(raw, &p);
+            playlists.push(p);
+        }
+    }
 
     let mut plays: Vec<(Song, i64)> = list("history")
         .iter()
@@ -180,7 +224,7 @@ pub fn read(bytes: &[u8], now_ms: i64) -> Result<Incoming, ImportError> {
         .collect();
     plays.sort_by_key(|(_, played_at)| std::cmp::Reverse(*played_at));
 
-    Ok(Incoming {
+    Incoming {
         source: "web-library",
         generator: text(file.get("generator"), NAME),
         likes,
@@ -188,5 +232,42 @@ pub fn read(bytes: &[u8], now_ms: i64) -> Result<Incoming, ImportError> {
         plays,
         songs: Vec::new(),
         blocked: Vec::new(),
-    })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A library a phone sent with its send made at 7: its own playlist, one synced from Spotify, one from YouTube
+    /// Music, one from somewhere this does not know, and the Spotify one again under its id.
+    const SENT: &str = r#"{"kind":"stash-web-library","v":1,"sent_at_ms":7,
+        "likes":[{"item":{"title":"Halo","artist":"Beyoncé"},"likedAt":1759838400200}],
+        "playlists":[
+            {"id":"app-2","name":"Night drive","items":[{"title":"Ivy","artist":"Frank Ocean"}]},
+            {"id":"bad id!","name":"Not kept","from":"spotify","items":[]},
+            {"id":"app-9","name":"Daily Mix 1","from":"spotify","items":[]},
+            {"id":"app-9","name":"Daily Mix 1 again","from":"youtube","items":[]},
+            {"id":"app-12","name":"Supermix","from":"youtube","items":[]},
+            {"id":"app-13","name":"Odd","from":"tidal","items":[]}],
+        "history":[{"item":{"title":"Ivy","artist":"Frank Ocean"},"playedAt":1759838402000}]}"#;
+
+    #[test]
+    fn a_library_sent_by_a_phone_says_its_send_and_where_its_playlists_came_from() {
+        let sent = read_from_phone(SENT.as_bytes(), 1).unwrap();
+        assert_eq!(sent.sent_at_ms, Some(7));
+        assert_eq!(
+            sent.from,
+            HashMap::from([("app-9".to_string(), "spotify"), ("app-12".to_string(), "youtube")]),
+            "the first of one id wins, as its playlist does; a service not known is none"
+        );
+        // Read as the web file is: the same likes, playlists and plays.
+        assert_eq!(sent.library, read(SENT.as_bytes(), 1).unwrap());
+        let names: Vec<&str> = sent.library.playlists.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Night drive", "Daily Mix 1", "Supermix", "Odd"]);
+        // The web file has neither: no send, and no playlist from anywhere.
+        let web = read_from_phone(br#"{"kind":"stash-web-library","v":1,"playlists":[{"id":"a","name":"A","items":[]}]}"#, 1).unwrap();
+        assert_eq!((web.sent_at_ms, web.from.len()), (None, 0));
+        assert!(matches!(read_from_phone(b"{}", 1), Err(ImportError::NotStash)));
+    }
 }
