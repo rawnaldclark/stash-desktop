@@ -611,23 +611,27 @@ impl Library {
     }
 
     /// A file for song `id` is coming in from somewhere other than an add-on (a phone's transfer): its download is
-    /// "saving", for [`Self::download_saved`] to finish. False when the song is a file already.
+    /// "saving", for [`Self::download_saved`] to finish. False when the song is a file already (one gone missing, a
+    /// scan found, is not: the file coming in takes its place).
     pub fn download_arriving(&mut self, id: i64, now_ms: i64) -> Result<bool> {
         let n = self.conn.execute(
             "INSERT INTO downloads(track_id, state, asked_at)
-             SELECT id, 'saving', ?2 FROM tracks WHERE id = ?1 AND origin <> 'file'
-             ON CONFLICT(track_id) DO UPDATE SET state = 'saving', error = NULL WHERE downloads.state <> 'saved'",
+             SELECT id, 'saving', ?2 FROM tracks WHERE id = ?1 AND (origin <> 'file' OR missing_since IS NOT NULL)
+             ON CONFLICT(track_id) DO UPDATE SET state = 'saving', error = NULL
+             WHERE downloads.state <> 'saved'
+                OR (SELECT missing_since FROM tracks WHERE id = downloads.track_id) IS NOT NULL",
             params![id, now_ms],
         )?;
         Ok(n > 0)
     }
 
     /// Whether a file coming in for song `id` would be taken: what [`Self::download_arriving`] would say, changing
-    /// nothing. False when the song is a file already (or has been saved as one).
+    /// nothing. False when the song is a file already (or has been saved as one), and that file has not gone missing.
     pub fn wants_file(&self, id: i64) -> Result<bool> {
         let n: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM tracks t LEFT JOIN downloads d ON d.track_id = t.id
-             WHERE t.id = ?1 AND t.origin <> 'file' AND COALESCE(d.state, '') <> 'saved'",
+             WHERE t.id = ?1 AND (t.origin <> 'file' OR t.missing_since IS NOT NULL)
+               AND (COALESCE(d.state, '') <> 'saved' OR t.missing_since IS NOT NULL)",
             [id],
             |r| r.get(0),
         )?;
@@ -2495,6 +2499,109 @@ mod tests {
         let before = tracks(&library);
         assert_eq!(library.songs_here(&asked).unwrap(), vec![true, true, false, false]);
         assert_eq!(tracks(&library), before, "asking added no song");
+    }
+
+    #[test]
+    fn a_song_whose_file_has_gone_missing_is_not_here_and_a_file_from_a_phone_takes_its_place() {
+        let mut library = Library::open_in_memory().unwrap();
+        let song = |title: &str| crate::import::Song {
+            title: title.into(),
+            artist: "Someone".into(),
+            ..Default::default()
+        };
+        let ids = library.adopt_songs(&[song("Alpha"), song("Bravo")]).unwrap();
+        // A song from the music folders, and one saved here before: a scan found both files gone.
+        library
+            .conn
+            .execute(
+                "UPDATE tracks SET origin = 'file', locator = 'C:/Music/' || id || '.flac', missing_since = 5",
+                [],
+            )
+            .unwrap();
+        library
+            .conn
+            .execute(
+                "INSERT INTO downloads(track_id, state, asked_at, path) VALUES (?1, 'saved', 1, 'C:/Music/2.flac')",
+                [ids[1]],
+            )
+            .unwrap();
+        let asked = [song("Alpha"), song("Bravo")];
+        assert_eq!(library.songs_here(&asked).unwrap(), vec![false, false], "neither is here");
+        for (n, &id) in ids.iter().enumerate() {
+            assert!(library.wants_file(id).unwrap());
+            assert!(library.download_arriving(id, 6).unwrap());
+            let file = crate::library::NewTrack {
+                title: if n == 0 { "Alpha" } else { "Bravo" }.into(),
+                artist: "Someone".into(),
+                album_artist: None,
+                album: None,
+                year: None,
+                disc_no: 0,
+                track_no: 0,
+                duration_ms: 1_000,
+                isrc: None,
+                origin: crate::library::Origin::File,
+                addon_id: None,
+                locator: format!("C:/Stash/{id}.flac"),
+                codec: Some("flac".into()),
+                sample_rate: Some(44_100),
+                bit_depth: Some(16),
+                added_at: 0,
+                file_size: Some(10),
+                file_mtime: Some(0),
+            };
+            let saved = SavedDownload {
+                addon: "phone".into(),
+                tier: None,
+                at_ms: 7,
+                fetched: false,
+                cover_inside: false,
+            };
+            assert!(library.download_saved(id, &file, &saved).unwrap());
+            let (locator, missing): (String, Option<i64>) = library
+                .conn
+                .query_row("SELECT locator, missing_since FROM tracks WHERE id = ?1", [id], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .unwrap();
+            assert_eq!((locator, missing), (format!("C:/Stash/{id}.flac"), None), "the file taken is the song's now");
+            assert!(!library.wants_file(id).unwrap());
+        }
+        assert_eq!(library.songs_here(&asked).unwrap(), vec![true, true], "here now");
+    }
+
+    #[test]
+    fn a_song_is_found_as_its_file_here_before_a_file_gone_missing() {
+        let mut library = Library::open_in_memory().unwrap();
+        let song = |title: &str| crate::import::Song {
+            title: title.into(),
+            artist: "Someone".into(),
+            ..Default::default()
+        };
+        let ids = library.adopt_songs(&[song("Alpha"), song("Other")]).unwrap();
+        let (old, moved) = (ids[0], ids[1]);
+        // The same song twice as files (moved within the music folders and scanned again): the old one gone missing.
+        let words: String = library
+            .conn
+            .query_row("SELECT words_key FROM tracks WHERE id = ?1", [old], |r| r.get(0))
+            .unwrap();
+        library
+            .conn
+            .execute(
+                "UPDATE tracks SET origin = 'file', locator = 'C:/Music/old.flac', missing_since = 5 WHERE id = ?1",
+                [old],
+            )
+            .unwrap();
+        library
+            .conn
+            .execute(
+                "UPDATE tracks SET origin = 'file', locator = 'C:/Music/new.flac', words_key = ?2 WHERE id = ?1",
+                params![moved, words],
+            )
+            .unwrap();
+        assert_eq!(crate::import::same_song(&library.conn, &words, None).unwrap(), Some(moved));
+        assert_eq!(library.songs_here(&[song("Alpha")]).unwrap(), vec![true]);
+        assert_eq!(library.adopt_songs(&[song("Alpha")]).unwrap(), vec![moved]);
     }
 
     #[test]

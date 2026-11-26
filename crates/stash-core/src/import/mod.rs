@@ -148,7 +148,8 @@ pub fn read_file(path: &std::path::Path) -> Result<Incoming, ImportError> {
 }
 
 /// The library's row that is the song known by `words` (its [`words_key`]) and `isrc`, when it has one: by the ISRC, else
-/// by the words (one song, unless both have an ISRC and they differ). A file before a description.
+/// by the words (one song, unless both have an ISRC and they differ). A file here before one gone missing, and a file
+/// before a description.
 pub(crate) fn same_song(
     conn: &rusqlite::Connection,
     words: &str,
@@ -157,7 +158,8 @@ pub(crate) fn same_song(
     if let Some(isrc) = isrc {
         let found = conn
             .prepare_cached(
-                "SELECT id FROM tracks WHERE isrc = ?1 ORDER BY origin = 'file' DESC, id LIMIT 1",
+                "SELECT id FROM tracks WHERE isrc = ?1
+                 ORDER BY (origin = 'file' AND missing_since IS NULL) DESC, origin = 'file' DESC, id LIMIT 1",
             )?
             .query_row([isrc], |r| r.get(0))
             .optional()?;
@@ -166,7 +168,8 @@ pub(crate) fn same_song(
         }
     }
     let mut same_words = conn.prepare_cached(
-        "SELECT id, isrc FROM tracks WHERE words_key = ?1 ORDER BY origin = 'file' DESC, id",
+        "SELECT id, isrc FROM tracks WHERE words_key = ?1
+         ORDER BY (origin = 'file' AND missing_since IS NULL) DESC, origin = 'file' DESC, id",
     )?;
     let mut rows = same_words.query([words])?;
     while let Some(row) = rows.next()? {
