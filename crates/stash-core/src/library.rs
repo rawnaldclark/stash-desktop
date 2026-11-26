@@ -347,6 +347,32 @@ impl Library {
         })
     }
 
+    /// Each commit on the disk before it returns (`synchronous = FULL`), or as usual (`NORMAL`: a power cut can lose
+    /// the last commits, never the file). For writes that something no undo can follow comes after, such as a phone
+    /// deleting its copy of a song once the song is recorded here.
+    pub fn durable_commits(&self, on: bool) -> Result<()> {
+        self.conn.execute_batch(if on {
+            "PRAGMA synchronous = FULL"
+        } else {
+            "PRAGMA synchronous = NORMAL"
+        })?;
+        Ok(())
+    }
+
+    /// Tests only: whether each commit is on the disk before it returns ([`Self::durable_commits`]).
+    #[doc(hidden)]
+    pub fn commits_durable(&self) -> Result<bool> {
+        let level: i64 = self.conn.query_row("PRAGMA synchronous", [], |r| r.get(0))?;
+        Ok(level >= 2)
+    }
+
+    /// Tests only: every write fails from now on, as on a disk that is full (`query_only`).
+    #[doc(hidden)]
+    pub fn refuse_writes(&self) -> Result<()> {
+        self.conn.execute_batch("PRAGMA query_only = ON")?;
+        Ok(())
+    }
+
     pub fn counts(&self) -> Result<Counts> {
         let count = |sql: &str| -> Result<u64> {
             Ok(self.conn.query_row(sql, [], |r| r.get::<_, i64>(0))? as u64)
@@ -1458,6 +1484,22 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(stmt.column_count(), TRACK_COLUMN_COUNT);
+    }
+
+    #[test]
+    fn commits_are_made_durable_on_asking_and_as_usual_again_after() {
+        let dir = std::env::temp_dir().join(format!("stash-durable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        {
+            let library = Library::open(&dir.join("library.db")).unwrap();
+            assert!(!library.commits_durable().unwrap(), "as opened: NORMAL");
+            library.durable_commits(true).unwrap();
+            assert!(library.commits_durable().unwrap());
+            library.durable_commits(false).unwrap();
+            assert!(!library.commits_durable().unwrap());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

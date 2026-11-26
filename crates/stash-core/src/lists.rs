@@ -2602,6 +2602,15 @@ mod tests {
         assert_eq!(crate::import::same_song(&library.conn, &words, None).unwrap(), Some(moved));
         assert_eq!(library.songs_here(&[song("Alpha")]).unwrap(), vec![true]);
         assert_eq!(library.adopt_songs(&[song("Alpha")]).unwrap(), vec![moved]);
+        // Found by its ISRC the same way: the file here first, though the one gone missing came first.
+        library
+            .conn
+            .execute("UPDATE tracks SET isrc = 'USABC1234567' WHERE id IN (?1, ?2)", params![old, moved])
+            .unwrap();
+        assert_eq!(
+            crate::import::same_song(&library.conn, "other words", Some("USABC1234567")).unwrap(),
+            Some(moved)
+        );
     }
 
     #[test]
