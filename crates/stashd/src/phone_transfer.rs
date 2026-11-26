@@ -36,7 +36,7 @@ use stash_core::Library;
 use stash_core::downloads::{self, Song};
 use stash_core::import;
 use stash_core::lists::SavedDownload;
-use stash_core::phone::{HERE, PhoneFile, STALL, STALLED, Watch};
+use stash_core::phone::{HERE, ONE_SONG, PhoneFile, STALL, STALLED, Watch, held_by_another};
 use tiny_http::{Method, Request};
 
 use crate::serve::{Reply, State, body_json, now_ms, refuse, reply_json};
@@ -113,8 +113,8 @@ pub(crate) struct Now {
     /// `ready` so far), "ready" (a send waits to be chosen from: `total` songs, `here` of them here already),
     /// "taking", "stalled" (the phone stopped sending mid-song: it is being asked again), "done", "stopped"
     /// (unplugged while taking, or not answering again after stalling), "withdrawn" (the phone stopped the send while
-    /// it was taken: its list gone), or "cannot_save" (songs can't be saved in `folder` on this computer: `error` says
-    /// why; tried again once the phone is plugged in again).
+    /// it was taken: its list gone), or "cannot_save" (songs can't be saved in `folder` on this computer, or kept in
+    /// Stash's library when `library`: `error` says why; tried again once the phone is plugged in again).
     state: &'static str,
     phone: Option<String>,
     ready: usize,
@@ -136,16 +136,20 @@ pub(crate) struct Now {
     left: usize,
     /// The send's list went from the phone with none of its songs left there (the phone then has nothing sent).
     cleared: bool,
-    /// Every song chosen is in, but the send's list stayed on the phone: it is removed at the next look, so the phone
-    /// is to stay plugged in (or be plugged in again) until then.
+    /// Every song chosen is in, but the send's list stayed on the phone: it is removed at a look while the phone is
+    /// plugged in (by itself while `trying_again`, else once the phone is plugged in again).
     list_left: bool,
-    /// The songs not taken were left out of the phone's listing (as it was opened again): the next look takes them,
-    /// with no need to send again.
+    /// The next look carries the send on by itself, with no need to send again or plug the phone in again: it takes
+    /// the songs not taken, which the phone's listing left out (as it was opened again), or it removes the list that
+    /// stayed.
     trying_again: bool,
     at_ms: i64,
     error: Option<String>,
     /// The downloads folder, when songs can't be saved in it.
     folder: Option<String>,
+    /// Songs can't be kept in Stash's library (not the downloads folder), which is on `drive`.
+    library: bool,
+    drive: Option<String>,
     /// The send this is about (its `sent_at_ms`): a try that carries on the same send adds to what was said of it.
     /// Not told.
     #[serde(skip)]
@@ -169,12 +173,27 @@ pub(crate) struct Now {
     unlisted: usize,
 }
 
-/// What was said of a send before a try that carries it on: how it ended, when, and how many songs it counted in.
+/// What was said of a send before a try that carries it on: how it ended, when, how many songs it counted in, and what
+/// it asked of the listener.
 #[derive(Debug, Clone, Copy)]
 struct Before {
     state: &'static str,
     at_ms: i64,
     brought: usize,
+    trying_again: bool,
+    list_left: bool,
+}
+
+impl Before {
+    fn of(n: &Now) -> Before {
+        Before {
+            state: n.state,
+            at_ms: n.at_ms,
+            brought: n.brought(),
+            trying_again: n.trying_again,
+            list_left: n.list_left,
+        }
+    }
 }
 
 impl Now {
@@ -199,6 +218,29 @@ struct Tries {
     /// Sends whose songs can't be saved here: not tried again until the phone is plugged in again (or a look is
     /// asked for), as each try would fail the same way.
     held: HashSet<i64>,
+    /// By phone: how its last send's last try ended, kept apart from the board (another card can take its place
+    /// there), for a try that carries that send on.
+    ended: HashMap<String, Now>,
+}
+
+impl Tries {
+    /// Every send tried again from the start (Settings' "Look for my phone"): what each came to stays known.
+    fn again(&mut self) {
+        self.tried.clear();
+        self.stalls.clear();
+        self.held.clear();
+    }
+
+    /// How `phone`'s send made at `sent_at_ms` ended before this try, if it did: as the board says it when the board is
+    /// on that send's ending (it may say more since: the phone unplugged, the list found gone), else as its last try
+    /// ended.
+    fn earlier(&self, board: &Board, phone: &str, sent_at_ms: i64) -> Option<Now> {
+        let ending = |n: &Now| n.is_of(phone, sent_at_ms) && is_over(n.state);
+        let shown = board.now.lock().unwrap().clone();
+        shown
+            .filter(ending)
+            .or_else(|| self.ended.get(phone).filter(|n| ending(n)).cloned())
+    }
 }
 
 /// A send's songs still on the phone, offered to choose from (`GET /api/phone/songs`).
@@ -292,8 +334,11 @@ struct Board {
     offer: Mutex<Option<Offer>>,
     /// What was chosen from each send (by its `sent_at_ms`), until it is taken.
     chosen: Mutex<Option<HashMap<i64, Choice>>>,
+    /// Each thing said, and the time it was said at.
     #[cfg(test)]
     states: Mutex<Vec<&'static str>>,
+    #[cfg(test)]
+    times: Mutex<Vec<i64>>,
 }
 
 impl Board {
@@ -304,6 +349,8 @@ impl Board {
             chosen: Mutex::new(None),
             #[cfg(test)]
             states: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            times: Mutex::new(Vec::new()),
         }
     }
 
@@ -344,7 +391,10 @@ impl Board {
 
     fn set(&self, now: Now) {
         #[cfg(test)]
-        self.states.lock().unwrap().push(now.state);
+        {
+            self.states.lock().unwrap().push(now.state);
+            self.times.lock().unwrap().push(now.at_ms);
+        }
         *self.now.lock().unwrap() = Some(now);
     }
 
@@ -355,13 +405,19 @@ impl Board {
         }
     }
 
-    /// The song being taken has stopped coming: its read is being called off and the phone asked again.
-    fn stalled(&self) {
+    /// The song being taken has stopped coming: its read is being called off and the phone asked again. Said anew
+    /// (`news`), unless the take only carries on a send that ended before and has brought nothing more in (a card closed
+    /// on that send stays closed).
+    fn stalled(&self, news: bool) {
         #[cfg(test)]
         self.states.lock().unwrap().push("stalled");
         if let Some(now) = self.now.lock().unwrap().as_mut() {
             now.state = "stalled";
-            now.at_ms = now_ms();
+            if news {
+                now.at_ms = now_ms();
+            }
+            #[cfg(test)]
+            self.times.lock().unwrap().push(now.at_ms);
         }
     }
 }
@@ -543,17 +599,12 @@ impl Drop for Durable<'_> {
     }
 }
 
-/// The waits before each try again at a file another program holds.
+/// The waits before each try again at what another holds a moment: a file another program has open, the library
+/// another writer keeps.
 #[cfg(not(test))]
 const HELD_AGAIN_AFTER: [Duration; 3] = [Duration::from_millis(250); 3];
 #[cfg(test)]
 const HELD_AGAIN_AFTER: [Duration; 3] = [Duration::from_millis(1); 3];
-
-/// Whether another program has the file open (Windows' sharing and lock violations): an antivirus or a sync client
-/// looking at a file just written, which lets it go in a moment.
-fn held_by_another(e: &std::io::Error) -> bool {
-    cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33))
-}
 
 /// `act` on a file, tried again a few times a moment apart while another program holds it.
 fn while_held<T>(mut act: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
@@ -569,24 +620,60 @@ fn while_held<T>(mut act: impl FnMut() -> std::io::Result<T>) -> std::io::Result
     }
 }
 
-/// Trouble putting a song's file in place here: this computer's ([`HERE`]: a full disk, a drive gone), but for a
-/// file another program still holds, which is that song's alone (it fails, and the rest come in).
-fn placing(e: std::io::Error) -> String {
-    if held_by_another(&e) {
+/// Trouble with a song's file here, in words: one another program holds is said so.
+fn file_trouble(e: &std::io::Error) -> String {
+    if held_by_another(e) {
         format!("another program has the file open: {e}")
     } else {
-        format!("{HERE}{e}")
+        e.to_string()
     }
 }
 
-/// Trouble in the library here (its disk full, say): this computer's, as trouble keeping a file is.
+/// Trouble making or writing a song's file in the downloads folder: the drive's ([`HERE`]: a full disk, a drive gone),
+/// which every song would meet; but the song's alone ([`ONE_SONG`]) when another program holds its file.
+fn in_the_folder(e: std::io::Error) -> String {
+    let whose = if held_by_another(&e) { ONE_SONG } else { HERE };
+    format!("{whose}{}", file_trouble(&e))
+}
+
+/// What trouble in Stash's library starts with when it is the library's file or drive (full, failing, not opening,
+/// read-only, damaged): every song would meet it, so the take stops (and says the library, not the downloads folder).
+const LIBRARY: &str = "in Stash's library: ";
+
+/// Trouble in the library here: its file's or drive's ([`LIBRARY`]), or that one song's ([`ONE_SONG`]: a row in its
+/// way, another writer keeping the library past the wait for it).
 fn library_trouble(e: stash_core::Error) -> String {
-    format!("{HERE}Stash's library can't keep them ({e})")
+    let whose = if e.of_the_file() { LIBRARY } else { ONE_SONG };
+    match &e {
+        stash_core::Error::Db(db) => format!("{whose}{db}"),
+        e => format!("{whose}{e}"),
+    }
+}
+
+/// `act` on the library, tried again a few times a moment apart while another writer keeps it (a scan's: each write
+/// waits a while for it first); its trouble as [`library_trouble`] says.
+fn in_library<T>(
+    library: &Mutex<Library>,
+    mut act: impl FnMut(&mut Library) -> stash_core::Result<T>,
+) -> Result<T, String> {
+    let mut waits = HELD_AGAIN_AFTER.iter();
+    loop {
+        // Locked for the act only: let go while waiting, for the writer to be done.
+        let done = act(&mut library.lock().unwrap());
+        match done {
+            Err(e) if e.busy() => match waits.next() {
+                Some(wait) => std::thread::sleep(*wait),
+                None => return Err(library_trouble(e)),
+            },
+            done => return done.map_err(library_trouble),
+        }
+    }
 }
 
 /// Takes one song: its row, its file put where Stash saves songs (on the disk before it is recorded), its download
 /// recorded. A song the library has as a file already is not read from the phone; any other is read once, whole, and
-/// what kind of file it is is told from the copy here. Trouble keeping the file or the song here starts with [`HERE`].
+/// what kind of file it is is told from the copy here. Trouble here starts with [`HERE`] or [`LIBRARY`] when no song
+/// could be kept (a drive full or gone), with [`ONE_SONG`] when it is only this song's.
 fn take_one(
     ctx: &Ctx,
     folder: &dyn Folder,
@@ -595,24 +682,26 @@ fn take_one(
     watch: &Watch,
 ) -> Result<Took, String> {
     let song = as_song(sent);
-    let (id, wanted, root) = {
-        let mut library = ctx.library.lock().unwrap();
-        let id = *library
-            .adopt_songs(std::slice::from_ref(&song))
-            .map_err(library_trouble)?
-            .first()
-            .ok_or("the song was not kept")?;
+    let (id, wanted, root) = in_library(ctx.library, |library| {
+        let Some(&id) = library.adopt_songs(std::slice::from_ref(&song))?.first() else {
+            return Ok(None);
+        };
         if sent.liked {
-            library.set_liked(id, true, now_ms()).map_err(library_trouble)?;
+            library.set_liked(id, true, now_ms())?;
         }
-        let wanted = library.wants_file(id).map_err(library_trouble)?;
-        (id, wanted, crate::saving::folder(&library))
-    };
+        Ok(Some((id, library.wants_file(id)?, crate::saving::folder(library))))
+    })?
+    .ok_or_else(|| format!("{ONE_SONG}the song was not kept"))?;
     if !wanted {
         return Ok(Took::Had);
     }
-    std::fs::create_dir_all(&root).map_err(|e| format!("{HERE}{e}"))?;
+    std::fs::create_dir_all(&root).map_err(in_the_folder)?;
     let part = root.join(format!(".stash-phone-{id}.part"));
+    // One left by a try before, whose file another program held: gone first, once that program lets it go.
+    match while_held(|| std::fs::remove_file(&part)) {
+        Err(e) if held_by_another(&e) => return Err(in_the_folder(e)),
+        _ => {}
+    }
     // Nothing is left at `part` when the copy fails.
     folder.copy(file, &part, watch)?;
     let mut head = [0u8; 64];
@@ -624,15 +713,17 @@ fn take_one(
         return Ok(Took::NotKept);
     }
     let kind = downloads::kind_of(&head[..n]).unwrap_or("audio");
-    let number = {
-        let mut library = ctx.library.lock().unwrap();
-        let arriving = library.download_arriving(id, now_ms());
-        if !matches!(arriving, Ok(true)) {
-            drop(library);
+    let arriving = in_library(ctx.library, |library| {
+        Ok(library
+            .download_arriving(id, now_ms())?
+            .then(|| library.track_number(id).ok().flatten()))
+    });
+    let number = match arriving {
+        Ok(Some(number)) => number,
+        arriving => {
             let _ = std::fs::remove_file(&part);
-            return arriving.map(|_| Took::Had).map_err(library_trouble);
+            return arriving.map(|_| Took::Had);
         }
-        library.track_number(id).ok().flatten()
     };
     let failed = |why: String| {
         let _ = std::fs::remove_file(&part);
@@ -650,13 +741,13 @@ fn take_one(
         },
         kind,
     );
-    let placed = target
-        .parent()
-        .map(std::fs::create_dir_all)
-        .unwrap_or(Ok(()))
-        .and_then(|_| while_held(|| std::fs::rename(&part, &target)));
-    if let Err(e) = placed {
-        return Err(failed(placing(e)));
+    if let Err(e) = target.parent().map(std::fs::create_dir_all).unwrap_or(Ok(())) {
+        return Err(failed(in_the_folder(e)));
+    }
+    // Put in place under its name: trouble then is this song's (its name, a file of its name in the way), as a drive
+    // full or gone shows in the next song's copy.
+    if let Err(e) = while_held(|| std::fs::rename(&part, &target)) {
+        return Err(failed(format!("{ONE_SONG}{}", file_trouble(&e))));
     }
     // On the disk under its name before it is recorded and the phone's copy deleted: a power cut after that keeps it.
     // (Windows flushes a file only when it is open for writing.)
@@ -664,15 +755,14 @@ fn take_one(
         .and_then(|f| f.sync_all());
     if let Err(e) = synced {
         crate::saving::remove_saved(&target, &root);
-        return Err(failed(placing(e)));
+        return Err(failed(in_the_folder(e)));
     }
+    // The file gone from here as it was read back, or one the library cannot read: this song's trouble.
     let read = downloads::read(&target).map_err(|e| {
         crate::saving::remove_saved(&target, &root);
         failed(match e {
-            // The file gone from here as it was read back: this computer's trouble. A file the library cannot read
-            // is the song's own.
-            downloads::Trouble::Held(why, _) => format!("{HERE}{why}"),
-            e => format!("{e:?}"),
+            downloads::Trouble::Held(why, _) | downloads::Trouble::Failed(why) => format!("{ONE_SONG}{why}"),
+            e => format!("{ONE_SONG}{e:?}"),
         })
     })?;
     let saved = SavedDownload {
@@ -682,12 +772,7 @@ fn take_one(
         fetched: false,
         cover_inside: false,
     };
-    let kept = ctx
-        .library
-        .lock()
-        .unwrap()
-        .download_saved(id, &read, &saved)
-        .map_err(library_trouble);
+    let kept = in_library(ctx.library, |library| library.download_saved(id, &read, &saved));
     match kept {
         Ok(true) => Ok(Took::Taken),
         Ok(false) => {
@@ -739,9 +824,10 @@ fn take(ctx: &Ctx, phone: &dyn Plugged, folder: Box<dyn Folder>, tries: &mut Tri
     let bytes = match folder.bytes(&list_file, LIST_CAP) {
         Ok(bytes) => bytes,
         Err(why) => {
-            // Listed but not answering (its USB connection dropped): said once, as a transfer cut short. A send of this
-            // phone's waiting to be chosen from is left as it is: nothing was being taken, and the same send is offered
-            // again (with what the window chose from it) once the phone answers.
+            // Listed but not answering (its USB connection dropped): said once, as a transfer cut short, on what was
+            // said of the phone (its counts and its send kept). A send of this phone's waiting to be chosen from is
+            // left as it is: nothing was being taken, and the same send is offered again (with what the window chose
+            // from it) once the phone answers. Another phone's card is not this one's to say over.
             let waiting = ctx
                 .board
                 .offer
@@ -751,16 +837,17 @@ fn take(ctx: &Ctx, phone: &dyn Plugged, folder: Box<dyn Folder>, tries: &mut Tri
                 .is_some_and(|o| o.phone == phone.name());
             if lost(&why) && !waiting {
                 let mut now = ctx.board.now.lock().unwrap();
-                let said = now.as_ref().is_some_and(|n| {
-                    n.state == "stopped" && n.phone.as_deref() == Some(phone.name())
-                });
-                if !said {
-                    *now = Some(Now {
-                        state: "stopped",
-                        phone: Some(phone.name().to_string()),
-                        at_ms: now_ms(),
-                        ..Default::default()
-                    });
+                match now.as_mut() {
+                    Some(n) if n.phone.as_deref() != Some(phone.name()) => {}
+                    Some(n) if !matches!(n.state, "connected" | "preparing") => out_of_reach(n),
+                    _ => {
+                        *now = Some(Now {
+                            state: "stopped",
+                            phone: Some(phone.name().to_string()),
+                            at_ms: now_ms(),
+                            ..Default::default()
+                        })
+                    }
                 }
             }
             return;
@@ -813,7 +900,11 @@ fn take(ctx: &Ctx, phone: &dyn Plugged, folder: Box<dyn Folder>, tries: &mut Tri
     }
     tries.tried.insert(list.sent_at_ms, tried + 1);
     let last_try = tried + 1 >= TRIES;
-    let now = take_songs(ctx, phone, folder, &list_file, &list, &choice, &mut tries.stalls, last_try, stop);
+    let earlier = tries.earlier(ctx.board, phone.name(), list.sent_at_ms);
+    let now = take_songs(ctx, phone, folder, &list_file, &list, &choice, earlier, &mut tries.stalls, last_try, stop);
+    if is_over(now.state) {
+        tries.ended.insert(phone.name().to_string(), now.clone());
+    }
     if now.removed + now.gave_up > 0 {
         tries.tried.remove(&list.sent_at_ms);
     } else if now.state == "cannot_save" {
@@ -1014,10 +1105,11 @@ fn looked_again(phone: &dyn Plugged, sent_at_ms: i64) -> Option<Listed> {
 /// song that stops coming has its read called off: the phone is opened again and the song taken again from its start
 /// (a song that has stopped [`STALLS_PER_SONG`] times, on this try or those before, is left, and the rest go on, read
 /// from the phone opened again). With every chosen song taken, the take ends ([`end_of_take`]): the phone then knows
-/// the computer is done. Songs that can't be saved here stop it at once ("cannot_save"); the phone stopping the send
-/// stops it too ("withdrawn"). A try that carries on a send said before counts on from what was said; one that only
-/// finishes it says nothing new ([`finish`]). `last_try`: another try comes only if this one takes songs off the
-/// phone. What the transfer came to.
+/// the computer is done. Songs that can't be saved here stop it at once ("cannot_save"), as the phone stopping the send
+/// does ("withdrawn"); a song only this computer can't keep fails alone. A try that carries on a send that ended before
+/// (`earlier`) counts on from what was said of it, at the time it was said until more comes in; one that only finishes
+/// it says nothing new ([`finish`]). `last_try`: another try comes only if this one takes songs off the phone. What the
+/// transfer came to.
 #[allow(clippy::too_many_arguments)]
 fn take_songs(
     ctx: &Ctx,
@@ -1026,6 +1118,7 @@ fn take_songs(
     list_file: &PhoneFile,
     list: &List,
     choice: &Choice,
+    earlier: Option<Now>,
     stalls: &mut HashMap<(i64, String), u32>,
     last_try: bool,
     stop: &AtomicBool,
@@ -1051,14 +1144,7 @@ fn take_songs(
         .copied()
         .filter(|s| files.contains_key(&s.file))
         .collect();
-    // What was said of this send by the tries before: this one carries it on.
-    let earlier = ctx
-        .board
-        .now
-        .lock()
-        .unwrap()
-        .clone()
-        .filter(|n| n.is_of(phone.name(), list.sent_at_ms));
+    // How the tries before ended this send: this one carries it on.
     if let Some(earlier) = &earlier
         && let Some(finished) = finish(
             ctx,
@@ -1070,6 +1156,7 @@ fn take_songs(
             &here,
             &mut files,
             earlier,
+            last_try,
         )
     {
         return finished;
@@ -1087,17 +1174,17 @@ fn take_songs(
         ..Default::default()
     };
     if let Some(earlier) = &earlier {
-        // What came in before counts with what comes in now.
+        // What came in before counts with what comes in now. Said at the time it was said until more comes in: a card
+        // closed on it stays closed while this try brings nothing new.
         now.taken = earlier.taken;
         now.had = earlier.had;
         now.not_kept = earlier.not_kept;
         now.undeleted = earlier.undeleted.clone();
-        now.before = Some(Before {
-            state: earlier.state,
-            at_ms: earlier.at_ms,
-            brought: earlier.brought(),
-        });
+        now.at_ms = earlier.at_ms;
+        now.before = Some(Before::of(earlier));
     }
+    // Whether this take has said anything new.
+    let mut news = earlier.is_none();
     ctx.board.set(now.clone());
     (ctx.log)(&format!(
         "taking {} songs, {} MB ({} taken before)",
@@ -1136,10 +1223,12 @@ fn take_songs(
             i += 1;
             continue;
         };
-        let current = folder.as_deref().expect("a folder while taking");
         if now.undeleted.contains(&sent.file) {
-            // Counted in by a try before, which could not delete its copy: only the copy goes now.
-            if current.remove_file(&file).is_ok() {
+            // Counted in by a try before, which could not delete its copy: only the copy goes now (from the phone as
+            // it is open: not one closed after a song stopped sending, which is left closed when nothing is to be read).
+            if let Some(current) = folder.as_deref()
+                && current.remove_file(&file).is_ok()
+            {
                 files.remove(&sent.file);
                 now.undeleted.retain(|f| f != &sent.file);
                 now.removed += 1;
@@ -1158,12 +1247,13 @@ fn take_songs(
             i += 1;
             continue;
         }
+        let current = folder.as_deref().expect("a folder while a song is to be read");
         now.state = "taking";
         now.song = Some(format!("{} · {}", sent.title.trim(), sent.artist.trim()));
         ctx.board.set(now.clone());
         let (base, size, board) = (now.bytes_done, file.size, ctx.board);
         let progress = |n: u64| board.bytes_done(base + n.min(size));
-        let stalled = || board.stalled();
+        let stalled = || board.stalled(news);
         let watch = Watch {
             stall_after: STALL,
             progress: &progress,
@@ -1189,6 +1279,11 @@ fn take_songs(
                 now.done += 1;
                 now.bytes_done = base + size;
                 i += 1;
+                if !news {
+                    // More came in than before: news, said anew (a card closed shows again).
+                    news = true;
+                    now.at_ms = now_ms();
+                }
                 ctx.board.set(now.clone());
                 // The library pages read the new files as they come.
                 if now.done.is_multiple_of(10) {
@@ -1215,9 +1310,20 @@ fn take_songs(
                     continue_failed(ctx, &mut now, &file);
                     i += 1;
                 }
-                // The phone closed before it is opened again: its File transfer stopped, so no song (this one again,
-                // or the next) is read from it as it is.
+                // The phone closed: its File transfer stopped, so no song (this one again, or the next) is read from it
+                // as it is. Opened again for a song still to be read; with none (each one after it left, or in
+                // already), the take goes on to its end with what came in.
                 drop(folder.take());
+                let to_read = here[i..].iter().any(|s| {
+                    files.contains_key(&s.file)
+                        && !now.undeleted.contains(&s.file)
+                        && stalls
+                            .get(&(list.sent_at_ms, s.file.clone()))
+                            .is_none_or(|n| *n <= STALLS_PER_SONG)
+                });
+                if !to_read {
+                    continue;
+                }
                 match open_again(phone, stop) {
                     Again::Open(again) => match listed(again.as_ref(), list.sent_at_ms) {
                         Listed::Same(l) => {
@@ -1260,9 +1366,18 @@ fn take_songs(
                     }
                 }
             }
-            // This computer's trouble (its disk full, the downloads drive gone), not the phone's: every song would
-            // fail the same way.
-            Err(why) if why.starts_with(HERE) => return cannot_save(ctx, now, &why),
+            // This computer's trouble (its disk full, the downloads drive gone, the library's file failing), not the
+            // phone's: every song would fail the same way.
+            Err(why) if why.starts_with(HERE) || why.starts_with(LIBRARY) => return cannot_save(ctx, now, &why),
+            // This computer's trouble with this song alone (its file held by another program, the library kept by
+            // another writer, a row in its way): it fails, and the rest go on. Not the phone's, so the phone is not
+            // looked at again for it, and it does not count towards taking the phone as gone.
+            Err(why) if why.starts_with(ONE_SONG) => {
+                now.failed += 1;
+                (ctx.log)(&format!("{} was not taken: {why}", sent.file));
+                continue_failed(ctx, &mut now, &file);
+                i += 1;
+            }
             Err(why) => {
                 // The phone stopped the send as it was taken (Cancel on the phone deletes its copies and list), or
                 // sent again: not the phone lost.
@@ -1305,6 +1420,7 @@ fn take_songs(
         let current = folder.as_deref().expect("a folder while taking");
         return match end_of_take(ctx, phone, current, list, &list_file, choice, &mut files, &mut now) {
             Ok(state) => {
+                now.trying_again = state == "done" && carried_on(&now, last_try);
                 summary(&now);
                 ended(ctx, now, state)
             }
@@ -1313,9 +1429,26 @@ fn take_songs(
     }
     // Everything not taken stays on the phone, to be tried again: by the next look, with no need to send again, when
     // the phone's listing only left it out.
-    now.trying_again = now.failed == now.unlisted && (now.removed > 0 || !last_try);
+    now.trying_again = carried_on(&now, last_try);
     summary(&now);
     ended(ctx, now, "done")
+}
+
+/// Whether the next look carries a take that ended done on by itself (`trying_again`): the songs not taken were only
+/// left out of the phone's listing, or only the list stayed on the phone; and the send has a try left (one that took
+/// copies off the phone always leaves one more).
+fn carried_on(now: &Now, last_try: bool) -> bool {
+    let only = if now.failed > 0 {
+        now.failed == now.unlisted
+    } else {
+        now.list_left
+    };
+    only && (now.removed > 0 || !last_try)
+}
+
+/// Whether a take saying `state` is over: done, stopped, withdrawn, or with songs that can't be saved.
+fn is_over(state: &str) -> bool {
+    matches!(state, "done" | "stopped" | "withdrawn" | "cannot_save")
 }
 
 /// The end of a take with every song chosen in. The copies of songs counted in that stayed on the phone are deleted
@@ -1324,8 +1457,8 @@ fn take_songs(
 /// the list read (`list_file`), by its object: never the folder with what is in it, which can hold songs this computer
 /// has not seen (a listing can leave one out; the phone may have sent again since). The folder goes too once nothing
 /// is left in it (only if it is empty). How the take ends: done, or stopped when the phone went as its list was
-/// removed, either way with `list_left` when the list stayed (the choice is kept, and the next look removes it
-/// again); trouble in the library here, as [`HERE`].
+/// removed, either way with `list_left` when the list stayed (the choice is kept, and a look removes it again);
+/// trouble with the library's file here, as [`LIBRARY`].
 #[allow(clippy::too_many_arguments)]
 fn end_of_take(
     ctx: &Ctx,
@@ -1397,7 +1530,9 @@ fn end_of_take(
 /// of songs counted in that stayed on the phone. Those go (tried once more), the copies of songs not chosen that are
 /// here already too, then the list ([`end_of_take`]). Nothing new is said: what was said stays, its counts and its time
 /// (a card closed on it stays closed), but for what is left on the phone and whether the list went (and so done, once
-/// it went). None when a song chosen is still to be taken.
+/// it went, with no song tried again), unless what the card asks of the listener changes ([`ending`]). Said only where
+/// the board is on this send (never over another phone's card); either way it is what the try came to. None when a
+/// song chosen is still to be taken.
 #[allow(clippy::too_many_arguments)]
 fn finish(
     ctx: &Ctx,
@@ -1409,64 +1544,122 @@ fn finish(
     here: &[&Sent],
     files: &mut HashMap<String, PhoneFile>,
     earlier: &Now,
+    last_try: bool,
 ) -> Option<Now> {
-    let ended_before = matches!(earlier.state, "done" | "stopped" | "cannot_save" | "withdrawn");
-    if !ended_before || !here.iter().all(|s| earlier.undeleted.contains(&s.file)) {
+    if !here.iter().all(|s| earlier.undeleted.contains(&s.file)) {
         return None;
     }
+    // The songs counted failed are not listed now either: none of them is left to read.
     let mut now = Now {
         removed: 0,
         gave_up: 0,
-        unlisted: 0,
-        before: None,
+        unlisted: earlier.failed,
+        before: Some(Before::of(earlier)),
         ..earlier.clone()
     };
-    match end_of_take(ctx, phone, folder, list, list_file, choice, files, &mut now) {
+    let now = match end_of_take(ctx, phone, folder, list, list_file, choice, files, &mut now) {
         Ok(state) => {
             (ctx.log)(if now.list_left {
                 "a transfer taken before: its list stayed on the phone again"
             } else {
                 "a transfer taken before is finished: its list went from the phone"
             });
-            now.state = state;
+            if !now.list_left {
+                // With the list gone no song of the send is tried again.
+                now.failed = 0;
+            }
+            now.trying_again = state == "done" && carried_on(&now, last_try);
             now.error = None;
             now.folder = None;
-            let mut said = ctx.board.now.lock().unwrap();
-            if said.as_ref().is_some_and(|n| n.is_of(phone.name(), list.sent_at_ms)) {
-                *said = Some(now.clone());
-            }
+            now.library = false;
+            now.drive = None;
+            ending(now, state)
         }
-        Err(why) => return Some(cannot_save(ctx, now, &why)),
+        Err(why) => ending(trouble(ctx, now, &why), "cannot_save"),
+    };
+    {
+        let mut said = ctx.board.now.lock().unwrap();
+        if said.as_ref().is_some_and(|n| n.is_of(phone.name(), list.sent_at_ms)) {
+            *said = Some(now.clone());
+        }
     }
     (ctx.edited)();
     Some(now)
 }
 
-/// Ends a take whose songs can't be saved here (`why`, after [`HERE`]): this computer's trouble (its disk full, the
-/// downloads drive gone, the library failing), not the phone's, and every song would fail the same way. Said, with
-/// where the songs go.
-fn cannot_save(ctx: &Ctx, mut now: Now, why: &str) -> Now {
-    let reason = why.strip_prefix(HERE).unwrap_or(why).to_string();
-    let dir = crate::saving::folder(&ctx.library.lock().unwrap());
-    (ctx.log)(&format!(
-        "songs can't be saved in {} after {} songs: {reason}",
-        dir.display(),
-        now.done
-    ));
-    now.error = Some(reason);
-    now.folder = Some(dir.to_string_lossy().into_owned());
-    ended(ctx, now, "cannot_save")
+/// What a take whose songs can't be kept here says (`why`, after [`HERE`] or [`LIBRARY`]): this computer's trouble
+/// (its disk full, the downloads drive gone, the library's file failing), not the phone's, and every song would fail
+/// the same way. With where: the downloads folder, or the library and the drive it is on. Nothing carries on by itself
+/// then: the send is tried again once the phone is plugged in again.
+fn trouble(ctx: &Ctx, mut now: Now, why: &str) -> Now {
+    now.trying_again = false;
+    if let Some(reason) = why.strip_prefix(LIBRARY) {
+        let file = ctx.library.lock().unwrap().file();
+        (ctx.log)(&format!(
+            "songs can't be kept in Stash's library ({}) after {} songs: {reason}",
+            file.as_deref().map_or_else(|| "in memory".into(), |f| f.display().to_string()),
+            now.done
+        ));
+        now.error = Some(reason.to_string());
+        now.folder = None;
+        now.library = true;
+        now.drive = file.as_deref().and_then(drive_of);
+    } else {
+        let reason = why.strip_prefix(HERE).unwrap_or(why).to_string();
+        let dir = crate::saving::folder(&ctx.library.lock().unwrap());
+        (ctx.log)(&format!(
+            "songs can't be saved in {} after {} songs: {reason}",
+            dir.display(),
+            now.done
+        ));
+        now.error = Some(reason);
+        now.folder = Some(dir.to_string_lossy().into_owned());
+        now.library = false;
+        now.drive = None;
+    }
+    now
 }
 
-/// Ends a take as `state`: said, and the library pages told. A try that carries on a send, brings nothing more in, and
-/// ends as the one before did is the same news at the same time (a card closed on it stays closed).
-fn ended(ctx: &Ctx, mut now: Now, state: &'static str) -> Now {
+/// The drive `file` is on, as Windows names it ("C:"); with none (another system), the folder it is in.
+fn drive_of(file: &Path) -> Option<String> {
+    match file.components().next() {
+        Some(std::path::Component::Prefix(prefix)) => Some(match prefix.kind() {
+            std::path::Prefix::Disk(letter) | std::path::Prefix::VerbatimDisk(letter) => {
+                format!("{}:", char::from(letter))
+            }
+            _ => prefix.as_os_str().to_string_lossy().into_owned(),
+        }),
+        _ => file.parent().map(|p| p.display().to_string()),
+    }
+}
+
+/// Ends a take whose songs can't be kept here ([`trouble`]).
+fn cannot_save(ctx: &Ctx, now: Now, why: &str) -> Now {
+    ended(ctx, trouble(ctx, now, why), "cannot_save")
+}
+
+/// A take ending as `state`, and its time: that of what was said of the send before (`before`) when this is the same
+/// news (as many songs in, ending the same way, asking the same of the listener), or the list that stayed going as
+/// the card said it would; else now (a card closed on the send shows again).
+fn ending(mut now: Now, state: &'static str) -> Now {
     now.state = state;
     now.song = None;
     now.at_ms = match now.before {
-        Some(before) if before.state == state && before.brought == now.brought() => before.at_ms,
+        Some(b)
+            if b.brought == now.brought()
+                && (b.state == state && b.trying_again == now.trying_again && b.list_left == now.list_left
+                    || b.list_left && !now.list_left && state == "done") =>
+        {
+            b.at_ms
+        }
         _ => now_ms(),
     };
+    now
+}
+
+/// Ends a take as `state` ([`ending`]): said, and the library pages told.
+fn ended(ctx: &Ctx, now: Now, state: &'static str) -> Now {
+    let now = ending(now, state);
     ctx.board.set(now.clone());
     (ctx.edited)();
     now
@@ -1474,8 +1667,8 @@ fn ended(ctx: &Ctx, mut now: Now, state: &'static str) -> Now {
 
 /// Deletes from the phone the copies of `songs` (not chosen, and on the phone) that this computer has already, as each
 /// song taken is: the phone sees them go and sends them no more, so a send carries only songs this computer has not
-/// got. One liked on the phone is liked here first, as a song taken is. How many went; trouble in the library here, as
-/// [`HERE`] (nothing is deleted then: a like would go with its copy).
+/// got. One liked on the phone is liked here first, as a song taken is; one whose like can't be kept now keeps its
+/// copy (a like would go with it). How many went; trouble with the library's file here, as [`LIBRARY`].
 fn drop_here_already(
     ctx: &Ctx,
     folder: &dyn Folder,
@@ -1486,30 +1679,39 @@ fn drop_here_already(
         return Ok(0);
     }
     let asked: Vec<import::Song> = songs.iter().map(|s| as_song(s)).collect();
-    let here = {
-        let mut library = ctx.library.lock().unwrap();
-        let here = library.songs_here(&asked).map_err(library_trouble)?;
-        // The phone sends a song no more once its copy goes, so its like comes now (found as taking it finds it).
-        for ((sent, &here), song) in songs.iter().zip(&here).zip(&asked) {
-            if here && sent.liked {
-                let ids = library
-                    .adopt_songs(std::slice::from_ref(song))
-                    .map_err(library_trouble)?;
-                if let Some(&id) = ids.first() {
-                    library.set_liked(id, true, now_ms()).map_err(library_trouble)?;
-                }
-            }
+    let here = match in_library(ctx.library, |library| library.songs_here(&asked)) {
+        Ok(here) => here,
+        Err(why) if why.starts_with(LIBRARY) => return Err(why),
+        Err(why) => {
+            (ctx.log)(&format!("songs not chosen were not looked for here: {why}"));
+            return Ok(0);
         }
-        here
     };
     let mut gone = 0;
-    for (sent, here) in songs.iter().zip(here) {
+    for ((sent, here), song) in songs.iter().zip(here).zip(&asked) {
         if !here {
             continue;
         }
         let Some(file) = files.get(&sent.file) else {
             continue;
         };
+        if sent.liked {
+            // The phone sends a song no more once its copy goes, so its like comes now (found as taking it finds it).
+            let liked = in_library(ctx.library, |library| {
+                if let Some(&id) = library.adopt_songs(std::slice::from_ref(song))?.first() {
+                    library.set_liked(id, true, now_ms())?;
+                }
+                Ok(())
+            });
+            match liked {
+                Ok(()) => {}
+                Err(why) if why.starts_with(LIBRARY) => return Err(why),
+                Err(why) => {
+                    (ctx.log)(&format!("{}: its like could not be kept here, so its copy stays: {why}", sent.file));
+                    continue;
+                }
+            }
+        }
         if folder.remove_file(file).is_ok() {
             files.remove(&sent.file);
             gone += 1;
@@ -1600,7 +1802,7 @@ fn run_folder(state: &State, stop: &AtomicBool, dir: std::path::PathBuf) {
     while !stop.load(Ordering::Relaxed) {
         let asked = ASKED.load(Ordering::Relaxed);
         if asked > ANSWERED.load(Ordering::Relaxed) {
-            tries = Tries::default();
+            tries.again();
         }
         let has = phone.0.join(stash_core::phone::LIST).is_file();
         *SEEN.lock().unwrap() = vec![(phone.name().to_string(), Some(has))];
@@ -1643,7 +1845,7 @@ pub(crate) fn run(state: &State, stop: &AtomicBool) {
         let asked = ASKED.load(Ordering::Relaxed);
         if asked > ANSWERED.load(Ordering::Relaxed) {
             looked.clear();
-            tries = Tries::default();
+            tries.again();
         }
         if let Ok(phones) = stash_core::phone::phones() {
             phones_now(&BOARD, &mut tries, looked.keys(), &phones);
@@ -1756,11 +1958,12 @@ fn phones_now<'a>(
     }
 }
 
-/// A look inside a phone with no list to take: its transfer folder `opened` (it answers, with no list in it) or not
-/// (it does not answer, or has no such folder), with `ready` songs in it, still coming in while `copying`. A transfer
-/// said to be taken from it was cut short: by the phone, which stopped the send (its folder answers, with no list), or
-/// by the phone not answering ([`cut_short`]). A list said to have stayed on it is gone: there is nothing left for
-/// this computer to finish. Then it is said to be connected, or copying ([`tell`]).
+/// A look inside a phone with no list to take: its transfer folder `opened` (it answers, with every file in it listed,
+/// and no list among them) or not (it does not answer, or has no such folder), with `ready` songs in it, still coming
+/// in while `copying`. A transfer said to be taken from it, or said to have stopped while taken, was ended by the phone,
+/// which stopped the send (its folder answers, with no list: its Cancel, whatever it deleted first). A list said to
+/// have stayed on it is gone: there is nothing left for this computer to finish. A phone that does not answer is out of
+/// reach ([`out_of_reach`]). Then it is said to be connected, or copying ([`tell`]).
 #[cfg(any(windows, test))]
 fn nothing_sent(board: &Board, phone: &str, opened: bool, copying: bool, ready: usize) {
     if let Some(n) = board
@@ -1770,15 +1973,15 @@ fn nothing_sent(board: &Board, phone: &str, opened: bool, copying: bool, ready: 
         .as_mut()
         .filter(|n| n.phone.as_deref() == Some(phone))
     {
-        if opened && matches!(n.state, "taking" | "stalled") {
+        if !opened {
+            out_of_reach(n);
+        } else if matches!(n.state, "taking" | "stalled") || n.state == "stopped" && !n.list_left {
             n.state = "withdrawn";
             n.song = None;
             n.at_ms = now_ms();
-        } else {
-            cut_short(n);
-        }
-        if opened && n.list_left {
+        } else if n.list_left {
             n.list_left = false;
+            n.trying_again = false;
             n.cleared = n.left == 0;
             if n.state == "stopped" {
                 n.state = "done";
@@ -1805,8 +2008,18 @@ fn unlisted(now: &mut Option<Now>, listed: &dyn Fn(&str) -> bool) {
     }
     if matches!(n.state, "connected" | "preparing" | "ready") {
         *now = None;
-    } else if n.state == "done" && n.list_left {
+    } else {
+        out_of_reach(n);
+    }
+}
+
+/// What was said of a phone, once it is out of reach (unplugged, or not answering): a transfer said to be taken from it
+/// was cut short ([`cut_short`]), and one whose list stayed on it is to be plugged in again so the computer can finish
+/// with it. The rest stays as it was said.
+fn out_of_reach(n: &mut Now) {
+    if n.state == "done" && n.list_left {
         n.state = "stopped";
+        n.trying_again = false;
         n.at_ms = now_ms();
     } else {
         cut_short(n);
@@ -2061,6 +2274,9 @@ mod tests {
         b
     }
 
+    /// What is told the name of each file a phone in memory has read.
+    type OnRead = Box<dyn FnMut(&str) + Send>;
+
     /// A phone in memory: its name, its transfer folder's files, which of them stop sending (how many more times),
     /// whether it answers when opened again, and every read and delete asked of it.
     #[derive(Default)]
@@ -2091,9 +2307,19 @@ mod tests {
         withdraws_at: Mutex<Option<String>>,
         /// Files listed whose read fails.
         unreadable: Mutex<HashSet<String>>,
-        /// Each copy written here is held open by another program (an antivirus looking at it), until let go.
-        holds_copies: AtomicBool,
+        /// The copy written here of each of these files is held open by another program (an antivirus looking at it),
+        /// until let go.
+        holds: Mutex<HashSet<String>>,
         held: Mutex<Vec<std::fs::File>>,
+        /// Told the name of each file as it is read.
+        on_read: Mutex<Option<OnRead>>,
+        /// The file as whose read the phone's Cancel lands (that read fails), and whether the phone deletes its list
+        /// first (else last): from then on its files go one at a time, one more as it is listed or read.
+        cancels_at: Mutex<Option<(String, bool)>>,
+        clearing: Mutex<std::collections::VecDeque<String>>,
+        /// Opened again, it lists its folder only part way (it stopped listing): no answer, as `open_transfer` says
+        /// then.
+        lists_partly: AtomicBool,
     }
 
     impl Phone {
@@ -2138,6 +2364,25 @@ mod tests {
             self.files.lock().unwrap().iter().map(|(n, _)| n.clone()).collect()
         }
 
+        /// Clearing its files after a Cancel, it deletes one more.
+        fn clears_one(&self) {
+            if let Some(name) = self.clearing.lock().unwrap().pop_front() {
+                self.files.lock().unwrap().retain(|(n, _)| *n != name);
+            }
+        }
+
+        /// Its Cancel lands now: what it deletes, in order.
+        fn cancels(&self, list_first: bool) {
+            let list = stash_core::phone::LIST.to_string();
+            let mut order: Vec<String> = self.left().into_iter().filter(|n| *n != list).collect();
+            if list_first {
+                order.insert(0, list);
+            } else {
+                order.push(list);
+            }
+            *self.clearing.lock().unwrap() = order.into();
+        }
+
         /// A file's object on the phone: its name, or for a list sent again a new one.
         fn object_of(&self, name: &str) -> String {
             match self.list_sent.load(Ordering::Relaxed) {
@@ -2161,6 +2406,7 @@ mod tests {
 
     impl Folder for Open {
         fn files(&self) -> Vec<PhoneFile> {
+            self.0.clears_one();
             let again = self.0.opened_again.load(Ordering::Relaxed) > 0;
             let unlisted = self.0.unlisted_again.lock().unwrap();
             self.0
@@ -2192,12 +2438,18 @@ mod tests {
         }
         fn copy(&self, file: &PhoneFile, to: &Path, watch: &Watch) -> Result<u64, String> {
             self.0.reads.lock().unwrap().push(file.name.clone());
+            if let Some(told) = self.0.on_read.lock().unwrap().as_mut() {
+                told(&file.name);
+            }
             if self.0.withdraws_at.lock().unwrap().take_if(|at| *at == file.name).is_some() {
                 self.0.files.lock().unwrap().clear();
             }
-            if self.0.unreadable.lock().unwrap().contains(&file.name) {
+            if let Some((_, list_first)) = self.0.cancels_at.lock().unwrap().take_if(|(at, _)| *at == file.name) {
+                self.0.cancels(list_first);
+                self.0.clears_one();
                 return Err("the phone did not answer (0x80070490)".to_string());
             }
+            self.0.clears_one();
             let stops = match self.0.stalls.lock().unwrap().get_mut(&file.name) {
                 Some(left) if *left > 0 => {
                     *left -= 1;
@@ -2217,10 +2469,13 @@ mod tests {
                 (watch.stalled)();
                 return Err(STALLED.to_string());
             }
+            if self.0.unreadable.lock().unwrap().contains(&file.name) {
+                return Err("the phone did not answer (0x80070490)".to_string());
+            }
             let bytes = self.bytes(file, 0)?;
             std::fs::write(to, &bytes).map_err(|e| format!("{HERE}{e}"))?;
             #[cfg(windows)]
-            if self.0.holds_copies.load(Ordering::Relaxed) {
+            if self.0.holds.lock().unwrap().contains(&file.name) {
                 use std::os::windows::fs::OpenOptionsExt;
                 let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(to).unwrap();
                 self.0.held.lock().unwrap().push(held);
@@ -2259,7 +2514,8 @@ mod tests {
         }
         fn open_again(&self) -> Option<Box<dyn Folder>> {
             self.opened_again.fetch_add(1, Ordering::Relaxed);
-            self.answers_again.load(Ordering::Relaxed).then(|| Open::of(self))
+            let answers = self.answers_again.load(Ordering::Relaxed) && !self.lists_partly.load(Ordering::Relaxed);
+            answers.then(|| Open::of(self))
         }
         fn still_there(&self) -> bool {
             true
@@ -2295,6 +2551,27 @@ mod tests {
                 board: Board::new(),
                 dir,
             }
+        }
+
+        /// One that takes every send whole, its library kept in a file (beside its downloads folder, not in it).
+        fn on_disk(name: &str) -> Here {
+            let here = Here::new(name);
+            let db = here.db();
+            for f in [db.clone(), db.with_extension("db-wal"), db.with_extension("db-shm")] {
+                let _ = std::fs::remove_file(f);
+            }
+            let mut library = Library::open(&db).unwrap();
+            library
+                .set_setting(crate::saving::FOLDER, &here.dir.to_string_lossy())
+                .unwrap();
+            *here.library.lock().unwrap() = library;
+            here.take_all(true);
+            here
+        }
+
+        /// Where [`Here::on_disk`] keeps its library.
+        fn db(&self) -> std::path::PathBuf {
+            self.dir.with_extension("db")
         }
 
         fn take_all(&self, on: bool) {
@@ -2363,6 +2640,14 @@ mod tests {
     impl Drop for Here {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
+            // A library in a file is closed before its file goes.
+            if let Ok(library) = self.library.get_mut() {
+                *library = Library::open_in_memory().unwrap();
+            }
+            let db = self.db();
+            for f in [db.clone(), db.with_extension("db-wal"), db.with_extension("db-shm")] {
+                let _ = std::fs::remove_file(f);
+            }
         }
     }
 
@@ -2768,16 +3053,45 @@ mod tests {
 
     #[test]
     fn a_library_that_cannot_be_written_is_this_computers_trouble_not_the_phones() {
-        let here = Here::new("dbfull");
+        let here = Here::on_disk("dbfull");
         here.library.lock().unwrap().refuse_writes().unwrap();
         let phone = Phone::with(&[("1.wav", wav()), ("2.wav", wav()), ("3.wav", wav()), ("4.wav", wav())]);
         let mut tries = Tries::default();
         let now = here.take(&phone, &mut tries).unwrap();
         assert_eq!((now.state, now.done, now.failed), ("cannot_save", 0, 0), "stopped at once, not after LOST_AFTER");
-        assert!(now.error.as_deref().is_some_and(|e| e.contains("library")), "why: {:?}", now.error);
         assert!(tries.tried.is_empty() && tries.held.contains(&7));
         assert!(phone.reads.lock().unwrap().is_empty());
         assert_eq!(phone.left().len(), 5);
+        // Said as the library's trouble, on the drive it is on: not the downloads folder's (on another drive, maybe).
+        let told = here.told();
+        assert_eq!((told["library"].as_bool(), told["folder"].as_str()), (Some(true), None));
+        assert_eq!(told["drive"].as_str(), drive_of(&here.db()).as_deref());
+        assert!(told["drive"].is_string());
+        let why = told["error"].as_str().unwrap();
+        assert!(why.contains("readonly") && !why.starts_with(LIBRARY) && !why.contains("database: "), "why: {why}");
+        // The downloads folder's trouble is said as before.
+        let here = Here::new("dbfull-not");
+        std::fs::write(here.dir.join("not a folder"), b"").unwrap();
+        here.library
+            .lock()
+            .unwrap()
+            .set_setting(crate::saving::FOLDER, &here.dir.join("not a folder").join("Stash").to_string_lossy())
+            .unwrap();
+        here.take(&Phone::with(&[("1.wav", wav())]), &mut Tries::default());
+        let told = here.told();
+        assert_eq!((told["state"].as_str(), told["library"].as_bool(), told["drive"].as_str()), (Some("cannot_save"), Some(false), None));
+        assert!(told["folder"].is_string());
+    }
+
+    #[test]
+    fn the_drive_a_library_is_on_is_named_as_windows_names_it() {
+        if cfg!(windows) {
+            assert_eq!(drive_of(Path::new(r"C:\Users\someone\AppData\Roaming\Stash\library.db")).as_deref(), Some("C:"));
+            assert_eq!(drive_of(Path::new(r"\\?\D:\Stash\library.db")).as_deref(), Some("D:"));
+            assert_eq!(drive_of(Path::new(r"\\server\share\Stash\library.db")).as_deref(), Some(r"\\server\share"));
+        } else {
+            assert_eq!(drive_of(Path::new("/home/someone/.local/share/stash/library.db")).as_deref(), Some("/home/someone/.local/share/stash"));
+        }
     }
 
     #[test]
@@ -2826,7 +3140,7 @@ mod tests {
 
     #[test]
     fn a_file_another_program_holds_a_moment_is_tried_again_and_one_it_keeps_fails_alone() {
-        assert!(placing(std::io::Error::from_raw_os_error(112)).starts_with(HERE), "a full disk: this computer's");
+        assert!(in_the_folder(std::io::Error::from_raw_os_error(112)).starts_with(HERE), "a full disk: the drive's");
         if !cfg!(windows) {
             return;
         }
@@ -2837,26 +3151,74 @@ mod tests {
         asked = 0;
         let kept = while_held(|| { asked += 1; held() }).unwrap_err();
         assert_eq!(asked, 1 + HELD_AGAIN_AFTER.len());
-        assert!(!placing(kept).starts_with(HERE), "held by another program: that song's trouble alone");
+        assert!(in_the_folder(kept).starts_with(ONE_SONG), "held by another program: that song's trouble alone");
     }
 
     #[cfg(windows)]
     #[test]
-    fn a_song_whose_copy_another_program_keeps_open_fails_and_the_rest_come_in() {
+    fn songs_whose_copies_another_program_keeps_open_fail_alone_and_the_rest_come_in() {
         let here = Here::new("heldopen");
-        let phone = Phone::with(&[("1.wav", wav()), ("2.wav", wav())]);
-        phone.holds_copies.store(true, Ordering::Relaxed);
+        let names = ["1.wav", "2.wav", "3.wav", "4.wav", "5.wav"];
+        let phone = Phone::with(&names.map(|n| (n, wav())));
+        // Held for good, three in a row: none of them is put in place, each failing alone (neither this computer unable
+        // to keep songs, nor the phone lost: it is not looked at again for them).
+        phone.holds.lock().unwrap().extend(names[..3].iter().map(|n| n.to_string()));
         let mut tries = Tries::default();
-        // Held for good: neither is put in place, each failing alone (not this computer's trouble, nor the phone lost).
         let now = here.take(&phone, &mut tries).unwrap();
-        assert_eq!((now.state, now.taken, now.failed), ("done", 0, 2));
-        assert_eq!(phone.left().len(), 3, "left on the phone, to be tried again");
+        assert_eq!((now.state, now.taken, now.failed), ("done", 2, 3));
+        assert_eq!(phone.left(), ["1.wav", "2.wav", "3.wav", stash_core::phone::LIST], "left on the phone, to be tried again");
+        assert_eq!(phone.opened_again.load(Ordering::Relaxed), 0);
         assert!(!tries.held.contains(&7));
+        // Still held at the next look: the copies made here before are in the way, and those songs fail alone again,
+        // not read from the phone again for nothing.
+        let reads = phone.reads.lock().unwrap().len();
+        let now = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((now.state, now.taken, now.failed), ("done", 2, 3));
+        assert_eq!(phone.reads.lock().unwrap().len(), reads);
         // Let go: the next look takes them.
-        phone.holds_copies.store(false, Ordering::Relaxed);
+        phone.holds.lock().unwrap().clear();
         phone.held.lock().unwrap().clear();
         let now = here.take(&phone, &mut tries).unwrap();
-        assert_eq!((now.state, now.taken, now.failed, now.cleared), ("done", 2, 0, true));
+        assert_eq!((now.state, now.taken, now.failed, now.cleared), ("done", 5, 0, true));
+    }
+
+    #[test]
+    fn a_library_another_writer_keeps_for_one_song_fails_that_song_and_the_rest_come_in() {
+        let here = Here::on_disk("busy");
+        // A write here that finds another writing gives up at once (as one does after its wait, 5 s).
+        here.library.lock().unwrap().wait_for_writers(Duration::ZERO).unwrap();
+        let scan = Arc::new(Mutex::new(rusqlite::Connection::open(here.db()).unwrap()));
+        let phone = Phone::with(&[("1.wav", wav()), ("2.wav", wav()), ("3.wav", wav()), ("4.wav", wav())]);
+        // A scan writes from as 2.wav is read until that song is given up on.
+        let writing = Arc::clone(&scan);
+        *phone.on_read.lock().unwrap() = Some(Box::new(move |name: &str| {
+            if name == "2.wav" {
+                writing
+                    .lock()
+                    .unwrap()
+                    .execute_batch("BEGIN IMMEDIATE; INSERT INTO settings(key, value) VALUES ('scan', '1');")
+                    .unwrap();
+            }
+        }));
+        let note = |line: &str| {
+            if line.starts_with("2.wav was not taken") {
+                scan.lock().unwrap().execute_batch("COMMIT").unwrap();
+            }
+        };
+        let edited = || {};
+        let ctx = Ctx {
+            library: &here.library,
+            board: &here.board,
+            edited: &edited,
+            log: &note,
+        };
+        let mut tries = Tries::default();
+        take(&ctx, &phone, Open::of(&phone), &mut tries, &AtomicBool::new(false));
+        let now = here.board.now.lock().unwrap().clone().unwrap();
+        assert_eq!((now.state, now.taken, now.failed), ("done", 3, 1), "not stopped, nor held: the rest came in");
+        assert_eq!(phone.left(), ["2.wav", stash_core::phone::LIST]);
+        assert!(tries.held.is_empty());
+        assert_eq!(phone.opened_again.load(Ordering::Relaxed), 0, "the phone is not looked at again for it");
     }
 
     #[test]
@@ -3304,11 +3666,30 @@ mod tests {
         assert_eq!(board.now.lock().unwrap().as_ref().map(|n| (n.state, n.ready)), Some(("preparing", 3)));
         // A list said to have stayed is gone from the phone: nothing is left to finish.
         for state in ["done", "stopped"] {
-            *board.now.lock().unwrap() = Some(Now { list_left: true, done: 5, ..card(state) });
+            *board.now.lock().unwrap() = Some(Now { list_left: true, done: 5, trying_again: true, ..card(state) });
             nothing_sent(&board, "A", true, false, 0);
             let n = board.now.lock().unwrap().clone().unwrap();
-            assert_eq!((n.state, n.list_left, n.cleared, n.at_ms), ("done", false, true, 5), "{state}");
+            assert_eq!((n.state, n.list_left, n.cleared, n.trying_again, n.at_ms), ("done", false, true, false, 5), "{state}");
         }
+        // A transfer said to have stopped (contact lost, as the phone deleted its copies before its list) whose folder
+        // answers with no list: the phone stopped the send.
+        *board.now.lock().unwrap() = Some(card("stopped"));
+        nothing_sent(&board, "A", true, false, 0);
+        let n = board.now.lock().unwrap().clone().unwrap();
+        assert_eq!((n.state, n.done, n.total), ("withdrawn", 2, 5));
+        assert!(n.at_ms > 5, "news: a card closed shows again");
+        // Not answering (a folder that does not open, or one listed only part way, which is no answer): what was said
+        // stays, but for a list said to stay plugged in for, which is to be plugged in again.
+        for state in ["stopped", "done", "withdrawn", "cannot_save"] {
+            *board.now.lock().unwrap() = Some(card(state));
+            nothing_sent(&board, "A", false, false, 0);
+            assert_eq!(board.now.lock().unwrap().as_ref().map(|n| (n.state, n.at_ms)), Some((state, 5)), "{state}");
+        }
+        *board.now.lock().unwrap() = Some(Now { list_left: true, done: 5, trying_again: true, ..card("done") });
+        nothing_sent(&board, "A", false, false, 0);
+        let n = board.now.lock().unwrap().clone().unwrap();
+        assert_eq!((n.state, n.list_left, n.trying_again, n.done), ("stopped", true, false, 5));
+        assert!(n.at_ms > 5);
     }
 
     #[test]
@@ -3339,5 +3720,314 @@ mod tests {
         let n = board.now.lock().unwrap().clone().unwrap();
         assert_eq!((n.state, n.list_left), ("stopped", true));
         assert!(n.at_ms > 5);
+    }
+
+    /// Ten songs sent at 7.
+    fn ten() -> Arc<Phone> {
+        let names: Vec<String> = (1..=10).map(|n| format!("{n}.wav")).collect();
+        let songs: Vec<(&str, Vec<u8>)> = names.iter().map(|n| (n.as_str(), wav())).collect();
+        Phone::with(&songs)
+    }
+
+    #[test]
+    fn a_send_the_phone_stops_as_it_is_taken_is_said_to_be_stopped_by_the_phone_whatever_it_deletes_first() {
+        // Cancel on the phone as 3.wav is read, its files deleted one at a time, its list first (as Stash for Android
+        // does): the first read that fails finds the folder with no list.
+        let here = Here::new("cancel-list-first");
+        let phone = ten();
+        *phone.cancels_at.lock().unwrap() = Some(("3.wav".to_string(), true));
+        let now = here.take(&phone, &mut Tries::default()).unwrap();
+        assert_eq!((now.state, now.taken, now.done, now.failed, now.total), ("withdrawn", 2, 2, 0, 10));
+        assert_eq!(here.told()["state"], "withdrawn");
+
+        // Its list last (as earlier builds do): reads fail on copies already gone while the list is still there, so
+        // the take ends as contact lost; the next look, its files gone, finds the folder with no list.
+        let here = Here::new("cancel-list-last");
+        let phone = ten();
+        *phone.cancels_at.lock().unwrap() = Some(("3.wav".to_string(), false));
+        let now = here.take(&phone, &mut Tries::default()).unwrap();
+        assert_eq!((now.state, now.taken, now.done, now.failed), ("stopped", 2, 4, 2));
+        assert!(phone.left().contains(&stash_core::phone::LIST.to_string()), "its list not deleted yet");
+        while !phone.clearing.lock().unwrap().is_empty() {
+            phone.clears_one();
+        }
+        assert!(phone.left().is_empty());
+        nothing_sent(&here.board, "Test phone", true, false, 0);
+        let told = here.told();
+        assert_eq!(
+            (told["state"].as_str(), told["done"].as_u64(), told["failed"].as_u64(), told["total"].as_u64()),
+            (Some("withdrawn"), Some(4), Some(2), Some(10))
+        );
+    }
+
+    #[test]
+    fn a_listing_the_phone_stops_part_way_never_says_it_stopped_the_send() {
+        // As a song stops sending, the phone opened again lists its folder only part way (which can leave the list
+        // out): no answer, not the send stopped.
+        let here = Here::new("partly-stall");
+        let phone = Phone::with(&[("1.wav", wav()), ("2.wav", wav()), ("3.wav", wav())]);
+        phone.stall("2.wav", 1);
+        phone.lists_partly.store(true, Ordering::Relaxed);
+        let now = here.take(&phone, &mut Tries::default()).unwrap();
+        assert_eq!((now.state, now.taken), ("stopped", 1));
+        // A look then finding it listing part way does not answer either: said as it was.
+        nothing_sent(&here.board, "Test phone", false, false, 0);
+        assert_eq!(here.told()["state"], "stopped");
+        // A read that fails, the phone listing part way as it is looked at again: the song's, never the send stopped.
+        let here = Here::new("partly-read");
+        let phone = Phone::with(&[("1.wav", wav()), ("2.wav", wav())]);
+        phone.unreadable.lock().unwrap().insert("1.wav".to_string());
+        phone.lists_partly.store(true, Ordering::Relaxed);
+        let now = here.take(&phone, &mut Tries::default()).unwrap();
+        assert_eq!((now.state, now.taken, now.failed), ("done", 1, 1));
+    }
+
+    #[test]
+    fn a_phone_whose_list_does_not_answer_keeps_what_was_said_of_its_send() {
+        // Every song chosen in, the list left on the phone; then the phone stops answering as its list is read.
+        let here = Here::asking("list-unread");
+        let phone = three("Test phone");
+        let mut tries = Tries::default();
+        here.take(&phone, &mut tries);
+        assert_eq!(here.choose(8, &["2.wav"]), Ok(1));
+        let list = stash_core::phone::LIST.to_string();
+        phone.undeletable.lock().unwrap().insert(list.clone(), "the phone did not answer (0x80004005)".to_string());
+        let done = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((done.state, done.taken, done.list_left), ("done", 1, true));
+        phone.unreachable.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(3));
+        let now = here.take(&phone, &mut tries).unwrap();
+        // To be plugged in again, with what came in.
+        assert_eq!((now.state, now.taken, now.list_left, now.sent_at_ms), ("stopped", 1, true, Some(8)));
+        assert!(now.at_ms > done.at_ms);
+        // It answers: only the list goes, and what came in is said, done.
+        phone.unreachable.store(false, Ordering::Relaxed);
+        phone.undeletable.lock().unwrap().clear();
+        let said = here.said();
+        let now = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((now.state, now.taken, now.left, now.list_left), ("done", 1, 2, false));
+        assert_eq!(here.said(), said, "no taking, no new done: not \"Nothing new came in\"");
+        assert_eq!(phone.left(), ["1.wav", "3.wav"]);
+
+        // A transfer being taken is cut short; another phone's card is not this one's to say over; with no card, it
+        // is said.
+        let board = Board::new();
+        let here = Here::new("list-unread-cards");
+        let phone = Phone::with(&[("1.wav", wav())]);
+        phone.unreachable.store(true, Ordering::Relaxed);
+        let card = |phone: &str, state: &'static str| Now {
+            state,
+            phone: Some(phone.to_string()),
+            total: 4,
+            done: 2,
+            taken: 2,
+            sent_at_ms: Some(7),
+            at_ms: 5,
+            ..Default::default()
+        };
+        *board.now.lock().unwrap() = Some(card("Test phone", "taking"));
+        let n = here.take_on(&board, &phone, &mut Tries::default()).unwrap();
+        assert_eq!((n.state, n.done, n.taken, n.sent_at_ms), ("stopped", 2, 2, Some(7)));
+        *board.now.lock().unwrap() = Some(card("Other phone", "taking"));
+        let n = here.take_on(&board, &phone, &mut Tries::default()).unwrap();
+        assert_eq!((n.state, n.phone.as_deref(), n.at_ms), ("taking", Some("Other phone"), 5));
+        *board.now.lock().unwrap() = None;
+        let n = here.take_on(&board, &phone, &mut Tries::default()).unwrap();
+        assert_eq!((n.state, n.phone.as_deref(), n.total), ("stopped", Some("Test phone"), 0));
+    }
+
+    #[test]
+    fn what_a_send_came_to_is_kept_while_another_phones_card_is_shown() {
+        // Phone A's chosen song in, its list left; then phone B's send is offered over A's result.
+        let here = Here::asking("kept");
+        let a = three("Phone A");
+        let mut tries = Tries::default();
+        here.take(&a, &mut tries);
+        assert_eq!(here.choose(8, &["2.wav"]), Ok(1));
+        let list = stash_core::phone::LIST.to_string();
+        a.undeletable.lock().unwrap().insert(list, "the phone did not answer (0x80004005)".to_string());
+        let done = here.take(&a, &mut tries).unwrap();
+        assert_eq!((done.state, done.taken, done.list_left), ("done", 1, true));
+        let b = Phone::sending("Phone B", 9, &[("9.wav", wav())], vec![json!({ "file": "9.wav", "title": "B song", "artist": "Someone" })]);
+        assert_eq!(here.take(&b, &mut tries).unwrap().phone.as_deref(), Some("Phone B"));
+        // A's next look finishes its send: B's card is not written over, and A's send is kept as finished.
+        a.undeletable.lock().unwrap().clear();
+        let said = here.said();
+        let now = here.take(&a, &mut tries).unwrap();
+        assert_eq!((now.state, now.phone.as_deref()), ("ready", Some("Phone B")));
+        assert_eq!(here.said(), said);
+        assert_eq!(a.left(), ["1.wav", "3.wav"]);
+        let kept = &tries.ended["Phone A"];
+        assert_eq!((kept.state, kept.taken, kept.list_left, kept.at_ms), ("done", 1, false, done.at_ms));
+
+        // A try that carries on a send after another card took its place counts with what came in before.
+        let here = Here::new("kept-carry");
+        let a = Phone::sending(
+            "Phone A",
+            7,
+            &[("1.wav", wav()), ("2.wav", wav()), ("3.wav", wav())],
+            (1..=3).map(|n| json!({ "file": format!("{n}.wav"), "title": format!("Song {n}"), "artist": "Someone" })).collect(),
+        );
+        a.stall("2.wav", 1);
+        a.unlisted_again.lock().unwrap().insert("3.wav".to_string());
+        let mut tries = Tries::default();
+        assert_eq!(here.take(&a, &mut tries).unwrap().taken, 2);
+        *here.board.now.lock().unwrap() = Some(Now { state: "connected", phone: Some("Phone B".into()), ..Default::default() });
+        a.unlisted_again.lock().unwrap().clear();
+        let now = here.take(&a, &mut tries).unwrap();
+        assert_eq!((now.state, now.phone.as_deref(), now.taken, now.failed, now.cleared), ("done", Some("Phone A"), 3, 0, true));
+    }
+
+    #[test]
+    fn a_send_finished_with_the_list_gone_tries_no_song_again() {
+        // A song left out of the listing after the phone was opened again, and of the next look's too: the list goes,
+        // and the card does not say the computer tries it again.
+        let here = Here::new("finish-failed");
+        let phone = Phone::with(&[("1.wav", wav()), ("2.wav", wav()), ("3.wav", wav())]);
+        phone.stall("2.wav", 1);
+        phone.unlisted_again.lock().unwrap().insert("3.wav".to_string());
+        let mut tries = Tries::default();
+        let now = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((now.state, now.taken, now.failed, now.trying_again), ("done", 2, 1, true));
+        let now = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((now.state, now.taken, now.failed, now.trying_again, now.list_left), ("done", 2, 0, false, false));
+        let told = here.told();
+        assert_eq!((told["failed"].as_u64(), told["trying_again"].as_bool()), (Some(0), Some(false)));
+        assert!(!phone.left().contains(&stash_core::phone::LIST.to_string()));
+    }
+
+    #[test]
+    fn a_take_is_news_when_what_its_card_asks_of_the_listener_changes() {
+        let before = Now {
+            state: "done",
+            taken: 2,
+            failed: 1,
+            unlisted: 1,
+            trying_again: true,
+            at_ms: 5,
+            sent_at_ms: Some(7),
+            ..Default::default()
+        };
+        let again = |change: &dyn Fn(&mut Now)| {
+            let mut n = Now { before: Some(Before::of(&before)), ..before.clone() };
+            change(&mut n);
+            n
+        };
+        assert_eq!(ending(again(&|_| {}), "done").at_ms, 5, "the same news at the same time");
+        assert!(ending(again(&|n| n.trying_again = false), "done").at_ms > 5, "no longer tried again by itself");
+        assert!(ending(again(&|n| n.taken = 3), "done").at_ms > 5, "more came in");
+        assert!(ending(again(&|_| {}), "stopped").at_ms > 5, "ending another way");
+        let left = Now { failed: 0, list_left: true, ..before.clone() };
+        let again = |change: &dyn Fn(&mut Now)| {
+            let mut n = Now { before: Some(Before::of(&left)), ..left.clone() };
+            change(&mut n);
+            n
+        };
+        assert!(ending(again(&|n| n.trying_again = false), "done").at_ms > 5, "to be plugged in again now");
+        assert!(ending(again(&|n| n.list_left = false), "stopped").at_ms > 5);
+        // The list that stayed gone, as the card said it would be: no news.
+        assert_eq!(
+            ending(again(&|n| {
+                n.list_left = false;
+                n.trying_again = false;
+            }), "done")
+            .at_ms,
+            5
+        );
+    }
+
+    #[test]
+    fn a_list_that_stays_after_the_last_try_asks_for_the_phone_to_be_plugged_in_again() {
+        let here = Here::asking("list-last-try");
+        let phone = three("Test phone");
+        let mut tries = Tries::default();
+        here.take(&phone, &mut tries);
+        assert_eq!(here.choose(8, &["2.wav"]), Ok(1));
+        let list = stash_core::phone::LIST.to_string();
+        phone.undeletable.lock().unwrap().insert(list, "the phone did not answer (0x80004005)".to_string());
+        // A song came off the phone: the computer finishes by itself at the next look.
+        let first = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((first.state, first.list_left, first.trying_again), ("done", true, true));
+        // The looks after it get no further: the same news, until the last.
+        for _ in 1..TRIES {
+            std::thread::sleep(Duration::from_millis(3));
+            let now = here.take(&phone, &mut tries).unwrap();
+            assert_eq!((now.state, now.list_left, now.trying_again, now.at_ms), ("done", true, true, first.at_ms));
+        }
+        std::thread::sleep(Duration::from_millis(3));
+        let last = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((last.state, last.list_left, last.trying_again), ("done", true, false));
+        assert!(last.at_ms > first.at_ms, "news: to be plugged in again");
+        assert_eq!(here.told()["trying_again"], false);
+        let said = here.said();
+        here.take(&phone, &mut tries);
+        assert_eq!(here.said(), said, "not tried again until the phone is plugged in again");
+        assert!(!tries.ended["Test phone"].trying_again);
+    }
+
+    #[test]
+    fn a_try_that_brings_nothing_new_keeps_a_closed_card_closed() {
+        // A song whose read fails every time: each try after the first carries the send on and brings nothing more in.
+        let here = Here::new("quiet");
+        let phone = Phone::with(&[("1.wav", wav()), ("2.wav", wav())]);
+        phone.unreadable.lock().unwrap().insert("2.wav".to_string());
+        let mut tries = Tries::default();
+        let first = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((first.state, first.taken, first.failed), ("done", 1, 1));
+        std::thread::sleep(Duration::from_millis(3));
+        // It stops sending too, before its read fails: still nothing new.
+        phone.stall("2.wav", 1);
+        let from = here.board.times.lock().unwrap().len();
+        let now = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((now.state, now.taken, now.failed, now.at_ms), ("done", 1, 1, first.at_ms));
+        let times = here.board.times.lock().unwrap()[from..].to_vec();
+        assert!(here.board.states.lock().unwrap()[from..].contains(&"stalled"));
+        assert!(times.iter().all(|t| *t == first.at_ms), "taking and stalled said at the time before: {times:?}");
+        // Read at last: news from the moment it comes in.
+        phone.unreadable.lock().unwrap().clear();
+        std::thread::sleep(Duration::from_millis(3));
+        let now = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((now.state, now.taken, now.failed, now.cleared), ("done", 2, 0, true));
+        assert!(now.at_ms > first.at_ms);
+    }
+
+    #[test]
+    fn a_song_left_for_stopping_with_nothing_after_it_to_read_ends_the_take_without_opening_the_phone_again() {
+        // The phone does not answer after a song stops until it is plugged in again: the last song stops every time.
+        let here = Here::new("last-left");
+        let phone = Phone::with(&[("1.wav", wav()), ("2.wav", wav())]);
+        phone.stall("2.wav", 99);
+        phone.answers_again.store(false, Ordering::Relaxed);
+        let mut tries = Tries::default();
+        assert_eq!(here.take(&phone, &mut tries).unwrap().state, "stopped");
+        assert_eq!(here.take(&phone, &mut tries).unwrap().state, "stopped");
+        // The third time it is left: nothing after it is to be read, so the take ends, not waiting on the phone.
+        let opened = phone.opened_again.load(Ordering::Relaxed);
+        let now = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((now.state, now.taken, now.failed), ("done", 1, 1));
+        assert_eq!(phone.opened_again.load(Ordering::Relaxed), opened);
+        assert_eq!(phone.left(), ["2.wav", stash_core::phone::LIST]);
+
+        // A song after it in already, whose copy stayed: not deleted from the phone as it is (closed after the stop),
+        // but at the next look.
+        let here = Here::new("last-left-undeleted");
+        let phone = Phone::with(&[("1.wav", wav()), ("2.wav", wav())]);
+        phone.unreadable.lock().unwrap().insert("1.wav".to_string());
+        phone.undeletable_times.lock().unwrap().insert("2.wav".to_string(), 1);
+        let mut tries = Tries::default();
+        let now = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((now.taken, now.failed, now.undeleted.clone()), (1, 1, vec!["2.wav".to_string()]));
+        // 1.wav now stops sending, as it did twice before: it is left.
+        phone.unreadable.lock().unwrap().clear();
+        phone.stall("1.wav", 99);
+        tries.stalls.insert((7, "1.wav".to_string()), STALLS_PER_SONG);
+        let opened = phone.opened_again.load(Ordering::Relaxed);
+        let now = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((now.state, now.taken, now.failed), ("done", 1, 1));
+        assert_eq!(phone.opened_again.load(Ordering::Relaxed), opened);
+        assert_eq!(phone.left(), ["1.wav", "2.wav", stash_core::phone::LIST]);
+        let now = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((now.state, now.taken, now.failed, now.undeleted.len()), ("done", 1, 1, 0));
+        assert_eq!(phone.left(), ["1.wav", stash_core::phone::LIST]);
     }
 }

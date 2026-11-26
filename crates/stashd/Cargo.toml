@@ -32,4 +32,7 @@ ureq = { version = "3.5.2", features = ["json"] }
 lofty = "0.25.5"
 # Signs the stand-in config and checks Stash's signature in tests/tidal.rs (already in the build through rustls).
 ring = "0.17.14"
+# A second connection writing to a library, as a scan does, in the phone transfer's tests (already in the build through
+# stash-core).
+rusqlite = "0.42.0"
 zip = { version = "9.6.0", default-features = false }
