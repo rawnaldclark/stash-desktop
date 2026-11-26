@@ -257,7 +257,7 @@ fn brought(library: &Library) -> Vec<(String, i64)> {
 }
 
 /// The send made at `sent_at_ms` on `phone` has had its library brought in: kept with the last [`BROUGHT_KEPT`].
-fn mark_brought(library: &mut Library, phone: &str, sent_at_ms: i64) -> stash_core::Result<()> {
+pub(super) fn mark_brought(library: &mut Library, phone: &str, sent_at_ms: i64) -> stash_core::Result<()> {
     let mut sends = brought(library);
     sends.retain(|(p, at)| !(p == phone && *at == sent_at_ms));
     sends.push((phone.to_string(), sent_at_ms));

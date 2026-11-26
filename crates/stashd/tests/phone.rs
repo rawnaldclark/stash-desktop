@@ -141,7 +141,11 @@ fn a_send_with_the_phones_library_is_summed_up_and_brought_in_as_chosen() {
     client.post("/api/phone/look", json!({}));
 
     let now = client.phone_until("ready");
-    assert_eq!((now["total"].as_u64(), now["with_library"].as_bool()), (Some(2), Some(true)));
+    assert_eq!(
+        (now["total"].as_u64(), now["with_library"].as_bool(), now["library_choice_kept"].as_bool()),
+        (Some(2), Some(true), Some(false)),
+        "a library waits with the send, and nothing was chosen for this phone yet: the first run"
+    );
     let (status, summary) = client.get("/api/phone/library");
     assert_eq!(status, 200);
     assert_eq!(
@@ -180,7 +184,10 @@ fn a_send_with_the_phones_library_is_summed_up_and_brought_in_as_chosen() {
     );
     assert_eq!((status, taking), (200, json!({ "taking": 2 })));
     let now = client.phone_until("done");
-    assert_eq!((now["taken"].as_u64(), now["cleared"].as_bool()), (Some(2), Some(true)));
+    assert_eq!(
+        (now["taken"].as_u64(), now["cleared"].as_bool(), now["library_choice_kept"].as_bool()),
+        (Some(2), Some(true), Some(true))
+    );
 
     // The likes (Ivy a file, Halo to stream), the playlist chosen and the plays; the library and the list went from the
     // phone, and then the folder.
