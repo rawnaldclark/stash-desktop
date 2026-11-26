@@ -780,9 +780,9 @@ fn open_again(phone: &dyn Plugged, stop: &AtomicBool) -> Option<Box<dyn Folder>>
 
 /// Takes the songs of `list` chosen and still on the phone, one at a time, each deleted from the phone once taken. A
 /// song that stops coming has its read called off: the phone is opened again and the song taken again from its start
-/// (a song that stops [`STALLS_PER_SONG`] times is left, and the rest go on). With every chosen song taken, the
-/// phone's folder is deleted, or, when songs not chosen are left in it, just its list: the phone then knows the
-/// computer is done. What the transfer came to.
+/// (a song that stops [`STALLS_PER_SONG`] times is left, and the rest go on). With every chosen song taken, the copies
+/// of songs not chosen that are here already go too ([`drop_here_already`]), then the phone's folder, or, when songs not
+/// chosen are left in it, just its list: the phone then knows the computer is done. What the transfer came to.
 fn take_songs(
     ctx: &Ctx,
     phone: &dyn Plugged,
@@ -933,6 +933,10 @@ fn take_songs(
     }
     // Everything not taken stays on the phone, to be tried again.
     if now.failed == 0 {
+        // Before the list goes: the phone counts a copy gone while it is there as on this computer.
+        if let Some(current) = folder.as_deref() {
+            now.had += drop_here_already(ctx, current, list, choice, &mut files);
+        }
         now.left = list
             .songs
             .iter()
@@ -969,6 +973,48 @@ fn take_songs(
     ctx.board.set(now.clone());
     (ctx.edited)();
     now
+}
+
+/// Deletes from the phone the copies of songs not chosen that this computer has already, as each song taken is: the
+/// phone sees them go and sends them no more, so a send carries only songs this computer has not got. How many went.
+fn drop_here_already(
+    ctx: &Ctx,
+    folder: &dyn Folder,
+    list: &List,
+    choice: &Choice,
+    files: &mut HashMap<String, PhoneFile>,
+) -> usize {
+    let unchosen: Vec<&Sent> = list
+        .songs
+        .iter()
+        .filter(|s| !choice.includes(&s.file) && files.contains_key(&s.file))
+        .collect();
+    if unchosen.is_empty() {
+        return 0;
+    }
+    let asked: Vec<import::Song> = unchosen.iter().map(|s| as_song(s)).collect();
+    let Ok(here) = ctx.library.lock().unwrap().songs_here(&asked) else {
+        return 0;
+    };
+    let mut gone = 0;
+    for (sent, here) in unchosen.into_iter().zip(here) {
+        if !here {
+            continue;
+        }
+        let Some(file) = files.get(&sent.file) else {
+            continue;
+        };
+        if folder.remove_file(file).is_ok() {
+            files.remove(&sent.file);
+            gone += 1;
+        }
+    }
+    if gone > 0 {
+        (ctx.log)(&format!(
+            "{gone} songs not chosen are here already: their copies went from the phone"
+        ));
+    }
+    gone
 }
 
 /// A folder on this computer standing in for a phone's transfer folder (`STASH_PHONE_FOLDER`): to try the transfer
@@ -1776,6 +1822,22 @@ mod tests {
         assert_eq!(phone.left(), ["1.wav", "3.wav"]);
         assert_eq!(here.board.choice(&here.library, 8), None, "the choice is let go");
         assert_eq!(here.saved(), 1);
+    }
+
+    #[test]
+    fn songs_not_chosen_that_are_here_already_go_from_the_phone_too() {
+        let here = Here::asking("known");
+        here.take_all(true);
+        assert_eq!(here.take(&Phone::with(&[("1.wav", wav())]), &mut HashMap::new()).unwrap().taken, 1);
+        here.take_all(false);
+        let phone = three("Test phone");
+        assert_eq!(here.take(&phone, &mut HashMap::new()).unwrap().state, "ready");
+        assert_eq!(here.choose(8, &["2.wav"]), Ok(1));
+        let now = here.take(&phone, &mut HashMap::new()).unwrap();
+        assert_eq!((now.state, now.taken, now.had, now.left), ("done", 1, 1, 1));
+        // 1.wav is here already: its copy went too, so the phone sends it no more. 3.wav is new, and was not chosen.
+        assert_eq!(phone.left(), ["3.wav"]);
+        assert_eq!(*phone.reads.lock().unwrap(), ["2.wav"], "nothing read for a song here already");
     }
 
     #[test]
