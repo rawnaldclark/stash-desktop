@@ -2436,6 +2436,11 @@ mod tests {
         /// Opened again, it lists its folder only part way (it stopped listing): no answer, as `open_transfer` says
         /// then.
         lists_partly: AtomicBool,
+        /// Every file deleted from its folder, in order.
+        removed: Mutex<Vec<String>>,
+        /// How often its library was read, and how many more reads of it it does not answer.
+        library_reads: AtomicU64,
+        library_unanswered: AtomicU64,
     }
 
     impl Phone {
@@ -2474,6 +2479,16 @@ mod tests {
 
         fn stall(&self, name: &str, times: u32) {
             self.stalls.lock().unwrap().insert(name.to_string(), times);
+        }
+
+        /// Its library sent with the send (these bytes), written as the phone writes it: before its list.
+        fn sends_library(&self, bytes: Vec<u8>) {
+            let mut files = self.files.lock().unwrap();
+            let at = files
+                .iter()
+                .position(|(n, _)| n == stash_core::phone::LIST)
+                .unwrap_or(files.len());
+            files.insert(at, (stash_core::phone::LIBRARY.to_string(), bytes));
         }
 
         fn left(&self) -> Vec<String> {
@@ -2545,6 +2560,14 @@ mod tests {
             if self.1.load(Ordering::Relaxed) {
                 return Err("the phone did not answer (0x80004005)".to_string());
             }
+            if file.name == stash_core::phone::LIBRARY {
+                self.0.library_reads.fetch_add(1, Ordering::Relaxed);
+                let unanswered = &self.0.library_unanswered;
+                if unanswered.load(Ordering::Relaxed) > 0 {
+                    unanswered.fetch_sub(1, Ordering::Relaxed);
+                    return Err("the phone did not answer (0x80004005)".to_string());
+                }
+            }
             let files = self.0.files.lock().unwrap();
             files
                 .iter()
@@ -2613,6 +2636,7 @@ mod tests {
             if files.len() == before {
                 return Err("no such object on the phone".to_string());
             }
+            self.0.removed.lock().unwrap().push(file.name.clone());
             Ok(())
         }
         fn remove_if_empty(&self) -> Result<(), String> {
@@ -4151,5 +4175,437 @@ mod tests {
         let now = here.take(&phone, &mut tries).unwrap();
         assert_eq!((now.state, now.taken, now.failed, now.undeleted.len()), ("done", 1, 1, 0));
         assert_eq!(phone.left(), ["1.wav", stash_core::phone::LIST]);
+    }
+
+    use stash_core::phone::{LIBRARY as LIBRARY_FILE, LIST as LIST_FILE};
+
+    /// A song as the phone's library file names it: its title, its artist, and `more` of it.
+    fn item(title: &str, artist: &str, more: serde_json::Value) -> serde_json::Value {
+        let mut item = json!({ "title": title, "artist": artist });
+        if let Some(more) = more.as_object() {
+            item.as_object_mut().unwrap().extend(more.clone());
+        }
+        item
+    }
+
+    /// The phone's library, as sent with its send made at `sent_at_ms`. Liked: a song known by 1.wav's ISRC (under other
+    /// words), one by 2.wav's YouTube id, "Song 0.wav" (a file here, once [`had_two`] took it), and "Far Away" (neither:
+    /// it streams). Its playlists, in the file's order: a Daily Mix synced from Spotify, its own "Gym", and a YouTube
+    /// Music mix with no songs. And two plays.
+    fn library_at(sent_at_ms: i64) -> serde_json::Value {
+        let art = |url: &str| json!({ "artwork": [{ "url": url }] });
+        let by_isrc = item("First of all", "Someone", json!({ "isrc": "USABC1234567", "artwork": [{ "url": "https://art/1" }] }));
+        let by_video = item(
+            "Song 2 (Official Video)",
+            "Someone VEVO",
+            json!({ "refs": { "youtube": "dQw4w9WgXcQ" }, "artwork": [{ "url": "https://art/2" }] }),
+        );
+        let had = item("Song 0.wav", "Someone", art("https://art/0"));
+        let far = item("Far Away", "Nobody", art("https://art/far"));
+        let three = item("Song 3.wav", "Other", json!({}));
+        json!({
+            "kind": "stash-web-library", "v": 1, "generator": "Stash for Android", "sent_at_ms": sent_at_ms,
+            "likes": [
+                { "item": by_isrc, "likedAt": 100 }, { "item": by_video, "likedAt": 101 },
+                { "item": had, "likedAt": 102 }, { "item": far, "likedAt": 103 },
+            ],
+            "playlists": [
+                { "id": "app-9", "name": "Daily Mix 1", "from": "spotify", "items": [far, by_isrc, far, by_video, had, three] },
+                { "id": "app-2", "name": "Gym", "items": [three, far] },
+                { "id": "app-12", "name": "Supermix", "from": "youtube", "items": [] },
+            ],
+            "history": [{ "item": far, "playedAt": 300 }, { "item": by_isrc, "playedAt": 301 }],
+        })
+    }
+
+    /// A send of three songs made at 8, with the phone's library ([`library_at`]): 1.wav has an ISRC and 2.wav a
+    /// YouTube id, both on the album "First"; 3.wav is on "Second".
+    fn sending_library(name: &str) -> Arc<Phone> {
+        let entries = vec![
+            json!({ "file": "1.wav", "title": "Song 1.wav", "artist": "Someone", "album": "First",
+                    "isrc": "USABC1234567", "art_url": "https://cover/1" }),
+            json!({ "file": "2.wav", "title": "Song 2.wav", "artist": "Someone", "album": "First",
+                    "youtube_id": "dQw4w9WgXcQ" }),
+            json!({ "file": "3.wav", "title": "Song 3.wav", "artist": "Other", "album": "Second" }),
+        ];
+        let phone = Phone::sending(name, 8, &[("1.wav", wav()), ("2.wav", wav()), ("3.wav", wav())], entries);
+        phone.sends_library(library_at(8).to_string().into_bytes());
+        phone
+    }
+
+    /// A library that offers each send, with "Song 0.wav" and "Song 3.wav" taken into it as files (from an earlier send).
+    fn had_two(name: &str) -> Here {
+        let here = Here::asking(name);
+        here.take_all(true);
+        let entries = vec![
+            json!({ "file": "0.wav", "title": "Song 0.wav", "artist": "Someone" }),
+            json!({ "file": "3.wav", "title": "Song 3.wav", "artist": "Other" }),
+        ];
+        let before = Phone::sending("Test phone", 7, &[("0.wav", wav()), ("3.wav", wav())], entries);
+        assert_eq!(here.take(&before, &mut Tries::default()).unwrap().taken, 2);
+        here.take_all(false);
+        here
+    }
+
+    fn parts(likes: bool, plays: bool, playlists: &[&str], only_here: bool) -> library::Parts {
+        library::Parts {
+            likes,
+            plays,
+            playlists: playlists.iter().map(|p| p.to_string()).collect(),
+            only_here,
+        }
+    }
+
+    /// The songs liked here, each with whether it is here (a file: it plays with no connection).
+    fn liked(here: &Here) -> Vec<(String, bool)> {
+        let rows = here.library.lock().unwrap().liked_at(0, 100).unwrap();
+        let mut liked: Vec<(String, bool)> = rows.into_iter().map(|t| (t.title, t.here)).collect();
+        liked.sort();
+        liked
+    }
+
+    /// The playlists here, each with its number of songs.
+    fn playlists(here: &Here) -> Vec<(String, u64)> {
+        let rows = here.library.lock().unwrap().playlists().unwrap();
+        rows.into_iter().map(|p| (p.name, p.tracks)).collect()
+    }
+
+    /// The songs played, newest first.
+    fn plays(here: &Here) -> Vec<String> {
+        let rows = here.library.lock().unwrap().history_at(0, 100).unwrap();
+        rows.into_iter().map(|t| t.title).collect()
+    }
+
+    /// The songs of the library, each with whether it is here.
+    fn songs(here: &Here) -> Vec<(String, bool)> {
+        let rows = here.library.lock().unwrap().tracks_at(0, 100).unwrap();
+        let mut songs: Vec<(String, bool)> = rows.into_iter().map(|t| (t.title, t.here)).collect();
+        songs.sort();
+        songs
+    }
+
+    fn setting(here: &Here, key: &str) -> Option<String> {
+        here.library.lock().unwrap().setting(key).unwrap().filter(|v| !v.is_empty())
+    }
+
+    /// What `GET /api/phone/library` answers of the send offered now: None for its 404.
+    fn summed_up(here: &Here) -> Option<serde_json::Value> {
+        let offer = here.board.offer.lock().unwrap().clone()?;
+        let from = offer.library.clone()?;
+        Some(library::summary(&here.library, &offer, &from))
+    }
+
+    fn choose_with(here: &Here, sent_at_ms: i64, choice: Choice, library: library::Parts) -> Result<usize, &'static str> {
+        choose_from(&here.library, &here.board, sent_at_ms, choice, Some(library))
+    }
+
+    #[test]
+    fn a_library_sent_with_a_send_is_offered_with_it_and_summed_up() {
+        let here = had_two("library-offer");
+        let phone = sending_library("Test phone");
+        let mut tries = Tries::default();
+        let now = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((now.state, now.total, now.here, now.with_library), ("ready", 3, 1, true));
+        assert_eq!(here.told()["with_library"], true);
+        let w = wav().len() as u64;
+        assert_eq!(
+            summed_up(&here).unwrap(),
+            json!({
+                "sent_at_ms": 8,
+                "phone": "Test phone",
+                // 3.wav is here already.
+                "downloads": { "songs": 2, "bytes": 2 * w, "here": 1 },
+                // Downloaded: the songs known by 1.wav's ISRC and 2.wav's YouTube id (sent now), and Song 0.wav (a file
+                // here); not Far Away.
+                "likes": { "songs": 4, "downloaded": 3 },
+                "plays": 2,
+                // Its own playlists first, then those synced, each in the file's order; covers distinct, first songs
+                // first, four at most.
+                "playlists": [
+                    { "id": "app-2", "name": "Gym", "from": null, "songs": 2, "downloaded": 1,
+                      "covers": ["https://art/far"] },
+                    { "id": "app-9", "name": "Daily Mix 1", "from": "spotify", "songs": 6, "downloaded": 4,
+                      "covers": ["https://art/far", "https://art/1", "https://art/2", "https://art/0"] },
+                    { "id": "app-12", "name": "Supermix", "from": "youtube", "songs": 0, "downloaded": 0, "covers": [] },
+                ],
+                // From the send's songs, most songs first.
+                "albums": [
+                    { "title": "First", "artist": "Someone", "art_url": "https://cover/1", "songs": 2 },
+                    { "title": "Second", "artist": "Other", "art_url": null, "songs": 1 },
+                ],
+                "choice": null,
+            })
+        );
+        // Looked at again: offered as it was, its library not read again; nothing read or deleted before it is chosen.
+        assert_eq!(here.take(&phone, &mut tries).unwrap().state, "ready");
+        assert_eq!(phone.library_reads.load(Ordering::Relaxed), 1);
+        assert!(phone.reads.lock().unwrap().is_empty() && phone.removed.lock().unwrap().is_empty());
+        assert!(songs(&here).iter().all(|(_, file)| *file), "nothing of the library came in yet");
+    }
+
+    #[test]
+    fn a_library_of_another_send_or_none_that_can_be_read_leaves_the_send_its_songs() {
+        let cases: [(&str, Option<Vec<u8>>); 3] = [
+            ("library-stale", Some(library_at(5).to_string().into_bytes())),
+            ("library-garbage", Some(br#"{"kind":"something else"}"#.to_vec())),
+            ("library-none", None),
+        ];
+        for (name, bytes) in cases {
+            let here = Here::asking(name);
+            // Parts kept from before are not brought in from it either.
+            library::keep(&here.library, &parts(true, true, &["app-9"], false));
+            let phone = three("Test phone");
+            if let Some(bytes) = bytes {
+                phone.sends_library(bytes);
+            }
+            let mut tries = Tries::default();
+            let now = here.take(&phone, &mut tries).unwrap();
+            assert_eq!((now.state, now.total, now.with_library), ("ready", 3, false), "{name}");
+            assert!(summed_up(&here).is_none(), "{name}: no library for the send waiting");
+            assert_eq!(
+                choose_with(&here, 8, Choice::All, parts(true, false, &[], false)),
+                Err("the phone sent no library with these songs"),
+                "{name}"
+            );
+            // Its songs come in as ever.
+            assert_eq!(choose_from(&here.library, &here.board, 8, Choice::All, None), Ok(3));
+            let now = here.take(&phone, &mut tries).unwrap();
+            assert_eq!((now.state, now.taken, now.cleared), ("done", 3, true), "{name}");
+            assert!(phone.left().is_empty() && phone.folder_gone.load(Ordering::Relaxed), "{name}");
+            // Only the like the list carries (1.wav's); no plays, no playlists.
+            assert_eq!(liked(&here), [("Song 1.wav".to_string(), true)], "{name}");
+            assert!(plays(&here).is_empty() && playlists(&here).is_empty(), "{name}");
+            assert_eq!(setting(&here, library::BROUGHT_SETTING), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_library_the_phone_did_not_answer_for_is_read_again_and_offered_once_it_is() {
+        let here = Here::asking("library-late");
+        let phone = sending_library("Test phone");
+        phone.library_unanswered.store(1, Ordering::Relaxed);
+        let mut tries = Tries::default();
+        let now = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((now.state, now.total, now.with_library), ("ready", 3, false), "its songs offered meanwhile");
+        let now = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((now.state, now.total, now.with_library), ("ready", 3, true));
+        assert!(summed_up(&here).is_some());
+        assert_eq!(phone.library_reads.load(Ordering::Relaxed), 2);
+        // One that never answers is let go after a few reads: the send is its songs.
+        let here = Here::asking("library-never");
+        let phone = sending_library("Test phone");
+        phone.library_unanswered.store(99, Ordering::Relaxed);
+        let mut tries = Tries::default();
+        for _ in 0..5 {
+            assert!(!here.take(&phone, &mut tries).unwrap().with_library);
+        }
+        assert_eq!(phone.library_reads.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn a_send_of_no_songs_with_a_library_is_offered_and_brings_the_library_in() {
+        let here = Here::asking("library-only");
+        let phone = Phone::sending("Test phone", 8, &[], Vec::new());
+        phone.sends_library(library_at(8).to_string().into_bytes());
+        let mut tries = Tries::default();
+        let now = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((now.state, now.total, now.with_library), ("ready", 0, true));
+        let told = summed_up(&here).unwrap();
+        assert_eq!(told["downloads"], json!({ "songs": 0, "bytes": 0, "here": 0 }));
+        assert_eq!(told["likes"], json!({ "songs": 4, "downloaded": 0 }));
+        assert_eq!(told["albums"], json!([]));
+        assert_eq!(choose_with(&here, 8, Choice::All, parts(true, true, &["app-2"], false)), Ok(0));
+        let now = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((now.state, now.taken, now.cleared), ("done", 0, true));
+        let liked = liked(&here);
+        assert_eq!(liked.len(), 4);
+        assert!(liked.iter().all(|(_, file)| !file), "songs not sent come in to stream");
+        assert_eq!(plays(&here), ["First of all", "Far Away"]);
+        assert_eq!(playlists(&here), [("Gym".to_string(), 2)]);
+        assert_eq!(*phone.removed.lock().unwrap(), [LIBRARY_FILE, LIST_FILE]);
+        assert!(phone.folder_gone.load(Ordering::Relaxed));
+
+        // The library here can't be written: nothing goes from the phone, and the send waits to be tried again.
+        let here = Here::on_disk("library-only-full");
+        library::keep(&here.library, &parts(true, false, &[], false));
+        here.library.lock().unwrap().refuse_writes().unwrap();
+        let phone = Phone::sending("Test phone", 8, &[], Vec::new());
+        phone.sends_library(library_at(8).to_string().into_bytes());
+        let mut tries = Tries::default();
+        let now = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((now.state, now.library), ("cannot_save", true));
+        assert_eq!(phone.left(), [LIBRARY_FILE, LIST_FILE]);
+        assert!(tries.held.contains(&8) && tries.tried.is_empty());
+    }
+
+    #[test]
+    fn a_take_brings_in_the_parts_of_the_library_chosen_before_its_songs() {
+        let here = had_two("library-take");
+        let phone = sending_library("Test phone");
+        let mut tries = Tries::default();
+        here.take(&phone, &mut tries);
+        // A playlist that is not in the library: refused, and nothing kept or chosen.
+        assert_eq!(
+            choose_with(&here, 8, Choice::All, parts(true, false, &["app-404"], false)),
+            Err("the playlists on the phone changed: look them over and take them again")
+        );
+        assert!(here.board.offer.lock().unwrap().is_some());
+        assert_eq!(setting(&here, library::CHOICE_SETTING), None);
+        let chose = parts(true, false, &["app-9"], false);
+        assert_eq!(choose_with(&here, 8, Choice::All, chose.clone()), Ok(3));
+        let now = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((now.state, now.taken, now.had, now.cleared), ("done", 2, 1, true));
+        // Its likes: 1.wav landed on the song its like made (one song, a file now), and Far Away streams.
+        let liked = liked(&here);
+        assert_eq!(liked.len(), 4);
+        assert!(liked.contains(&("First of all".to_string(), true)), "{liked:?}");
+        assert!(liked.contains(&("Far Away".to_string(), false)), "{liked:?}");
+        assert!(!songs(&here).iter().any(|(title, _)| title == "Song 1.wav"));
+        // Only the playlist chosen (all its songs, Far Away twice), and no plays.
+        assert_eq!(playlists(&here), [("Daily Mix 1".to_string(), 6)]);
+        assert!(plays(&here).is_empty());
+        // The library went from the phone after the songs, before the list; what was chosen is kept.
+        assert_eq!(*phone.removed.lock().unwrap(), ["1.wav", "2.wav", "3.wav", LIBRARY_FILE, LIST_FILE]);
+        assert!(phone.folder_gone.load(Ordering::Relaxed));
+        assert_eq!(setting(&here, library::CHOICE_SETTING), Some(json!(chose).to_string()));
+        assert_eq!(setting(&here, library::BROUGHT_SETTING).as_deref(), Some("8"));
+    }
+
+    #[test]
+    fn only_the_songs_that_are_files_here_come_in_when_only_those_are_asked_for() {
+        let here = had_two("library-only-here");
+        let phone = sending_library("Test phone");
+        let mut tries = Tries::default();
+        here.take(&phone, &mut tries);
+        let files = HashSet::from(["1.wav".to_string()]);
+        let chose = parts(true, true, &["app-9", "app-2", "app-12"], true);
+        assert_eq!(choose_with(&here, 8, Choice::These(files), chose), Ok(1));
+        let now = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((now.state, now.taken), ("done", 1));
+        // The songs sent now as files (1.wav's) and those that were files here (Song 0.wav, Song 3.wav): nothing that
+        // only streams. 2.wav was not chosen, so neither is the song its YouTube id names.
+        assert_eq!(
+            liked(&here),
+            [("First of all".to_string(), true), ("Song 0.wav".to_string(), true)]
+        );
+        assert_eq!(plays(&here), ["First of all"]);
+        // The Daily Mix with its songs here; Gym with Song 3.wav; the mix that had no songs, made as it is.
+        assert_eq!(
+            playlists(&here),
+            [("Daily Mix 1".to_string(), 3), ("Gym".to_string(), 1), ("Supermix".to_string(), 0)]
+        );
+        assert!(songs(&here).iter().all(|(_, file)| *file), "{:?}", songs(&here));
+    }
+
+    #[test]
+    fn the_library_comes_in_once_for_a_send_however_often_it_is_tried() {
+        let here = Here::asking("library-once");
+        let phone = sending_library("Test phone");
+        let mut tries = Tries::default();
+        here.take(&phone, &mut tries);
+        assert_eq!(choose_with(&here, 8, Choice::All, parts(true, false, &[], false)), Ok(3));
+        // 2.wav stops sending, and the phone does not answer again: the take stops after 1.wav, the library in.
+        phone.stall("2.wav", 1);
+        phone.answers_again.store(false, Ordering::Relaxed);
+        let now = here.take(&phone, &mut tries).unwrap();
+        assert_eq!((now.state, now.taken), ("stopped", 1));
+        assert_eq!(liked(&here).len(), 4);
+        assert_eq!(setting(&here, library::BROUGHT_SETTING).as_deref(), Some("8"));
+        // Un-liked here meanwhile.
+        let far = here.library.lock().unwrap().liked_at(0, 100).unwrap().into_iter().find(|t| t.title == "Far Away");
+        here.library.lock().unwrap().set_liked(far.unwrap().id, false, 1).unwrap();
+        // Plugged in again, and Stash started again too: the rest of the songs come in, the library does not come in
+        // again (the like stays gone), and it is not read from the phone again.
+        phone.answers_again.store(true, Ordering::Relaxed);
+        let now = here.take_on(&Board::new(), &phone, &mut tries).unwrap();
+        assert_eq!((now.state, now.taken, now.cleared), ("done", 3, true));
+        assert_eq!(liked(&here).len(), 3);
+        assert_eq!(phone.library_reads.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn the_library_goes_from_the_phone_before_the_list_however_the_send_ends() {
+        // Nothing chosen: the library and the list go, and the songs stay for the phone to clear.
+        let here = Here::asking("library-none-chosen");
+        let phone = sending_library("Test phone");
+        here.take(&phone, &mut Tries::default());
+        let (at, choice) = chosen(&json!({ "sent_at_ms": 8, "files": [], "none": true })).unwrap();
+        assert_eq!(choose_from(&here.library, &here.board, at, choice, None), Ok(0));
+        let now = here.take(&phone, &mut Tries::default()).unwrap();
+        assert_eq!((now.state, now.left), ("done", 3));
+        assert_eq!(*phone.removed.lock().unwrap(), [LIBRARY_FILE, LIST_FILE]);
+        assert_eq!(phone.left(), ["1.wav", "2.wav", "3.wav"]);
+        // A send an earlier Stash took: its library goes, then its list, and nothing is read.
+        let here = Here::new("library-taken-before");
+        here.library.lock().unwrap().set_setting(TAKEN_SETTING, "8").unwrap();
+        let phone = sending_library("Test phone");
+        here.take(&phone, &mut Tries::default());
+        assert_eq!(*phone.removed.lock().unwrap(), [LIBRARY_FILE, LIST_FILE]);
+        assert!(phone.reads.lock().unwrap().is_empty());
+        // One the phone does not let go of is its to clear: the list goes all the same, and the folder stays.
+        let here = Here::new("library-stays");
+        let phone = sending_library("Test phone");
+        let no = "the phone did not answer (0x80004005)".to_string();
+        phone.undeletable.lock().unwrap().insert(LIBRARY_FILE.to_string(), no);
+        let now = here.take(&phone, &mut Tries::default()).unwrap();
+        assert_eq!((now.state, now.taken, now.list_left, now.cleared), ("done", 3, false, true));
+        assert_eq!(phone.left(), [LIBRARY_FILE]);
+        assert!(!phone.folder_gone.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_later_send_brings_in_the_parts_chosen_before_and_no_playlist_not_chosen() {
+        let here = Here::asking("library-later");
+        let first = sending_library("Test phone");
+        let mut tries = Tries::default();
+        here.take(&first, &mut tries);
+        let chose = parts(true, true, &["app-9"], false);
+        assert_eq!(choose_with(&here, 8, Choice::All, chose.clone()), Ok(3));
+        here.take(&first, &mut tries);
+        assert_eq!(playlists(&here), [("Daily Mix 1".to_string(), 6)]);
+        // The phone sends again (at 9): a song, and its library since: a new like, a song more on the Daily Mix, a new
+        // Daily Mix, a new play.
+        let mut library = library_at(9);
+        let new = item("New Love", "Someone", json!({}));
+        library["likes"].as_array_mut().unwrap().push(json!({ "item": new, "likedAt": 104 }));
+        library["playlists"][0]["items"].as_array_mut().unwrap().push(new.clone());
+        library["playlists"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "id": "app-20", "name": "Daily Mix 2", "from": "spotify", "items": [new] }));
+        library["history"].as_array_mut().unwrap().push(json!({ "item": new, "playedAt": 302 }));
+        let again = Phone::sending(
+            "Test phone",
+            9,
+            &[("4.wav", wav())],
+            vec![json!({ "file": "4.wav", "title": "Song 4", "artist": "Someone" })],
+        );
+        again.sends_library(library.to_string().into_bytes());
+        // Offered as ever, with what was chosen before.
+        assert_eq!(here.take(&again, &mut tries).unwrap().state, "ready");
+        assert_eq!(summed_up(&here).unwrap()["choice"], json!(chose));
+        // Its song chosen, with nothing said of the library: the parts chosen before come in, in step.
+        assert_eq!(here.choose(9, &["4.wav"]), Ok(1));
+        let now = here.take(&again, &mut tries).unwrap();
+        assert_eq!((now.state, now.taken), ("done", 1));
+        assert!(liked(&here).contains(&("New Love".to_string(), false)));
+        assert_eq!(playlists(&here), [("Daily Mix 1".to_string(), 7)], "the new Daily Mix was not chosen");
+        assert_eq!(plays(&here), ["New Love", "First of all", "Far Away"]);
+        assert_eq!(*again.removed.lock().unwrap(), ["4.wav", LIBRARY_FILE, LIST_FILE]);
+        assert_eq!(setting(&here, library::BROUGHT_SETTING).as_deref(), Some("9"));
+    }
+
+    #[test]
+    fn what_is_asked_of_the_library_is_read_as_meant() {
+        assert_eq!(library::asked(&json!({ "sent_at_ms": 8, "all": true })), Ok(None));
+        assert_eq!(library::asked(&json!({ "library": null })), Ok(None));
+        assert_eq!(
+            library::asked(&json!({ "library": { "likes": true, "playlists": ["b", "a", "b", 3] } })),
+            Ok(Some(parts(true, false, &["a", "b"], false)))
+        );
+        assert_eq!(library::asked(&json!({ "library": {} })), Ok(Some(parts(false, false, &[], false))));
+        assert!(library::asked(&json!({ "library": true })).is_err());
+        assert!(library::asked(&json!({ "library": { "likes": "yes" } })).is_err());
+        assert!(library::asked(&json!({ "library": { "playlists": "app-2" } })).is_err());
     }
 }
