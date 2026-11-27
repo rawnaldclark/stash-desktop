@@ -37,6 +37,7 @@ export type SessionsCode =
 	| 'bad_request'
 	| 'forbidden'
 	| 'gone'
+	| 'offline'
 	| 'not_yours'
 	| 'own_station'
 	| 'blocked'
@@ -65,6 +66,8 @@ export function sessionsMessage(e: unknown): string {
 			return 'Community didn’t accept this computer’s key.';
 		case 'gone':
 			return 'This station isn’t available.';
+		case 'offline':
+			return 'Stash is offline: Sessions need the internet.';
 		case 'not_yours':
 			return 'That station isn’t yours.';
 		case 'own_station':
@@ -111,7 +114,7 @@ export function problemOf(status: number, body: unknown): { code: SessionsCode; 
 		case 429:
 			return { code: 'rate_limited', id };
 		case 503:
-			return { code: raw === 'sessions_off' || raw === 'off' ? 'off' : 'unavailable', id };
+			return { code: raw === 'sessions_off' || raw === 'off' ? 'off' : raw === 'offline' ? 'offline' : 'unavailable', id };
 		default:
 			return { code: 'unavailable', id };
 	}
@@ -151,10 +154,10 @@ export function createSessionsClient(fetchFn: typeof fetch = (i, o) => fetch(i, 
 
 	return {
 		/** Is Sessions reachable from here, and where a room's socket goes (`wss://…/v1/rooms`). */
-		async status(): Promise<{ on: boolean; rooms: string | null }> {
+		async status(): Promise<{ on: boolean; rooms: string | null; offline: boolean }> {
 			const j = await body(await call('/status', null));
 			const rooms = typeof j.rooms === 'string' && /^wss?:\/\//.test(j.rooms) ? j.rooms : null;
-			return { on: j.on === true && !!rooms, rooms };
+			return { on: j.on === true && !!rooms, rooms, offline: j.offline === true };
 		},
 		async live(key: string | null): Promise<LiveSession[]> {
 			return list((await body(await call('/live', key))).sessions, cleanLiveSession);

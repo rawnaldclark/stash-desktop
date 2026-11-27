@@ -568,6 +568,8 @@ class SessionsDirectory {
 	following = $state<FollowedStation[] | null>(null);
 	/** null until asked; false when Sessions aren't on in this player yet. */
 	on = $state<boolean | null>(null);
+	/** Off because Stash is offline here (not because Sessions aren't on): it is asked again each time. */
+	offline = $state(false);
 	joined = $state<boolean | null>(null);
 	loading = $state(false);
 	failed = $state<string | null>(null);
@@ -577,7 +579,11 @@ class SessionsDirectory {
 		if (this.loading || (opts.ifStale && Date.now() - this.at < 30_000)) return;
 		this.loading = true;
 		try {
-			if (this.on === null) this.on = (await client.status()).on;
+			if (this.on !== true) {
+				const st = await client.status();
+				this.on = st.on;
+				this.offline = st.offline;
+			}
 			if (!this.on) return;
 			const key = await community.key();
 			this.joined = !!key;

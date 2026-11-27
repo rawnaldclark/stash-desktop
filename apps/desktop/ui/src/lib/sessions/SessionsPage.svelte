@@ -125,7 +125,7 @@
 	{#if going}<GoLive onclose={() => ((going = false), void directory.load())} />{/if}
 
 	{#if directory.on === false}
-		<p class="ss-empty">Sessions are coming soon.</p>
+		<p class="ss-empty">{directory.offline ? 'Stash is offline: Sessions need the internet.' : 'Sessions are coming soon.'}</p>
 	{:else}
 		{#if $joined === false}
 			<div style="margin-top: 20px"><JoinCommunity lead="Join Community to tune in: it’s how a session knows you’re there, and lets you request songs, react and vote." /></div>

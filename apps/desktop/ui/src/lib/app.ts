@@ -587,7 +587,8 @@ const player: PlayerAPI = {
 		await chain.catch(() => {});
 		try {
 			const a = await core.playSongs([song], { positionMs, play: autoplay && !listenHeld, from: l.station });
-			const qid = a.qids?.[0];
+			// The song it starts on (with shuffle on it need not be the first queued).
+			const qid = a.start_qid ?? a.qids?.[0];
 			roomSong = { key: item.key, qid: typeof qid === 'number' ? `q${qid}` : null };
 		} catch (e) {
 			roomSong = null;

@@ -1117,7 +1117,7 @@ export type DescribedSong = { title: string; artist: string; album?: string; isr
  * add-ons. Not grown by autoplay. Answers the queue ids of the songs queued (`q<qid>` in the window), in order.
  */
 export const playSongs = (songs: DescribedSong[], o: { at?: number; positionMs?: number; play?: boolean; from?: string } = {}) =>
-	post<{ queued: number; qids?: number[] }>('/api/player/songs', {
+	post<{ queued: number; qids?: number[]; start_qid?: number | null }>('/api/player/songs', {
 		songs,
 		at: o.at ?? 0,
 		position_ms: Math.max(0, Math.round(o.positionMs ?? 0)),
