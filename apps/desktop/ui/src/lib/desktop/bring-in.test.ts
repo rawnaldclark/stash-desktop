@@ -90,6 +90,11 @@ describe('what is ticked as the screen opens', () => {
 		});
 		expect(firstPicks(offer, { ...all, choice: { ...choice, all_likes_left_out: true, plays: true } })).toMatchObject({ likes: [], plays: true });
 		expect(firstPicks(offer, { ...lib, choice: { ...choice, likes_left_out: [] } }).likes).toEqual(['all']);
+		// All your downloads as it was left; ticked for a choice kept before it was kept.
+		expect(firstPicks(offer, { ...all, choice: { ...choice, downloads: false } }).downloads).toBe(false);
+		expect(firstPicks(offer, { ...all, choice }).downloads).toBe(true);
+		expect(takeBody(offer, all, { ...firstPicks(offer, all), downloads: false })).toMatchObject({ library: { downloads: false } });
+		expect(takeBody({ ...offer, songs: [song({ here: true })] }, all, firstPicks(offer, all))).toMatchObject({ library: { downloads: true } });
 	});
 });
 
@@ -142,7 +147,7 @@ describe('the take', () => {
 		expect(takeBody(offer, lib, firstPicks(offer, lib))).toEqual({
 			sent_at_ms: 8,
 			all: true,
-			library: { likes: true, plays: true, playlists: ['app-1', 'sp-1'], only_here: false }
+			library: { likes: true, plays: true, playlists: ['app-1', 'sp-1'], only_here: false, downloads: true }
 		});
 		expect(takeBody(offer, lib, flip(firstPicks(offer, lib), 'likes:all'))).toMatchObject({ library: { likes: false } });
 	});

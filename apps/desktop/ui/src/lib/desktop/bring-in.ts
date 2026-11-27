@@ -42,6 +42,8 @@ export type LeftOut = {
 	plays: boolean;
 	playlists_left_out: string[];
 	only_here: boolean;
+	/** Whether All your downloads was ticked; absent from a choice kept before it was kept. */
+	downloads?: boolean;
 };
 
 /** Songs liked on one service (`all`: an older phone's likes, which say nowhere). */
@@ -77,7 +79,7 @@ export function firstPicks(offer: Offer, lib: PhoneLibrary | null): Picks {
 	// Brought in before: as it was left, so what was left out then stays out, and what is new since comes.
 	const left = lib?.choice ?? null;
 	return {
-		downloads: offer.songs.some((s) => !s.here),
+		downloads: offer.songs.some((s) => !s.here) && (left?.downloads ?? true),
 		likes: left?.all_likes_left_out ? [] : likeParts(lib).map((l) => l.service).filter((s) => !left?.likes_left_out.includes(s)),
 		plays: !!lib && lib.plays > 0 && (left?.plays ?? true),
 		lists: (lib?.playlists ?? []).map((p) => p.id).filter((id) => !left?.playlists_left_out.includes(id)),
@@ -143,7 +145,14 @@ export function takeBody(offer: Offer, lib: PhoneLibrary | null, picks: Picks): 
 		sent_at_ms: offer.sent_at_ms,
 		...songs,
 		// The services whose likes come; an older phone's likes say nowhere, so all of them or none.
-		library: { likes: lib.likes.by?.length ? picks.likes : picks.likes.length > 0, plays: picks.plays, playlists: picks.lists, only_here: picks.onlyHere }
+		library: {
+			likes: lib.likes.by?.length ? picks.likes : picks.likes.length > 0,
+			plays: picks.plays,
+			playlists: picks.lists,
+			only_here: picks.onlyHere,
+			// Not left out when the send had no song to bring.
+			downloads: picks.downloads || !offer.songs.some((s) => !s.here)
+		}
 	};
 }
 

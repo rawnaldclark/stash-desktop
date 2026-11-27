@@ -4305,6 +4305,7 @@ mod tests {
             plays,
             playlists: playlists.iter().map(|p| p.to_string()).collect(),
             only_here,
+            downloads: true,
         }
     }
 
@@ -4324,6 +4325,7 @@ mod tests {
             "plays": plays,
             "playlists_left_out": playlists,
             "only_here": only_here,
+            "downloads": true,
         })
     }
 
@@ -4814,6 +4816,26 @@ mod tests {
         assert_eq!(here.take(&again, &mut tries).unwrap().state, "done");
         let titles: Vec<String> = liked(&here).into_iter().map(|(title, _)| title).collect();
         assert_eq!(titles.len(), 5, "the four likes and the send's own: {titles:?}");
+    }
+
+    #[test]
+    fn all_your_downloads_left_out_is_kept_and_a_choice_kept_before_it_brings_them() {
+        let here = had_two("library-keep-downloads");
+        let phone = sending_with("Test phone", live_at(8));
+        let mut tries = Tries::default();
+        here.take(&phone, &mut tries);
+        let asked = library::Asked { downloads: false, ..parts(true, true, &[], false) };
+        assert!(choose_with(&here, 8, Choice::All, asked).is_ok());
+        here.take(&phone, &mut tries);
+        let kept: serde_json::Value = serde_json::from_str(&setting(&here, library::CHOICE_SETTING).unwrap()).unwrap();
+        assert_eq!(kept["Test phone"]["downloads"], false);
+        // A choice kept before All your downloads was: as if it was ticked.
+        let mut old = left_out(&[], false, true, &[], false);
+        old.as_object_mut().unwrap().remove("downloads");
+        keep_left_out(&here, old);
+        let again = one_more("Test phone", 9, true, &live_at(9));
+        here.take(&again, &mut tries);
+        assert_eq!(summed_up(&here).unwrap()["choice"]["downloads"], true);
     }
 
     #[test]

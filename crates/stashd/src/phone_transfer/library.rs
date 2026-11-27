@@ -169,6 +169,9 @@ pub(super) struct Asked {
     /// Of each part, only the songs that are files here (sent as files with the send, or files here already): nothing
     /// comes in that only streams.
     pub only_here: bool,
+    /// Whether every song the send offered was asked for (All your downloads), or not left out of it: the window sends it
+    /// with the library; true when it does not say.
+    pub downloads: bool,
 }
 
 /// What was left out of a phone's library when it was brought in, kept for the phone (by its name): each later send's
@@ -187,6 +190,15 @@ pub(super) struct LeftOut {
     pub playlists_left_out: Vec<String>,
     /// As [`Asked::only_here`].
     pub only_here: bool,
+    /// As [`Asked::downloads`]: a later send's window starts with All your downloads as it was left. True for a choice
+    /// kept before it was kept.
+    #[serde(default = "every_download")]
+    pub downloads: bool,
+}
+
+/// A choice kept before All your downloads was: every song came, as a window then started.
+fn every_download() -> bool {
+    true
 }
 
 impl LeftOut {
@@ -221,6 +233,7 @@ impl LeftOut {
                 .filter(|id| !chosen.contains(id.as_str()))
                 .collect(),
             only_here: asked.only_here,
+            downloads: asked.downloads,
         }
     }
 
@@ -299,6 +312,10 @@ pub(super) fn asked(body: &Value) -> Result<Option<Asked>, &'static str> {
         plays: yes("plays")?,
         playlists,
         only_here: yes("only_here")?,
+        downloads: match asked.get("downloads") {
+            None | Some(Value::Null) => true,
+            Some(v) => v.as_bool().ok_or("downloads is true or false")?,
+        },
     }))
 }
 
