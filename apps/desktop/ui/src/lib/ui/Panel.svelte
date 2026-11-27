@@ -8,12 +8,16 @@
 	let Lyrics = $state<Component<{ item: QueueItem }> | null>(null);
 	/** Up next (with drag and swipe): its own chunk, fetched when the window is idle (the layout) or the first time it shows. */
 	let Next = $state<Component | null>(null);
+	/** A session's room (lib/sessions/): its own chunk, fetched the first time the Room tab shows. */
+	let Room = $state<Component | null>(null);
 
 	const cur = $derived(S.v.current);
 	const np = $derived(ui.np);
 	const sheetMode = $derived(ui.sheetMode);
 	const sheetOpen = $derived(sheetMode && ui.sheet);
 	const closed = $derived(!sheetMode && !np && !ui.panelOpen);
+	const roomTab = $derived(ui.room && !sheetMode);
+	const showRoom = $derived(roomTab && ui.panelTab === 'room');
 	const showUpNext = $derived(sheetMode ? ui.sheet : ui.panelTab === 'next');
 	const lyricsOn = $derived(!sheetMode && ui.panelOpen && ui.panelTab === 'lyrics');
 	/** Where the lyric column is shown: docked (not Now playing), the right column (Now playing, wide), or the middle of compact Now playing. */
@@ -22,6 +26,10 @@
 	$effect(() => {
 		// a load cut short (a navigation) must not surface as an unhandled rejection; the next time lyrics show it is asked again
 		if (lyricsShown && !Lyrics) void import('./lyrics/LyricsColumn.svelte').then((m) => (Lyrics = m.default as Component<{ item: QueueItem }>)).catch(() => {});
+	});
+
+	$effect(() => {
+		if (showRoom && !Room) void import('../sessions/RoomPanel.svelte').then((m) => (Room = m.default as Component)).catch(() => {});
 	});
 
 	$effect(() => {
@@ -38,12 +46,13 @@
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<aside class="panel" class:sheet-open={sheetOpen} inert={closed || (sheetMode && !sheetOpen)} aria-label="Lyrics and Up next" onkeydown={key}>
+<aside class="panel" class:sheet-open={sheetOpen} inert={closed || (sheetMode && !sheetOpen)} aria-label={roomTab ? 'The room, Lyrics and Up next' : 'Lyrics and Up next'} onkeydown={key}>
 	<div class="pn-head">
 		{#if sheetMode}
 			<h2 class="pn-h">Up next</h2>
 		{:else}
 			<div class="seg" role="tablist" aria-label="Side panel">
+				{#if roomTab}<button type="button" role="tab" id="tab-room" aria-selected={ui.panelTab === 'room'} aria-controls="pn-body" class="seg-i" onclick={() => ui.setTab('room')}>Room</button>{/if}
 				<button type="button" role="tab" id="tab-lyrics" aria-selected={ui.panelTab === 'lyrics'} aria-controls="pn-body" class="seg-i" onclick={() => ui.setTab('lyrics')}>Lyrics</button>
 				<button type="button" role="tab" id="tab-next" aria-selected={ui.panelTab === 'next'} aria-controls="pn-body" class="seg-i" onclick={() => ui.setTab('next')}>Up next</button>
 			</div>
@@ -51,8 +60,8 @@
 		<button type="button" class="pn-close" aria-label="Close panel" title="Close" onclick={() => (sheetMode ? (ui.sheet = false) : (ui.panelOpen = false))}><Icon name="close" /></button>
 		<i class="pn-handle" aria-hidden="true"></i>
 	</div>
-	<div class="pn-body" id="pn-body" role={sheetMode ? undefined : 'tabpanel'} aria-labelledby={sheetMode ? undefined : ui.panelTab === 'lyrics' ? 'tab-lyrics' : 'tab-next'}>
-		{#if showUpNext}<div class="pn-queue">{#if Next}{@const N = Next}<N />{/if}</div>{:else if !cur && !sheetMode}<p class="q-empty pn-idle">Lyrics show up here while a song plays.</p>{/if}
+	<div class="pn-body" id="pn-body" role={sheetMode ? undefined : 'tabpanel'} aria-labelledby={sheetMode ? undefined : ui.panelTab === 'room' && roomTab ? 'tab-room' : ui.panelTab === 'lyrics' ? 'tab-lyrics' : 'tab-next'}>
+		{#if showRoom}<div class="pn-room">{#if Room}{@const R = Room}<R />{/if}</div>{:else if showUpNext}<div class="pn-queue">{#if Next}{@const N = Next}<N />{/if}</div>{:else if !cur && !sheetMode}<p class="q-empty pn-idle">Lyrics show up here while a song plays.</p>{/if}
 	</div>
 </aside>
 

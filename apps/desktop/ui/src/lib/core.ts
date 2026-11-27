@@ -1106,3 +1106,22 @@ export const mornyeCallback = (key: string, url: string) => post<unknown>('/api/
 export const mornyeLogout = (key: string) => post<{ ok: boolean }>('/api/mornye/logout', { key });
 export const mornyeAction = (key: string, action: string, input?: Record<string, unknown>, token?: string) =>
 	post<MornyeActed>('/api/mornye/action', { key, action, input: input ?? null, token: token ?? null });
+
+// ------------------------------------------------------------------------------------------------ Sessions
+
+/** A song someone else described (a session's), for `POST /api/player/songs`. */
+export type DescribedSong = { title: string; artist: string; album?: string; isrc?: string; duration_ms?: number; art?: string; youtube?: string };
+
+/**
+ * Plays songs described by someone else (a session's): the library's own copy when it has the song, else found through the
+ * add-ons. Not grown by autoplay. Answers the queue ids of the songs queued (`q<qid>` in the window), in order.
+ */
+export const playSongs = (songs: DescribedSong[], o: { at?: number; positionMs?: number; play?: boolean; from?: string } = {}) =>
+	post<{ queued: number; qids?: number[] }>('/api/player/songs', {
+		songs,
+		at: o.at ?? 0,
+		position_ms: Math.max(0, Math.round(o.positionMs ?? 0)),
+		play: o.play !== false,
+		...(o.from ? { from: o.from } : {})
+	});
+

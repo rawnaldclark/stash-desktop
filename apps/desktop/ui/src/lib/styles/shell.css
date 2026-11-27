@@ -432,3 +432,16 @@ body.carrying, body.carrying * { cursor: grabbing !important; user-select: none;
 .rd-drag { z-index: 5; background: var(--wp-field); box-shadow: 0 10px 28px -10px rgb(0 0 0 / .55); transition: none !important; }
 .rd-drag .rd-h { cursor: grabbing; }
 @media (prefers-reduced-motion: reduce) { .rd-active > :not(.rd-drag) { transition: none; } }
+
+/* Sessions (lib/sessions/): the Room tab, the player bar while tuned in or live, Request on song rows */
+.pn-room { padding: 8px 16px calc(var(--bar-clear) + 12px); min-height: 100%; }
+.ss-bar-live { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; color: #f87171; font: 600 11px/1.2 var(--font-body); letter-spacing: .05em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-bar-live::before { content: ''; flex: none; width: 6px; height: 6px; border-radius: 50%; background: #ef4444; }
+.ss-bar-who { text-align: center; color: var(--wp-text-2); font-size: 12px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-bar-who b { color: var(--wp-text); font-weight: 600; }
+.trk.locked { cursor: default; }
+.trk.locked .knob-w { display: none; }
+.tr-req { display: inline-flex; align-items: center; height: 28px; margin-right: 4px; padding: 0 12px; border-radius: 999px; background: var(--wp-text); color: var(--wp-main); font: 600 12px/1 var(--font-body); white-space: nowrap; }
+.tr-req:hover { opacity: .9; }
+.trk-row.requesting .trk-main .tr-d { display: none; } /* the Request pill takes the length's place */
+

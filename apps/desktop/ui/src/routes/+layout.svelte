@@ -52,6 +52,12 @@
 	});
 
 	const np = $derived(page.url.pathname === '/now');
+	/** Now playing while tuned in to a session: the room, full screen (lib/sessions/RoomFull.svelte, the Sessions chunk). */
+	let RoomFull = $state<Component | null>(null);
+	const roomFull = $derived(np && !!S.v.listening);
+	$effect(() => {
+		if (roomFull && !RoomFull) void import('../lib/sessions/RoomFull.svelte').then((m) => (RoomFull = m.default as Component)).catch(() => {});
+	});
 	/** The mini player's window: the page alone, none of the full window around it. */
 	const mini = $derived(page.url.pathname === '/mini');
 	const size = $derived(ui.size);
@@ -247,7 +253,7 @@
 			</div>
 		</main>
 		<Panel />
-		{#if np}<NowPlaying />{/if}
+		{#if np}{#if roomFull}{#if RoomFull}{@const R = RoomFull}<R />{/if}{:else}<NowPlaying />{/if}{/if}
 		{#if !np}<PlayerBar />{/if}
 	</div>
 	{#if ContextMenu}<ContextMenu />{/if}

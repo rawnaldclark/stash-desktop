@@ -195,7 +195,11 @@ class UIState {
 	 */
 	deleting = $state<{ what: { ids: number[] } | { artist: number }; title: string; then?: (removed: number) => void } | null>(null);
 	/** The desktop has no lyrics yet, so the panel opens on Up next unless the listener chose Lyrics. */
-	panelTab = $state<'lyrics' | 'next'>(LS.get('stash.panelTab') === 'lyrics' ? 'lyrics' : 'next');
+	panelTab = $state<'lyrics' | 'next' | 'room'>(LS.get('stash.panelTab') === 'lyrics' ? 'lyrics' : 'next');
+	/** Tuned in to a session, or just out of one (lib/sessions/): the side panel has its Room tab (the room, or why it ended). */
+	room = $state(false);
+	/** This window hosts a session (lib/sessions/): its station's name, for the player bar's LIVE line. */
+	hosting = $state<string | null>(null);
 	/** On the Now playing route (the big lyrics). */
 	np = $state(false);
 	/** The Up next sheet (Now playing below 900 px). */
@@ -246,12 +250,13 @@ class UIState {
 		if (this.sheetMode) this.sheet = !this.sheet;
 		else this.toggleTab('next');
 	}
-	setTab(t: 'lyrics' | 'next') {
+	setTab(t: 'lyrics' | 'next' | 'room') {
 		this.panelTab = t;
 		this.panelOpen = true;
-		LS.set('stash.panelTab', t);
+		// The Room tab lasts as long as the session: the next start opens on Lyrics or Up next.
+		if (t !== 'room') LS.set('stash.panelTab', t);
 	}
-	toggleTab(t: 'lyrics' | 'next') {
+	toggleTab(t: 'lyrics' | 'next' | 'room') {
 		if (this.panelOpen && this.panelTab === t) this.panelOpen = false;
 		else this.setTab(t);
 	}
