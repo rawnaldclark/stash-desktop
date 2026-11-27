@@ -176,7 +176,7 @@ fn origin_of(url: &Url) -> String {
     }
 }
 
-fn capped(text: &str) -> String {
+pub(crate) fn capped(text: &str) -> String {
     text.chars().take(TEXT_CAP).collect()
 }
 
@@ -1154,6 +1154,8 @@ pub(crate) struct State {
     pub(crate) tidal: crate::tidal::Tidal,
     /// Opens Google's sign-in for YouTube in a window, when the core runs inside one.
     pub(crate) sign_in: Option<SignInShell>,
+    /// Sessions: where the share service is, and the queue autoplay leaves alone (see [`crate::sessions`]).
+    pub(crate) sessions: crate::sessions::Sessions,
 }
 
 /// An add-on as its link gave it when it was checked, waiting for the listener to say yes. What is taken is what they
@@ -1500,6 +1502,7 @@ impl Core {
                 lan: crate::lan::Lan::default(),
                 away: crate::away::Away::default(),
                 tidal,
+                sessions: crate::sessions::Sessions::from_env(),
             },
         })
         .map(|mut core: Self| {
@@ -1577,6 +1580,13 @@ impl Core {
 
     pub fn port(&self) -> u16 {
         self.state.port
+    }
+
+    /// Sessions through the share service at `base` (`off`: none) in place of the one `STASH_SHARE_URL` names or
+    /// stashfm.app: a test's, or one run on this computer (see [`crate::sessions`]).
+    pub fn with_share(mut self, base: &str) -> Self {
+        self.state.sessions = crate::sessions::Sessions::at(Some(base));
+        self
     }
 
     /// Reads Stash's config (which names Stash's Tidal) at `url`, checked with `public_key`, in place of the one this
@@ -1859,7 +1869,16 @@ fn answer(state: &State, mut request: Request) -> bool {
     if let Some(origin) = origin.filter(|o| allowed_origin(o, port)) {
         response = response
             .with_header(header("Access-Control-Allow-Origin", &origin))
-            .with_header(header("Access-Control-Allow-Headers", "Content-Type"))
+            // Sessions' routes take the window's Community key in a header of its own, and a station is changed,
+            // voted on and deleted with PATCH, PUT and DELETE (see `sessions`): the window asks first, and is told so.
+            .with_header(header(
+                "Access-Control-Allow-Headers",
+                "Content-Type, X-Stash-Community-Key",
+            ))
+            .with_header(header(
+                "Access-Control-Allow-Methods",
+                "GET, HEAD, POST, PUT, PATCH, DELETE",
+            ))
             // The counts a playlist file goes out with (see `playlist_files`).
             .with_header(header(
                 "Access-Control-Expose-Headers",
@@ -1980,7 +1999,7 @@ fn listed_items(
 
 /// Offline, a queue keeps only the songs that play with no connection, and begins at the song at `start` or, when that
 /// one does not play here, the next that does. `None`: none from `start` on does.
-fn offline_queue(
+pub(crate) fn offline_queue(
     state: &State,
     items: Vec<QueueItem>,
     start: usize,
@@ -2145,6 +2164,10 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
     if *request.method() != Method::Post || !path.starts_with("/api/player/") {
         return Ok(None);
     }
+    // Songs someone else describes (a session's room), played here. It answers what it queued, not the player's state.
+    if path == "/api/player/songs" {
+        return crate::sessions::play_songs(state, request).map(Some);
+    }
     let Ok(playing) = player else {
         return Ok(Some(player_reply(state)));
     };
@@ -2242,6 +2265,8 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
                 items,
                 body.get("next").and_then(Value::as_bool).unwrap_or(false),
             );
+            // Songs added by the listener make the queue theirs: a session's queue is autoplay's again.
+            state.sessions.hold_autoplay(None);
         }
         "/api/player/remove" => {
             let place = body
@@ -2366,7 +2391,7 @@ const LRCLIB_SETTING: &str = "lyrics.lrclib";
 /// The setting that keeps Stash offline ("1").
 const OFFLINE_SETTING: &str = "offline";
 /// Songs asked for while offline, none of which plays with no connection.
-const NOT_HERE_OFFLINE: &str = "Stash is offline, and none of that is on this computer";
+pub(crate) const NOT_HERE_OFFLINE: &str = "Stash is offline, and none of that is on this computer";
 
 /// Stash is offline: nothing is asked of the network for music (no add-on, no LRCLIB, no scrobbling service).
 /// Whether songs can come from the add-ons now: online, with an add-on that streams.
@@ -3271,6 +3296,9 @@ fn route(state: &State, request: &mut Request) -> Result<(Reply, bool)> {
         return Ok((response, false));
     }
     if let Some(response) = player_route(state, request, &path)? {
+        return Ok((response, false));
+    }
+    if let Some(response) = crate::sessions::route(state, request, &path)? {
         return Ok((response, false));
     }
     if let Some(response) = addons_route(state, request, &path, &param)? {

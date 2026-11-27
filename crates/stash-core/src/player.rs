@@ -396,6 +396,17 @@ fn tidy(description: &str) -> String {
     words.replace("( ", "(").replace(" )", ")")
 }
 
+/// A queue [`Player::play_from_at`] put in place: what it is known by in the player's state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Queued {
+    /// Its id ([`PlayerState::queue_id`]): another id means it was replaced since.
+    pub queue_id: u64,
+    /// Its tracks' queue numbers ([`QueueItem::qid`]), in its order.
+    pub qids: Vec<u64>,
+    /// The queue number of the track it starts (or rests) on; `None` for an empty queue.
+    pub start: Option<u64>,
+}
+
 /// A queue to bring back as it was left: nothing plays until the listener says so.
 #[derive(Debug, Clone, Default)]
 pub struct Kept {
@@ -1265,17 +1276,31 @@ impl Player {
 
     /// Replaces the queue with `items` and plays from place `start`; `from` says what the queue is, in the
     /// listener's words. With shuffle on, the track at `start` plays first and the rest follow in a new order.
-    pub fn play_from(
+    pub fn play_from(&self, items: Vec<QueueItem>, start: usize, from: Option<String>) -> Result<()> {
+        self.play_from_at(items, start, from, 0.0, true).map(|_| ())
+    }
+
+    /// Replaces the queue with `items`, as [`Player::play_from`] does, and starts the track at `start` from `seconds`
+    /// in. The place is taken once the track has loaded, so it holds for a track an add-on is still being asked for (a
+    /// seek asked right after a start could land on the track before it). With `play` false nothing plays: the player
+    /// rests on that track, `seconds` in, and play starts it from there. Answers what was queued.
+    pub fn play_from_at(
         &self,
         mut items: Vec<QueueItem>,
         start: usize,
         from: Option<String>,
-    ) -> Result<()> {
+        seconds: f64,
+        play: bool,
+    ) -> Result<Queued> {
         if items.is_empty() {
-            return self.stop();
+            self.stop()?;
+            let queue_id = self.ctx.shared.lock().unwrap().queue_id;
+            return Ok(Queued { queue_id, qids: Vec::new(), start: None });
         }
+        let seconds = if seconds.is_finite() { seconds.max(0.0) } else { 0.0 };
         let mut start = start.min(items.len() - 1);
-        {
+        // The queue is put in place and its start begun under one hold: nothing else starts in between.
+        let (queued, begun) = {
             let mut shared = self.ctx.shared.lock().unwrap();
             shared.number(&mut items);
             shared.original = None;
@@ -1289,9 +1314,26 @@ impl Player {
             shared.from = from;
             shared.version += 1;
             shared.queue_id += 1;
+            let queued = Queued {
+                queue_id: shared.queue_id,
+                qids: shared.queue.iter().map(|t| t.qid).collect(),
+                start: Some(shared.queue[start].qid),
+            };
+            let begun = Self::begin(&mut shared, start, Some(seconds));
+            if !play {
+                // Nothing starts: the player rests on the track, `seconds` in (what the engine plays is stopped below).
+                shared.starting = None;
+                shared.pending_seek = None;
+                shared.rest = Some((shared.queue[start].qid, seconds));
+            }
+            (queued, begun)
+        };
+        if !play {
+            self.ctx.engine.stop()?;
+        } else if let Some((generation, waits)) = begun {
+            self.go(generation, waits);
         }
-        self.start_at(start);
-        Ok(())
+        Ok(queued)
     }
 
     /// Replaces what comes after the playing track with `items`: the track goes on playing, as the first of a queue

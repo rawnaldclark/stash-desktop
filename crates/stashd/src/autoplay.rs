@@ -44,6 +44,8 @@ pub(crate) fn look(state: &State, player: &Player) {
         || (index + 1 != now.queue_len && !now.nothing_after)
         || radio.autoplay_after.load(Ordering::Relaxed) == current.qid
         || radio.carries_on(now.queue_id)
+        // A session's queue: the room's next song follows, and nothing of autoplay's plays before it.
+        || state.sessions.holds_autoplay(now.queue_id)
     {
         return;
     }
