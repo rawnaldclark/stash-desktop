@@ -10,8 +10,10 @@
 	import { onMount } from 'svelte';
 	import { get, post, said } from '../core';
 	import Icon from '../ui/Icon.svelte';
+	import { ui } from '../ui/state.svelte';
 	import { songs } from '../ui/format';
 	import type { Offer } from './phone-songs';
+	import { broughtLine, type Brought } from './bring-in';
 
 	type Now = {
 		state: 'idle' | 'connected' | 'preparing' | 'ready' | 'taking' | 'stalled' | 'done' | 'stopped' | 'withdrawn' | 'cannot_save';
@@ -39,6 +41,12 @@
 		folder: string | null;
 		library: boolean;
 		drive: string | null;
+		/** The send waiting carries the phone's library (likes, plays, playlists): chosen from on Bring in your music. */
+		with_library?: boolean;
+		/** What of a library comes in was chosen before for this phone: a take with no choice brings in the same. */
+		library_choice_kept?: boolean;
+		/** What the phone's library brought with this take, when it came in. */
+		brought?: Brought | null;
 	};
 	let now = $state<Now | null>(null);
 	let closedAt = $state(0);
@@ -83,7 +91,7 @@
 	const gb = (bytes: number) => (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`);
 	/** Every song of a send in, said so (one song, or none, as such). */
 	const allIn = (n: number) => (n === 0 ? '' : n === 1 ? 'The song came in. ' : `All ${songs(n)} came in. `);
-	const shown = $derived(!!now && now.state !== 'idle' && now.at_ms > closedAt && page.url.pathname !== '/phone');
+	const shown = $derived(!!now && now.state !== 'idle' && now.at_ms > closedAt && page.url.pathname !== '/phone' && page.url.pathname !== '/bring-in' && ui.mode !== null);
 	const from = $derived(now?.phone ?? 'Your phone');
 	/** The card's heading, its lines, and its bar (a share from 0 to 1, null for one that moves on its own, undefined for none). */
 	const card = $derived.by((): { title: string; lines: string[]; bar: number | null | undefined } | null => {
@@ -95,6 +103,12 @@
 				return { title: `${from} is getting songs ready`, lines: [`${songs(now.ready)} ready so far. You choose which come in next.`], bar: null };
 			case 'ready': {
 				const fresh = now.total - now.here;
+				if (now.with_library)
+					return {
+						title: now.total ? `Your music is waiting on ${from}` : `Your likes, playlists and plays are waiting on ${from}`,
+						lines: [now.total ? `${songs(now.total)}${fresh ? ` · ${gb(now.bytes_total)}` : ', all on this computer already'}, with your likes, playlists and plays.` : 'Choose what comes in.', trouble ?? ''].filter(Boolean),
+						bar: undefined
+					};
 				return {
 					title: `${songs(now.total)} waiting on ${from}`,
 					lines: [fresh ? `${now.here ? `${now.here.toLocaleString()} on this computer already · ` : ''}${gb(now.bytes_total)} in all` : 'All of them are on this computer already.', trouble ?? ''].filter(Boolean),
@@ -150,16 +164,21 @@
 						};
 			}
 			case 'done': {
-				const lines = [`${songs(now.taken)} added to your downloads.`];
+				// A sync that brought no new song but the phone's library is the library brought up to date, not nothing.
+				const synced = !!now.brought && !now.taken && !now.had && !now.not_kept && !now.failed;
+				const lines = synced ? [] : [`${songs(now.taken)} added to your downloads.`];
+				if (now.brought) lines.push(broughtLine(now.brought));
 				if (now.had) lines.push(`${songs(now.had)} you had here already.`);
 				if (now.not_kept) lines.push(`${songs(now.not_kept)} in your library to download here: their files can't be kept.`);
-				if (now.left) lines.push(now.left === 1 ? 'The other song stays in Stash on the phone.' : `The other ${now.left.toLocaleString()} stay in Stash on the phone.`);
+				if (now.left && synced) lines.push(now.left === 1 ? 'The song you left out stays on the phone.' : `The ${now.left.toLocaleString()} songs you left out stay on the phone.`);
+				else if (now.left) lines.push(now.left === 1 ? 'The other song stays in Stash on the phone.' : `The other ${now.left.toLocaleString()} stay in Stash on the phone.`);
 				if (now.failed && now.trying_again) lines.push(`${songs(now.failed)} didn't come in yet: the computer tries ${now.failed === 1 ? 'it' : 'them'} again.`);
 				else if (now.failed) lines.push(`${songs(now.failed)} didn't come in. Send again from the phone to try them.`);
 				else if (now.list_left && now.trying_again) lines.push('Keep the phone plugged in: the computer finishes with it in a moment.');
 				else if (now.list_left) lines.push('Unplug the phone and plug it back in so the computer can finish with it.');
 				else if (now.cleared || now.left) lines.push('You can unplug the phone.');
-				return { title: now.failed ? `Songs from ${from}, with trouble` : `Songs from ${from} are here`, lines, bar: undefined };
+				const title = now.failed ? `Songs from ${from}, with trouble` : synced ? `${from} is up to date` : `Songs from ${from} are here`;
+				return { title, lines, bar: undefined };
 			}
 			default:
 				return null;
@@ -181,8 +200,12 @@
 			{/if}
 			{#if now.state === 'ready'}
 				<div class="ph-do">
-					<button type="button" class="btn" onclick={() => void goto('/phone')}>Choose songs</button>
-					{#if now.total > now.here}
+					{#if now.with_library}
+						<button type="button" class="btn" onclick={() => void goto('/bring-in')}>Choose what comes in</button>
+					{:else}
+						<button type="button" class="btn" onclick={() => void goto('/phone')}>Choose songs</button>
+					{/if}
+					{#if now.total > now.here && (!now.with_library || now.library_choice_kept)}
 						<button type="button" class="btn ghost" disabled={starting} onclick={takeNew}>{starting ? 'Starting…' : `Take all ${(now.total - now.here).toLocaleString()} new`}</button>
 					{/if}
 				</div>
