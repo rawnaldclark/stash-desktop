@@ -102,9 +102,12 @@ fn a_send_with_the_phones_library_is_summed_up_and_brought_in_as_chosen() {
     let halo = json!({ "title": "Halo", "artist": "Beyoncé", "artwork": [{ "url": "https://art/halo" }] });
     let library = json!({
         "kind": "stash-web-library", "v": 1, "generator": "Stash for Android", "sent_at_ms": SENT_AT,
-        "likes": [{ "item": ivy, "likedAt": 1000 }, { "item": halo, "likedAt": 1001 }],
+        "likes": [
+            { "item": ivy, "likedAt": 1000, "liked_on": ["stash"] },
+            { "item": halo, "likedAt": 1001, "liked_on": ["spotify"] },
+        ],
         "playlists": [
-            { "id": "app-9", "name": "Daily Mix 1", "from": "spotify", "items": [halo] },
+            { "id": "app-9", "name": "Daily Mix 1", "from": "spotify", "kind": "mix", "items": [halo] },
             { "id": "app-2", "name": "Night drive", "items": [ivy, nights] },
         ],
         "history": [{ "item": ivy, "playedAt": 2000 }, { "item": nights, "playedAt": 1500 }],
@@ -154,12 +157,19 @@ fn a_send_with_the_phones_library_is_summed_up_and_brought_in_as_chosen() {
             "sent_at_ms": SENT_AT,
             "phone": "Test folder",
             "downloads": { "songs": 2, "bytes": 2 * size, "here": 0 },
-            "likes": { "songs": 2, "downloaded": 1 },
+            "likes": {
+                "songs": 2,
+                "downloaded": 1,
+                "by": [
+                    { "service": "stash", "songs": 1, "downloaded": 1 },
+                    { "service": "spotify", "songs": 1, "downloaded": 0 },
+                ],
+            },
             "plays": 2,
             "playlists": [
-                { "id": "app-2", "name": "Night drive", "from": null, "songs": 2, "downloaded": 2,
+                { "id": "app-2", "name": "Night drive", "from": null, "kind": null, "songs": 2, "downloaded": 2,
                   "covers": ["https://art/ivy"] },
-                { "id": "app-9", "name": "Daily Mix 1", "from": "spotify", "songs": 1, "downloaded": 0,
+                { "id": "app-9", "name": "Daily Mix 1", "from": "spotify", "kind": "mix", "songs": 1, "downloaded": 0,
                   "covers": ["https://art/halo"] },
             ],
             "albums": [{ "title": "Blonde", "artist": "Frank Ocean", "art_url": "https://i.scdn.co/blonde", "songs": 2 }],
@@ -175,9 +185,15 @@ fn a_send_with_the_phones_library_is_summed_up_and_brought_in_as_chosen() {
     assert_eq!(status, 409);
     let (status, _) = client.post("/api/phone/take", json!({ "sent_at_ms": SENT_AT, "all": true, "library": "all" }));
     assert_eq!(status, 400);
+    let (status, _) = client.post(
+        "/api/phone/take",
+        json!({ "sent_at_ms": SENT_AT, "all": true, "library": { "likes": ["tidal"] } }),
+    );
+    assert_eq!(status, 400);
     assert_eq!(client.get("/api/phone/library").0, 200, "still waiting");
 
-    let chose = json!({ "likes": true, "plays": true, "playlists": ["app-2"], "only_here": false });
+    // The likes made in Stash only.
+    let chose = json!({ "likes": ["stash"], "plays": true, "playlists": ["app-2"], "only_here": false });
     let (status, taking) = client.post(
         "/api/phone/take",
         json!({ "sent_at_ms": SENT_AT, "all": true, "library": chose }),
@@ -189,8 +205,8 @@ fn a_send_with_the_phones_library_is_summed_up_and_brought_in_as_chosen() {
         (Some(2), Some(true), Some(true))
     );
 
-    // The likes (Ivy a file, Halo to stream), the playlist chosen and the plays; the library and the list went from the
-    // phone, and then the folder.
+    // The like made in Stash (Ivy, a file; not Halo, liked on Spotify), the playlist chosen and the plays; the library
+    // and the list went from the phone, and then the folder.
     let (_, liked) = client.get("/api/liked");
     let mut liked: Vec<(String, bool)> = liked["rows"]
         .as_array()
@@ -199,7 +215,7 @@ fn a_send_with_the_phones_library_is_summed_up_and_brought_in_as_chosen() {
         .map(|r| (r["title"].as_str().unwrap().to_string(), r["here"].as_bool().unwrap()))
         .collect();
     liked.sort();
-    assert_eq!(liked, [("Halo".to_string(), false), ("Ivy".to_string(), true)]);
+    assert_eq!(liked, [("Ivy".to_string(), true)]);
     let (_, playlists) = client.get("/api/playlists");
     let playlists: Vec<(&str, u64)> = playlists["rows"]
         .as_array()

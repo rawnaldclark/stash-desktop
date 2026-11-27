@@ -1,15 +1,18 @@
 //! The phone's library, sent with its songs ([`stash_core::phone::LIBRARY`], beside them in the transfer folder): its
-//! likes, its playlists (its own, and those it synced from Spotify or YouTube Music) and its plays, as "Export for
-//! Stash on the web" writes them, with the send they go with.
+//! likes, its playlists (its own, its Stash Mixes, and the playlists, albums, mixes and radios it synced from Spotify,
+//! YouTube Music or SoundCloud) and its plays, as "Export for Stash on the web" writes them, with the send they go with.
+//! Saved albums come in as playlists.
 //!
 //! It is read once for a send, when the send is offered (or taken without being offered), and summed up for the
 //! window's first-run screen (`GET /api/phone/library`). The parts the listener chooses (`library` in
 //! `POST /api/phone/take`) come in before the send's songs, in one import, once for the send. A song not sent as a file
-//! comes in as a song that streams; a file sent lands on its song, as every file a take brings in does. What was
-//! chosen is kept for the phone (by its name: a playlist's id is that phone's), and each later send of its with a
-//! library brings the same parts in by itself, in step: likes and the phone's own playlists gain, a playlist synced
-//! from a streaming service is made what the phone has it as now, and a playlist not chosen never comes in uninvited.
-//! Chosen without its likes, the songs taken do not bring the likes their list marks either.
+//! comes in as a song that streams; a file sent lands on its song, as every file a take brings in does. Likes can be
+//! chosen by where they were made (in Stash, on Spotify, YouTube Music or SoundCloud). What was left out is kept for
+//! the phone (by its name: a playlist's id is that phone's), and each later send of its with a library brings in all
+//! the rest by itself, so it stays live: likes and lists the phone gains come in, likes and the phone's own playlists
+//! gain, and a playlist synced from a service (or a Stash Mix) is made what the phone has it as now. With some likes
+//! left out, the songs taken do not bring the likes their list marks either (the list does not say where they were
+//! made).
 //!
 //! A library file missing, unreadable, too big or of another send changes nothing: the send is its songs, as before.
 
@@ -146,32 +149,104 @@ pub(super) fn let_go(board: &Board, sent_at_ms: i64) {
     board.library.lock().unwrap().retain(|r| r.sent_at_ms != sent_at_ms);
 }
 
-/// What the listener chose to bring in from a phone's library.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct Parts {
-    #[serde(default)]
-    pub likes: bool,
-    #[serde(default)]
+/// Which likes `POST /api/phone/take` asks to bring in: all, none, or those made on some services.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Likes {
+    All,
+    None,
+    /// Those made on any of these (of [`web_library::LIKED_ON`], in that order); a like that does not say where it was
+    /// made counts as made in Stash.
+    On(Vec<&'static str>),
+}
+
+/// What `POST /api/phone/take` asks to bring in from the phone's library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Asked {
+    pub likes: Likes,
     pub plays: bool,
     /// The playlists chosen, by their ids in the phone's file.
-    #[serde(default)]
     pub playlists: Vec<String>,
     /// Of each part, only the songs that are files here (sent as files with the send, or files here already): nothing
     /// comes in that only streams.
-    #[serde(default)]
     pub only_here: bool,
 }
 
-impl Parts {
-    /// Whether anything is to come in.
-    fn any(&self) -> bool {
-        self.likes || self.plays || !self.playlists.is_empty()
+/// What was left out of a phone's library when it was brought in, kept for the phone (by its name): each later send's
+/// library comes in but for these, so likes made on a service since and lists the phone has gained come in too.
+/// `{likes_left_out, all_likes_left_out, plays, playlists_left_out, only_here}`, every one of them, or no choice.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct LeftOut {
+    /// The services whose likes were left out (of those the library had likes from then).
+    pub likes_left_out: Vec<String>,
+    /// Every like left out, wherever it was made.
+    pub all_likes_left_out: bool,
+    /// Whether the plays come in.
+    pub plays: bool,
+    /// The playlists left out (of those the library had then), by their ids.
+    pub playlists_left_out: Vec<String>,
+    /// As [`Asked::only_here`].
+    pub only_here: bool,
+}
+
+impl LeftOut {
+    /// What `asked` leaves out of `from`: the services `from`'s likes were made on that it does not ask for, and the
+    /// playlists `from` has that it does not choose.
+    fn of(asked: &Asked, from: &FromPhone) -> LeftOut {
+        let (likes_left_out, all_likes_left_out) = match &asked.likes {
+            Likes::All => (Vec::new(), false),
+            Likes::None => (Vec::new(), true),
+            Likes::On(on) => {
+                let left: Vec<String> = web_library::LIKED_ON
+                    .into_iter()
+                    .filter(|service| !on.contains(service))
+                    .filter(|service| from.liked_on.iter().any(|made| made_on(made).contains(service)))
+                    .map(String::from)
+                    .collect();
+                (left, false)
+            }
+        };
+        let chosen: HashSet<&str> = asked.playlists.iter().map(String::as_str).collect();
+        LeftOut {
+            likes_left_out,
+            all_likes_left_out,
+            plays: asked.plays,
+            playlists_left_out: from
+                .library
+                .playlists
+                .iter()
+                .map(|p| p.external_id.clone())
+                .filter(|id| !chosen.contains(id.as_str()))
+                .collect(),
+            only_here: asked.only_here,
+        }
+    }
+
+    /// Whether a like made on `made` comes in: one of the services it was made on was not left out.
+    fn like(&self, made: &[&'static str]) -> bool {
+        !self.all_likes_left_out
+            && made_on(made)
+                .iter()
+                .any(|service| !self.likes_left_out.iter().any(|left| left == service))
+    }
+
+    /// Whether the likes the list marks on a send's songs come in with them: only when no like is left out, as the
+    /// list does not say where a like was made.
+    fn list_likes(&self) -> bool {
+        !self.all_likes_left_out && self.likes_left_out.is_empty()
     }
 }
 
-/// What `POST /api/phone/take` asks of the phone's library (its `library`), when it asks: likes, plays and only_here
-/// true or false (false when left out), playlists by their ids.
-pub(super) fn asked(body: &Value) -> Result<Option<Parts>, &'static str> {
+/// Where a like was made, as the phone says (`made`): one that does not say was made in Stash.
+fn made_on<'a>(made: &'a [&'static str]) -> &'a [&'static str] {
+    if made.is_empty() { &["stash"] } else { made }
+}
+
+/// What `POST /api/phone/take` asks of the phone's library (its `library`), when it asks: `likes` true, false, or the
+/// services the likes to bring in were made on; plays and only_here true or false (false when left out); playlists by
+/// their ids.
+pub(super) fn asked(body: &Value) -> Result<Option<Asked>, &'static str> {
+    const LIKES: &str = "likes are true, false, or the services they were made on (stash, spotify, youtube, soundcloud)";
     let asked = &body["library"];
     if asked.is_null() {
         return Ok(None);
@@ -181,7 +256,23 @@ pub(super) fn asked(body: &Value) -> Result<Option<Parts>, &'static str> {
         .ok_or("library says what to bring in: likes, plays, playlists and only_here")?;
     let yes = |name: &str| match asked.get(name) {
         None | Some(Value::Null) => Ok(false),
-        Some(v) => v.as_bool().ok_or("likes, plays and only_here are true or false"),
+        Some(v) => v.as_bool().ok_or("plays and only_here are true or false"),
+    };
+    let likes = match asked.get("likes") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => Likes::None,
+        Some(Value::Bool(true)) => Likes::All,
+        Some(Value::Array(services)) => {
+            let mut on: Vec<&'static str> = Vec::new();
+            for service in services {
+                let known = web_library::LIKED_ON
+                    .into_iter()
+                    .find(|k| Some(*k) == service.as_str())
+                    .ok_or(LIKES)?;
+                on.push(known);
+            }
+            Likes::On(web_library::LIKED_ON.into_iter().filter(|s| on.contains(s)).collect())
+        }
+        Some(_) => return Err(LIKES),
     };
     let mut playlists: Vec<String> = match asked.get("playlists") {
         None | Some(Value::Null) => Vec::new(),
@@ -194,49 +285,52 @@ pub(super) fn asked(body: &Value) -> Result<Option<Parts>, &'static str> {
     };
     playlists.sort();
     playlists.dedup();
-    Ok(Some(Parts {
-        likes: yes("likes")?,
+    Ok(Some(Asked {
+        likes,
         plays: yes("plays")?,
         playlists,
         only_here: yes("only_here")?,
     }))
 }
 
-/// Whether `parts` can be brought in from the library `offer` came with: it came with one, and every playlist chosen is
-/// in it (one that is not was gone from the phone since the window read the library).
-pub(super) fn can_bring(offer: &Offer, parts: &Parts) -> Result<(), &'static str> {
+/// What `asked` leaves out of the library `offer` came with, when it can be brought in: the send came with one, and
+/// every playlist chosen is in it (one that is not was gone from the phone since the window read the library).
+pub(super) fn can_bring(offer: &Offer, asked: &Asked) -> Result<LeftOut, &'static str> {
     let from = offer
         .library
         .as_ref()
         .ok_or("the phone sent no library with these songs")?;
     let ids: HashSet<&str> = from.library.playlists.iter().map(|p| p.external_id.as_str()).collect();
-    if parts.playlists.iter().any(|id| !ids.contains(id.as_str())) {
+    if asked.playlists.iter().any(|id| !ids.contains(id.as_str())) {
         return Err("the playlists on the phone changed: look them over and take them again");
     }
-    Ok(())
+    Ok(LeftOut::of(asked, from))
 }
 
-/// The parts kept for each phone, by its name.
-fn kept_all(library: &Library) -> HashMap<String, Parts> {
-    library
+/// What was left out for each phone, by its name. One kept in another shape (an earlier one's) is no choice.
+fn kept_all(library: &Library) -> HashMap<String, LeftOut> {
+    let all: HashMap<String, Value> = library
         .setting(CHOICE_SETTING)
         .ok()
         .flatten()
         .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    all.into_iter()
+        .filter_map(|(phone, left)| Some((phone, serde_json::from_value(left).ok()?)))
+        .collect()
 }
 
-/// `parts` kept for `phone`: brought in from the send chosen from now, and from each later send of the phone's that
-/// comes with a library. Another phone's stay as they are.
-pub(super) fn keep(library: &Mutex<Library>, phone: &str, parts: &Parts) {
+/// `left_out` kept for `phone`: the send chosen from now, and each later send of the phone's that comes with a library,
+/// bring in all but that. Another phone's stay as they are.
+pub(super) fn keep(library: &Mutex<Library>, phone: &str, left_out: &LeftOut) {
     let mut library = library.lock().unwrap();
     let mut all = kept_all(&library);
-    all.insert(phone.to_string(), parts.clone());
+    all.insert(phone.to_string(), left_out.clone());
     let _ = library.set_setting(CHOICE_SETTING, &json!(all).to_string());
 }
 
-/// What was chosen to bring in from `phone`'s library, as kept.
-fn kept(library: &Library, phone: &str) -> Option<Parts> {
+/// What was left out of `phone`'s library, as kept.
+fn kept(library: &Library, phone: &str) -> Option<LeftOut> {
     kept_all(library).remove(phone)
 }
 
@@ -266,23 +360,22 @@ pub(super) fn mark_brought(library: &mut Library, phone: &str, sent_at_ms: i64) 
     library.set_setting(BROUGHT_SETTING, &json!(sends).to_string())
 }
 
-/// What a take does with the phone's library: the parts kept for the phone (none chosen yet: the likes the list marks
-/// come in, as ever), and the library to bring them in from while they are still to come in from this send.
+/// What a take does with the phone's library: what was left out of it for the phone (no choice yet: the likes the list
+/// marks come in, as ever), and the library to bring the rest in from while it is still to come in from this send.
 pub(super) struct ForTake {
-    pub kept: Option<Parts>,
+    pub kept: Option<LeftOut>,
     pub due: Option<Arc<FromPhone>>,
 }
 
 impl ForTake {
-    /// Whether the likes the list marks on its songs come in with them: unless the phone's library is brought in
-    /// without its likes.
+    /// Whether the likes the list marks on its songs come in with them: unless some of the phone's likes are left out.
     pub fn likes(&self) -> bool {
-        self.kept.as_ref().is_none_or(|parts| parts.likes)
+        self.kept.as_ref().is_none_or(LeftOut::list_likes)
     }
 }
 
 /// What a take of the send made at `sent_at_ms` on `phone` does with the phone's library ([`ForTake`]): the library
-/// is read from the phone only while parts are still to come in from it (once for a send).
+/// is read from the phone only while it is still to come in (once for a send).
 pub(super) fn for_take(
     ctx: &Ctx,
     phone: &str,
@@ -295,35 +388,38 @@ pub(super) fn for_take(
         let done = brought(&library).iter().any(|(p, at)| p == phone && *at == sent_at_ms);
         (kept(&library, phone), done)
     };
-    let due = (!done && kept.as_ref().is_some_and(Parts::any))
+    let due = (!done && kept.is_some())
         .then(|| of_send(ctx, phone, folder, listing, sent_at_ms))
         .flatten();
     ForTake { kept, due }
 }
 
-/// Brings in the `parts` chosen of `phone`'s library (`from`) before the songs of `list` chosen (`songs`) are taken,
-/// in one import: its likes and plays when chosen, and the playlists chosen that it holds. Likes and its own playlists
-/// only gain; a playlist synced from a streaming service is made what the phone has it as now (a Daily Mix changes
-/// its songs), here already or not. With `only_here`, of each only the songs coming in now as files or files here
-/// already; a playlist left with none of its songs is not made (but a synced one here already is emptied, as the
-/// phone has it). Then the send is marked as brought in, so another try at it does not bring it in again. Trouble in
-/// the library here as [`in_library`] says it.
+/// Brings in `phone`'s library (`from`), but for what was left out of it (`left_out`), before the songs of `list` chosen
+/// (`songs`) are taken, in one import: its likes made where they were not left out, its plays when they come in, and
+/// every playlist not left out (one the phone gained since comes in). Likes and its own playlists only gain; a
+/// playlist synced from a service, or a Stash Mix, is made what the phone has it as now (their songs change), here
+/// already or not. With `only_here`, of each only the songs coming in now as files or files here already; a playlist
+/// left with none of its songs is not made (but one made what the phone has, here already, is emptied). Then the send
+/// is marked as brought in, so another try at it does not bring it in again. Trouble in the library here as
+/// [`in_library`] says it.
 pub(super) fn bring_in(
     ctx: &Ctx,
     phone: &str,
     list: &List,
     songs: &Choice,
-    parts: &Parts,
+    left_out: &LeftOut,
     from: &FromPhone,
 ) -> Result<(), String> {
-    let mut incoming = chosen_parts(&from.library, parts);
+    let mut incoming = chosen_parts(from, left_out);
     let mirrored: HashSet<String> = incoming
         .playlists
         .iter()
-        .filter(|p| from.from.contains_key(&p.external_id))
+        .filter(|p| {
+            from.from.contains_key(&p.external_id) || from.kind.get(&p.external_id) == Some(&"stash_mix")
+        })
         .map(|p| p.external_id.clone())
         .collect();
-    if parts.only_here {
+    if left_out.only_here {
         let coming: Vec<Song> = list
             .songs
             .iter()
@@ -354,20 +450,28 @@ pub(super) fn bring_in(
     Ok(())
 }
 
-/// The parts of `library` chosen: its likes and plays when chosen, and the playlists chosen that it holds.
-fn chosen_parts(library: &Incoming, parts: &Parts) -> Incoming {
-    let playlists: HashSet<&str> = parts.playlists.iter().map(String::as_str).collect();
+/// What comes in of `from` but for what was left out: its likes made where they were not left out, its plays when
+/// they come in, and its playlists not left out.
+fn chosen_parts(from: &FromPhone, left_out: &LeftOut) -> Incoming {
+    let library = &from.library;
+    let made = |at: usize| from.liked_on.get(at).map(Vec::as_slice).unwrap_or_default();
     Incoming {
         source: library.source,
         generator: library.generator.clone(),
-        likes: if parts.likes { library.likes.clone() } else { Vec::new() },
+        likes: library
+            .likes
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| left_out.like(made(*at)))
+            .map(|(_, like)| like.clone())
+            .collect(),
         playlists: library
             .playlists
             .iter()
-            .filter(|p| playlists.contains(p.external_id.as_str()))
+            .filter(|p| !left_out.playlists_left_out.contains(&p.external_id))
             .cloned()
             .collect(),
-        plays: if parts.plays { library.plays.clone() } else { Vec::new() },
+        plays: if left_out.plays { library.plays.clone() } else { Vec::new() },
         songs: Vec::new(),
         blocked: Vec::new(),
     }
@@ -498,10 +602,36 @@ fn here_of(library: &Mutex<Library>, songs: &[Song]) -> Vec<bool> {
         .collect()
 }
 
+/// Where a playlist comes in the first-run screen's order: the phone's own lists, then its Stash Mixes; then those of
+/// each service ([`web_library::FROM`], in that order), its playlists, then albums, mixes and radios. Sorted stably, so
+/// each kind keeps the file's order.
+fn place(from: Option<&str>, kind: Option<&str>) -> (usize, usize) {
+    let source = match (from, kind) {
+        (_, Some("stash_mix")) => 1,
+        (None, _) => 0,
+        (Some(service), _) => {
+            2 + web_library::FROM
+                .iter()
+                .position(|s| *s == service)
+                .unwrap_or(web_library::FROM.len())
+        }
+    };
+    let kind = match kind {
+        None | Some("playlist") => 0,
+        Some("album") => 1,
+        Some("mix") => 2,
+        Some("radio") => 3,
+        _ => 4,
+    };
+    (source, kind)
+}
+
 /// What the window's first-run screen draws of the send offered and the library it came with
-/// (`GET /api/phone/library`): the send's songs to come in (those not here already), the library's likes and
-/// playlists with how many of their songs are downloaded (sent as files now, or files here already), its plays, the
-/// albums the send's songs are from, and what was chosen before for this phone (`choice`: null the first time).
+/// (`GET /api/phone/library`): the send's songs to come in (those not here already), the library's likes (with those
+/// made in Stash and on each service: `by`, empty for an older file) and playlists (in [`place`]'s order, each with
+/// where it came from and what kind it is) with how many of their songs are downloaded (sent as files now, or files
+/// here already), its plays, the albums the send's songs are from, and what was left out before for this phone
+/// (`choice`: null the first time).
 pub(super) fn summary(library: &Mutex<Library>, offer: &Offer, from: &FromPhone) -> Value {
     // The send's songs asked again: songs may have come into the library since they were offered.
     let (mut songs, mut bytes, mut had) = (0, 0u64, 0);
@@ -523,14 +653,35 @@ pub(super) fn summary(library: &Mutex<Library>, offer: &Offer, from: &FromPhone)
             .map(|(song, _)| song)
             .chain(incoming.playlists.iter().flat_map(|p| &p.items)),
     );
-    // Its own playlists first, then those it synced, each in the file's order.
-    let (own, synced): (Vec<&Playlist>, Vec<&Playlist>) = incoming
-        .playlists
+    let made = |at: usize| from.liked_on.get(at).map(Vec::as_slice).unwrap_or_default();
+    let by: Vec<Value> = web_library::LIKED_ON
         .iter()
-        .partition(|p| !from.from.contains_key(&p.external_id));
-    let playlists: Vec<Value> = own
+        .filter_map(|service| {
+            let of: Vec<&Song> = incoming
+                .likes
+                .iter()
+                .enumerate()
+                .filter(|(at, _)| made(*at).contains(service))
+                .map(|(_, (song, _))| song)
+                .collect();
+            (!of.is_empty()).then(|| {
+                json!({
+                    "service": service,
+                    "songs": of.len(),
+                    "downloaded": of.iter().filter(|s| downloaded.is(s)).count(),
+                })
+            })
+        })
+        .collect();
+    let mut ordered: Vec<&Playlist> = incoming.playlists.iter().collect();
+    ordered.sort_by_key(|p| {
+        place(
+            from.from.get(&p.external_id).copied(),
+            from.kind.get(&p.external_id).copied(),
+        )
+    });
+    let playlists: Vec<Value> = ordered
         .into_iter()
-        .chain(synced)
         .map(|p| {
             let mut covers: Vec<&str> = Vec::new();
             for url in p.items.iter().filter_map(|s| s.art_url.as_deref()) {
@@ -545,6 +696,7 @@ pub(super) fn summary(library: &Mutex<Library>, offer: &Offer, from: &FromPhone)
                 "id": p.external_id,
                 "name": p.name,
                 "from": from.from.get(&p.external_id),
+                "kind": from.kind.get(&p.external_id),
                 "songs": p.items.len(),
                 "downloaded": p.items.iter().filter(|s| downloaded.is(s)).count(),
                 "covers": covers,
@@ -559,6 +711,7 @@ pub(super) fn summary(library: &Mutex<Library>, offer: &Offer, from: &FromPhone)
         "likes": {
             "songs": incoming.likes.len(),
             "downloaded": incoming.likes.iter().filter(|(s, _)| downloaded.is(s)).count(),
+            "by": by,
         },
         "plays": incoming.plays.len(),
         "playlists": playlists,

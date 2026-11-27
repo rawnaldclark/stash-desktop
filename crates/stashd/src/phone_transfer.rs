@@ -26,8 +26,9 @@
 //! - `GET /api/phone/library`: the library that came with the send waiting to be chosen from, summed up (404 when none
 //!   did).
 //! - `POST /api/phone/take` `{sent_at_ms, files}` (or `all: true`, or `files: [], none: true`): takes those songs.
-//!   With `library: {likes, plays, playlists, only_here}`, those parts of the phone's library come in first, and from
-//!   each later send's library too.
+//!   With `library: {likes, plays, playlists, only_here}` (`likes` true, false, or the services they were made on),
+//!   those parts of the phone's library come in first; what was left out is kept, and each later send's library comes
+//!   in but for that.
 //! - `GET`/`POST /api/settings/phone` `{take_all}`: every send taken whole as it comes, or offered (the default).
 //! - `POST /api/phone/look`: looks at the phones now, and tries again a send that had songs not taken; answers the
 //!   look's number, which `answered` in `GET /api/phone` reaches once it is done.
@@ -2209,7 +2210,7 @@ fn choose_from(
     board: &Board,
     sent_at_ms: i64,
     choice: Choice,
-    parts: Option<library::Parts>,
+    parts: Option<library::Asked>,
 ) -> Result<usize, &'static str> {
     let offer = board
         .offer
@@ -2228,9 +2229,9 @@ fn choose_from(
         }
     };
     if let Some(parts) = &parts {
-        library::can_bring(&offer, parts)?;
-        // Kept before the send is chosen from: the take that follows brings these parts in.
-        library::keep(library, &offer.phone, parts);
+        let left_out = library::can_bring(&offer, parts)?;
+        // Kept before the send is chosen from: the take that follows brings all but these in.
+        library::keep(library, &offer.phone, &left_out);
     }
     let taking = match &choice {
         Choice::All => offer.songs.len(),
@@ -4238,6 +4239,11 @@ mod tests {
     /// A send of three songs made at 8, with the phone's library ([`library_at`]): 1.wav has an ISRC and 2.wav a
     /// YouTube id, both on the album "First"; 3.wav is on "Second".
     fn sending_library(name: &str) -> Arc<Phone> {
+        sending_with(name, library_at(8))
+    }
+
+    /// [`sending_library`]'s send, with `library`.
+    fn sending_with(name: &str, library: serde_json::Value) -> Arc<Phone> {
         let entries = vec![
             json!({ "file": "1.wav", "title": "Song 1.wav", "artist": "Someone", "album": "First",
                     "isrc": "USABC1234567", "art_url": "https://cover/1" }),
@@ -4246,8 +4252,35 @@ mod tests {
             json!({ "file": "3.wav", "title": "Song 3.wav", "artist": "Other", "album": "Second" }),
         ];
         let phone = Phone::sending(name, 8, &[("1.wav", wav()), ("2.wav", wav()), ("3.wav", wav())], entries);
-        phone.sends_library(library_at(8).to_string().into_bytes());
+        phone.sends_library(library.to_string().into_bytes());
         phone
+    }
+
+    /// [`library_at`]'s library as a phone that says where its likes were made and what its lists are sends it: the
+    /// song known by 1.wav's ISRC liked in Stash, the video on YouTube Music, Song 0.wav on Spotify and YouTube Music,
+    /// and Far Away not said (as an older phone's). Its lists, in the file's order: the Daily Mix (a Spotify mix), Gym
+    /// (its own), the Supermix (a YouTube Music mix), then a SoundCloud radio, a Spotify album, a Stash Mix, another of
+    /// its own, a Spotify playlist and a YouTube Music radio, each of these of Far Away.
+    fn live_at(sent_at_ms: i64) -> serde_json::Value {
+        let mut library = library_at(sent_at_ms);
+        for (at, on) in [json!(["stash"]), json!(["youtube"]), json!(["spotify", "youtube"])].into_iter().enumerate() {
+            library["likes"][at]["liked_on"] = on;
+        }
+        library["playlists"][0]["kind"] = json!("mix");
+        library["playlists"][2]["kind"] = json!("mix");
+        let far = library["playlists"][0]["items"][0].clone();
+        let lists = library["playlists"].as_array_mut().unwrap();
+        for (id, name, from, kind) in [
+            ("soundcloud-77", "Related tracks", Some("soundcloud"), "radio"),
+            ("spotify-album-5", "After Hours", Some("spotify"), "album"),
+            ("stash-mix-1", "Stash Mix 1", None, "stash_mix"),
+            ("custom_7", "Mine", None, "playlist"),
+            ("spotify-6", "Road", Some("spotify"), "playlist"),
+            ("youtube-radio-1", "Song radio", Some("youtube"), "radio"),
+        ] {
+            lists.push(json!({ "id": id, "name": name, "from": from, "kind": kind, "items": [far] }));
+        }
+        library
     }
 
     /// A library that offers each send, with "Song 0.wav" and "Song 3.wav" taken into it as files (from an earlier send).
@@ -4264,13 +4297,39 @@ mod tests {
         here
     }
 
-    fn parts(likes: bool, plays: bool, playlists: &[&str], only_here: bool) -> library::Parts {
-        library::Parts {
-            likes,
+    /// What a take asks of the library: every like or none, the plays or not, the playlists chosen, and whether only
+    /// the songs here.
+    fn parts(likes: bool, plays: bool, playlists: &[&str], only_here: bool) -> library::Asked {
+        library::Asked {
+            likes: if likes { library::Likes::All } else { library::Likes::None },
             plays,
             playlists: playlists.iter().map(|p| p.to_string()).collect(),
             only_here,
         }
+    }
+
+    /// `parts` with the likes made on `services` only.
+    fn liked_on(services: &[&'static str], playlists: &[&str]) -> library::Asked {
+        library::Asked {
+            likes: library::Likes::On(services.to_vec()),
+            ..parts(false, false, playlists, false)
+        }
+    }
+
+    /// What is kept for a phone of what was left out, as the setting keeps it and `GET /api/phone/library` says it.
+    fn left_out(likes: &[&str], all_likes: bool, plays: bool, playlists: &[&str], only_here: bool) -> serde_json::Value {
+        json!({
+            "likes_left_out": likes,
+            "all_likes_left_out": all_likes,
+            "plays": plays,
+            "playlists_left_out": playlists,
+            "only_here": only_here,
+        })
+    }
+
+    /// [`left_out`] kept for "Test phone".
+    fn keep_left_out(here: &Here, left: serde_json::Value) {
+        library::keep(&here.library, "Test phone", &serde_json::from_value(left).unwrap());
     }
 
     /// The songs liked here, each with whether it is here (a file: it plays with no connection).
@@ -4312,7 +4371,7 @@ mod tests {
         Some(library::summary(&here.library, &offer, &from))
     }
 
-    fn choose_with(here: &Here, sent_at_ms: i64, choice: Choice, library: library::Parts) -> Result<usize, &'static str> {
+    fn choose_with(here: &Here, sent_at_ms: i64, choice: Choice, library: library::Asked) -> Result<usize, &'static str> {
         choose_from(&here.library, &here.board, sent_at_ms, choice, Some(library))
     }
 
@@ -4334,16 +4393,18 @@ mod tests {
                 "downloads": { "songs": 2, "bytes": 2 * w, "here": 1 },
                 // Downloaded: the songs known by 1.wav's ISRC and 2.wav's YouTube id (sent now), and Song 0.wav (a file
                 // here); not Far Away.
-                "likes": { "songs": 4, "downloaded": 3 },
+                // An older phone's file: it does not say where its likes were made.
+                "likes": { "songs": 4, "downloaded": 3, "by": [] },
                 "plays": 2,
-                // Its own playlists first, then those synced, each in the file's order; covers distinct, first songs
-                // first, four at most.
+                // Its own playlists first, then those synced, Spotify's before YouTube Music's; covers distinct, first
+                // songs first, four at most. An older phone's file says no kind.
                 "playlists": [
-                    { "id": "app-2", "name": "Gym", "from": null, "songs": 2, "downloaded": 1,
+                    { "id": "app-2", "name": "Gym", "from": null, "kind": null, "songs": 2, "downloaded": 1,
                       "covers": ["https://art/far"] },
-                    { "id": "app-9", "name": "Daily Mix 1", "from": "spotify", "songs": 6, "downloaded": 4,
+                    { "id": "app-9", "name": "Daily Mix 1", "from": "spotify", "kind": null, "songs": 6, "downloaded": 4,
                       "covers": ["https://art/far", "https://art/1", "https://art/2", "https://art/0"] },
-                    { "id": "app-12", "name": "Supermix", "from": "youtube", "songs": 0, "downloaded": 0, "covers": [] },
+                    { "id": "app-12", "name": "Supermix", "from": "youtube", "kind": null, "songs": 0, "downloaded": 0,
+                      "covers": [] },
                 ],
                 // From the send's songs, most songs first.
                 "albums": [
@@ -4369,8 +4430,8 @@ mod tests {
         ];
         for (name, bytes) in cases {
             let here = Here::asking(name);
-            // Parts kept from before are not brought in from it either.
-            library::keep(&here.library, "Test phone", &parts(true, true, &["app-9"], false));
+            // A choice kept from before brings nothing in from it either.
+            keep_left_out(&here, left_out(&[], false, true, &["app-2", "app-12"], false));
             let phone = three("Test phone");
             if let Some(bytes) = bytes {
                 phone.sends_library(bytes);
@@ -4431,7 +4492,7 @@ mod tests {
         assert_eq!((now.state, now.total, now.with_library), ("ready", 0, true));
         let told = summed_up(&here).unwrap();
         assert_eq!(told["downloads"], json!({ "songs": 0, "bytes": 0, "here": 0 }));
-        assert_eq!(told["likes"], json!({ "songs": 4, "downloaded": 0 }));
+        assert_eq!(told["likes"], json!({ "songs": 4, "downloaded": 0, "by": [] }));
         assert_eq!(told["albums"], json!([]));
         assert_eq!(choose_with(&here, 8, Choice::All, parts(true, true, &["app-2"], false)), Ok(0));
         let now = here.take(&phone, &mut tries).unwrap();
@@ -4446,7 +4507,7 @@ mod tests {
 
         // The library here can't be written: nothing goes from the phone, and the send waits to be tried again.
         let here = Here::on_disk("library-only-full");
-        library::keep(&here.library, "Test phone", &parts(true, false, &[], false));
+        keep_left_out(&here, left_out(&[], false, false, &["app-9", "app-2", "app-12"], false));
         here.library.lock().unwrap().refuse_writes().unwrap();
         let phone = Phone::sending("Test phone", 8, &[], Vec::new());
         phone.sends_library(library_at(8).to_string().into_bytes());
@@ -4483,10 +4544,11 @@ mod tests {
         // Only the playlist chosen (all its songs, Far Away twice), and no plays.
         assert_eq!(playlists(&here), [("Daily Mix 1".to_string(), 6)]);
         assert!(plays(&here).is_empty());
-        // The library went from the phone after the songs, before the list; what was chosen is kept.
+        // The library went from the phone after the songs, before the list; what was left out is kept.
         assert_eq!(*phone.removed.lock().unwrap(), ["1.wav", "2.wav", "3.wav", LIBRARY_FILE, LIST_FILE]);
         assert!(phone.folder_gone.load(Ordering::Relaxed));
-        assert_eq!(setting(&here, library::CHOICE_SETTING), Some(json!({ "Test phone": chose }).to_string()));
+        let left = left_out(&[], false, false, &["app-2", "app-12"], false);
+        assert_eq!(setting(&here, library::CHOICE_SETTING), Some(json!({ "Test phone": left }).to_string()));
         assert_eq!(setting(&here, library::BROUGHT_SETTING), Some(json!([["Test phone", 8]]).to_string()));
     }
 
@@ -4573,13 +4635,12 @@ mod tests {
     }
 
     #[test]
-    fn a_later_send_brings_in_the_parts_chosen_before_and_no_playlist_not_chosen() {
+    fn a_later_send_brings_in_all_but_what_was_left_out_and_the_lists_the_phone_gained() {
         let here = Here::asking("library-later");
         let first = sending_library("Test phone");
         let mut tries = Tries::default();
         here.take(&first, &mut tries);
-        let chose = parts(true, true, &["app-9"], false);
-        assert_eq!(choose_with(&here, 8, Choice::All, chose.clone()), Ok(3));
+        assert_eq!(choose_with(&here, 8, Choice::All, parts(true, true, &["app-9"], false)), Ok(3));
         here.take(&first, &mut tries);
         assert_eq!(playlists(&here), [("Daily Mix 1".to_string(), 6)]);
         // The phone sends again (at 9): a song, and its library since: a new like, a song more on the Daily Mix, a new
@@ -4600,15 +4661,16 @@ mod tests {
             vec![json!({ "file": "4.wav", "title": "Song 4", "artist": "Someone" })],
         );
         again.sends_library(library.to_string().into_bytes());
-        // Offered as ever, with what was chosen before.
+        // Offered as ever, with what was left out before.
         assert_eq!(here.take(&again, &mut tries).unwrap().state, "ready");
-        assert_eq!(summed_up(&here).unwrap()["choice"], json!(chose));
-        // Its song chosen, with nothing said of the library: the parts chosen before come in, in step.
+        assert_eq!(summed_up(&here).unwrap()["choice"], left_out(&[], false, true, &["app-2", "app-12"], false));
+        // Its song chosen, with nothing said of the library: all of it but what was left out comes in, in step, the
+        // new Daily Mix too. Gym and the Supermix stay out.
         assert_eq!(here.choose(9, &["4.wav"]), Ok(1));
         let now = here.take(&again, &mut tries).unwrap();
         assert_eq!((now.state, now.taken), ("done", 1));
         assert!(liked(&here).contains(&("New Love".to_string(), false)));
-        assert_eq!(playlists(&here), [("Daily Mix 1".to_string(), 7)], "the new Daily Mix was not chosen");
+        assert_eq!(playlists(&here), [("Daily Mix 1".to_string(), 7), ("Daily Mix 2".to_string(), 1)]);
         assert_eq!(plays(&here), ["New Love", "First of all", "Far Away"]);
         assert_eq!(*again.removed.lock().unwrap(), ["4.wav", LIBRARY_FILE, LIST_FILE]);
         assert_eq!(setting(&here, library::BROUGHT_SETTING), Some(json!([["Test phone", 8], ["Test phone", 9]]).to_string()));
@@ -4623,9 +4685,124 @@ mod tests {
             Ok(Some(parts(true, false, &["a", "b"], false)))
         );
         assert_eq!(library::asked(&json!({ "library": {} })), Ok(Some(parts(false, false, &[], false))));
+        // Likes by the services they were made on: each once, in their order.
+        assert_eq!(
+            library::asked(&json!({ "library": { "likes": ["youtube", "stash", "youtube"] } })),
+            Ok(Some(liked_on(&["stash", "youtube"], &[])))
+        );
         assert!(library::asked(&json!({ "library": true })).is_err());
         assert!(library::asked(&json!({ "library": { "likes": "yes" } })).is_err());
+        assert!(library::asked(&json!({ "library": { "likes": ["tidal"] } })).is_err());
+        assert!(library::asked(&json!({ "library": { "likes": [1] } })).is_err());
+        assert!(library::asked(&json!({ "library": { "plays": "yes" } })).is_err());
         assert!(library::asked(&json!({ "library": { "playlists": "app-2" } })).is_err());
+    }
+
+    #[test]
+    fn the_summary_says_where_likes_were_made_and_orders_the_lists_by_where_they_came_from() {
+        let here = had_two("library-live-summary");
+        let phone = sending_with("Test phone", live_at(8));
+        here.take(&phone, &mut Tries::default());
+        let told = summed_up(&here).unwrap();
+        // Downloaded as ever: all but Far Away. Far Away says nowhere, so it is in none of `by`; SoundCloud has none.
+        assert_eq!(
+            told["likes"],
+            json!({
+                "songs": 4,
+                "downloaded": 3,
+                "by": [
+                    { "service": "stash", "songs": 1, "downloaded": 1 },
+                    { "service": "spotify", "songs": 1, "downloaded": 1 },
+                    { "service": "youtube", "songs": 2, "downloaded": 2 },
+                ],
+            })
+        );
+        let lists: Vec<(String, serde_json::Value, serde_json::Value)> = told["playlists"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| (p["id"].as_str().unwrap().to_string(), p["from"].clone(), p["kind"].clone()))
+            .collect();
+        let at = |id: &str, from: Option<&str>, kind: Option<&str>| (id.to_string(), json!(from), json!(kind));
+        assert_eq!(
+            lists,
+            [
+                // Its own (one of an older phone, saying no kind), then its Stash Mixes.
+                at("app-2", None, None),
+                at("custom_7", None, Some("playlist")),
+                at("stash-mix-1", None, Some("stash_mix")),
+                // Spotify's: playlists, albums, mixes; then YouTube Music's; then SoundCloud's.
+                at("spotify-6", Some("spotify"), Some("playlist")),
+                at("spotify-album-5", Some("spotify"), Some("album")),
+                at("app-9", Some("spotify"), Some("mix")),
+                at("app-12", Some("youtube"), Some("mix")),
+                at("youtube-radio-1", Some("youtube"), Some("radio")),
+                at("soundcloud-77", Some("soundcloud"), Some("radio")),
+            ]
+        );
+    }
+
+    #[test]
+    fn likes_chosen_by_service_come_in_from_there_and_from_services_new_since() {
+        let here = had_two("library-likes-by-service");
+        let phone = sending_with("Test phone", live_at(8));
+        let mut tries = Tries::default();
+        here.take(&phone, &mut tries);
+        assert_eq!(choose_with(&here, 8, Choice::All, liked_on(&["spotify"], &[])), Ok(3));
+        assert_eq!(here.take(&phone, &mut tries).unwrap().state, "done");
+        // Song 0.wav (liked on Spotify and YouTube Music) only: not the one liked in Stash, nor the video, nor Far Away
+        // (it says nowhere, as if liked in Stash).
+        assert_eq!(liked(&here), [("Song 0.wav".to_string(), true)]);
+        // Kept: the services left out of those its likes were made on, and every list (none was chosen).
+        let mut left = left_out(&["stash", "youtube"], false, false, &[], false);
+        let every: Vec<serde_json::Value> =
+            live_at(8)["playlists"].as_array().unwrap().iter().map(|p| p["id"].clone()).collect();
+        left["playlists_left_out"] = json!(every);
+        assert!(library::choice_kept(&here.library, "Test phone"));
+        assert_eq!(setting(&here, library::CHOICE_SETTING), Some(json!({ "Test phone": left }).to_string()));
+        // A later send: liked since on SoundCloud (new here), on YouTube Music (left out), in Stash and on Spotify.
+        // The list's own like (Song 4) does not come in: it does not say where it was made.
+        let mut later = live_at(9);
+        let likes = later["likes"].as_array_mut().unwrap();
+        for (title, on) in [("Cloud", json!(["soundcloud"])), ("Tube", json!(["youtube"])), ("Both", json!(["stash", "spotify"]))] {
+            likes.push(json!({ "item": item(title, "Someone", json!({})), "likedAt": 110, "liked_on": on }));
+        }
+        let again = one_more("Test phone", 9, true, &later);
+        here.take(&again, &mut tries);
+        assert_eq!(here.choose(9, &["4.wav"]), Ok(1));
+        assert_eq!(here.take(&again, &mut tries).unwrap().state, "done");
+        let titles: Vec<String> = liked(&here).into_iter().map(|(title, _)| title).collect();
+        assert_eq!(titles, ["Both", "Cloud", "Song 0.wav"]);
+        assert!(playlists(&here).is_empty(), "every list was left out, and none is new");
+
+        // Likes made in Stash: those that say so, and those that say nowhere.
+        let here = had_two("library-likes-in-stash");
+        let phone = sending_with("Test phone", live_at(8));
+        let mut tries = Tries::default();
+        here.take(&phone, &mut tries);
+        assert_eq!(choose_with(&here, 8, Choice::All, liked_on(&["stash"], &["custom_7"])), Ok(3));
+        here.take(&phone, &mut tries);
+        let titles: Vec<String> = liked(&here).into_iter().map(|(title, _)| title).collect();
+        assert_eq!(titles, ["Far Away", "First of all"]);
+        assert_eq!(playlists(&here), [("Mine".to_string(), 1)]);
+    }
+
+    #[test]
+    fn a_choice_kept_in_the_earlier_shape_is_no_choice() {
+        let here = Here::asking("library-old-choice");
+        let old = json!({ "Test phone": { "likes": true, "plays": true, "playlists": ["app-9"], "only_here": false } });
+        here.library.lock().unwrap().set_setting(library::CHOICE_SETTING, &old.to_string()).unwrap();
+        assert!(!library::choice_kept(&here.library, "Test phone"));
+        let phone = one_more("Test phone", 9, true, &library_at(9));
+        let mut tries = Tries::default();
+        here.take(&phone, &mut tries);
+        assert_eq!(summed_up(&here).unwrap()["choice"], serde_json::Value::Null);
+        // Its song taken with nothing said of the library: none of it comes in, and the list's like does, as ever.
+        assert_eq!(here.choose(9, &["4.wav"]), Ok(1));
+        assert_eq!(here.take(&phone, &mut tries).unwrap().state, "done");
+        assert_eq!(liked(&here), [("Song 4".to_string(), true)]);
+        assert!(playlists(&here).is_empty() && plays(&here).is_empty());
+        assert_eq!(phone.library_reads.load(Ordering::Relaxed), 1, "read once, to offer it");
     }
 
     /// The songs of the playlist here named `name`, in its order.
