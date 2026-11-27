@@ -1,8 +1,8 @@
 <!-- The first time Stash opens: bringing in the music on the listener's phone. Until a phone's send is waiting, how to
-     plug it in (and other ways to start). Then what the phone sent, cover by cover: its downloads, Liked songs, plays
-     and the listener's own playlists coming already (tap one to leave it out), each playlist synced from a streaming
-     service to add with +, and one switch for songs downloaded only (Stash then stays offline, as "My own music
-     files" did). Bring them in takes the send: the library parts come in at once, the files after (the corner card
+     plug it in (and other ways to start). Then what the phone sent, cover by cover, all of it coming (tap one to leave
+     it out): its downloads, its likes (one card per service they are liked on), plays, the listener's own playlists
+     and Stash Mixes, and every playlist, album, mix and radio synced from a streaming service; and one switch for songs
+     downloaded only (Stash then stays offline, as "My own music files" did). Bring them in takes the send: the library parts come in at once, the files after (the corner card
      says how they go), and Stash opens on Library. The mockup the owner picked: "A · Shelves". -->
 <script lang="ts">
 	import { goto } from '$app/navigation';
@@ -13,7 +13,7 @@
 	import Icon from '../ui/Icon.svelte';
 	import { ui } from '../ui/state.svelte';
 	import { folders } from './folders.svelte';
-	import { firstPicks, flip, gb, lines, listLine, n, ownLists, syncedLists, takeBody, tally, type PhoneLibrary, type Picks, type SentList } from './bring-in';
+	import { firstPicks, flip, gb, LIKE_NAME, likeParts, lines, listLine, n, ownLists, syncedLists, takeBody, tally, type PhoneLibrary, type Picks, type SentList } from './bring-in';
 	import type { Offer } from './phone-songs';
 
 	/** `first`: the first time Stash opens (how it runs is set by what is brought in); else a later send, from the corner card. */
@@ -33,7 +33,6 @@
 	let lib = $state<PhoneLibrary | null>(null);
 	let picks = $state<Picks | null>(null);
 	let q = $state('');
-	let all = $state(false);
 	let busy = $state(false);
 	let trouble = $state<string | null>(null);
 
@@ -56,7 +55,6 @@
 		// Stash offline for good (on the listener's own files): a song not downloaded could never play, so none comes.
 		if (!first && ui.local) picks = { ...picks, onlyHere: true };
 		q = '';
-		all = false;
 	}
 
 	onMount(() => {
@@ -103,8 +101,8 @@
 		const k = q.trim().toLowerCase();
 		return k ? synced.filter((p) => p.name.toLowerCase().includes(k)) : synced;
 	});
-	const shown = $derived(all || q.trim() ? found : found.slice(0, 14));
 	const added = $derived(picks ? synced.filter((p) => picks!.lists.includes(p.id)).length : 0);
+	const likes = $derived(likeParts(lib));
 	/** The covers of the send's albums (most songs first), or of its songs when the phone sent no library. */
 	const albumArt = $derived.by(() => {
 		const seen = new Set<string>();
@@ -257,7 +255,7 @@
 				<p class="bi-p bi-counts">
 					<b>{n(offer.songs.length)}</b> songs downloaded
 					{#if lib}
-						<span>·</span> <b>{n(lib.likes.songs)}</b> liked <span>·</span> <b>{n(lib.playlists.length)}</b> playlists <span>·</span> <b>{n(lib.plays)}</b> plays
+						<span>·</span> <b>{n(lib.likes.songs)}</b> liked <span>·</span> <b>{n(lib.playlists.length)}</b> playlists and mixes <span>·</span> <b>{n(lib.plays)}</b> plays
 					{/if}
 				</p>
 				{#if lib && !first && ui.local}
@@ -282,14 +280,15 @@
 					<i>{n(fresh.length)} songs · {gb(fresh.reduce((sum, s) => sum + s.bytes, 0))}</i>
 				</button>
 			{/if}
-			{#if lib && lib.likes.songs}
-				<button type="button" class="bi-card" class:on={picks.likes} aria-pressed={picks.likes} disabled={busy} onclick={() => toggle('likes')}>
-					<span class="tile bi-art"><span class="tile-liked"><Icon name="favorite" /></span></span>
-					{@render badge(picks.likes)}
-					<b>Liked songs</b>
-					<i>{picks.onlyHere ? `${n(lib.likes.downloaded)} downloaded songs` : `${n(lib.likes.songs)} songs · ${n(lib.likes.downloaded)} downloaded`}</i>
+			{#each likes as l (l.service)}
+				{@const on = picks.likes.includes(l.service)}
+				<button type="button" class="bi-card" class:on aria-pressed={on} disabled={busy} onclick={() => toggle(`likes:${l.service}`)}>
+					<span class="tile bi-art"><span class="tile-liked bi-lk-{l.service}"><Icon name="favorite" /></span></span>
+					{@render badge(on)}
+					<b>{LIKE_NAME[l.service] ?? 'Liked songs'}</b>
+					<i>{picks.onlyHere ? `${n(l.downloaded)} downloaded songs` : `${n(l.songs)} songs · ${n(l.downloaded)} downloaded`}</i>
 				</button>
-			{/if}
+			{/each}
 			{#if lib && lib.plays}
 				<button type="button" class="bi-card" class:on={picks.plays} aria-pressed={picks.plays} disabled={busy} onclick={() => toggle('plays')}>
 					<span class="tile bi-art"><span class="bi-stat"><b>{n(lib.plays)}</b><i>plays</i></span></span>
@@ -305,17 +304,17 @@
 			<div class="bi-sec">
 				<div>
 					<h2>From your streaming services</h2>
-					<p>{added ? `${added} of ${n(synced.length)} added. Their downloaded songs come in as files${picks.onlyHere ? '.' : ', the rest stream.'}` : `${n(synced.length)} playlists synced on your phone. Add the ones you want.`}</p>
+					<p>
+						{added === synced.length ? `All ${n(synced.length)} coming` : added ? `${n(added)} of ${n(synced.length)} coming` : `${n(synced.length)} synced on your phone, none coming`}.
+						{added ? `Their downloaded songs come in as files${picks.onlyHere ? '.' : ', the rest stream.'} Tap one to leave it out.` : 'Tap one to bring it in.'}
+					</p>
 				</div>
 				<label class="bi-find"><Icon name="search" /><input id="bi-find" type="search" placeholder="Find a playlist" aria-label="Find a playlist" bind:value={q} /></label>
 			</div>
 			<div class="bi-grid">
-				{#each shown as p (p.id)}{@render listCard(p)}{/each}
+				{#each found as p (p.id)}{@render listCard(p)}{/each}
 			</div>
 			{#if !found.length}<p class="bi-none">No synced playlist called “{q.trim()}”.</p>{/if}
-			{#if !all && !q.trim() && found.length > shown.length}
-				<button type="button" class="bi-more" onclick={() => (all = true)}>Show all {n(found.length)}</button>
-			{/if}
 		{/if}
 
 		{#if lib && lib.albums.length}
@@ -400,7 +399,10 @@
 	.bi-stat b { font: 700 21cqi/1 var(--font-display); font-variant-numeric: tabular-nums; }
 	.bi-stat i { font: 600 9cqi/1 var(--font-body); font-style: normal; letter-spacing: .08em; text-transform: uppercase; color: var(--acc-text); }
 	.bi-none { color: var(--wp-text-2); }
-	.bi-more { display: block; margin: 12px auto 0; height: 38px; padding: 0 18px; border-radius: 999px; border: 1px solid var(--wp-line-2); color: var(--wp-text); font: 600 13.5px/1 var(--font-body); }
+	.bi-lk-stash { background: linear-gradient(135deg, #8b5cf6, #2e1b6e); }
+	.bi-lk-spotify { background: linear-gradient(135deg, #4a1fe0, #8fd0c5); }
+	.bi-lk-youtube { background: linear-gradient(135deg, #ff2d55, #4d0718); }
+	.bi-lk-soundcloud { background: linear-gradient(135deg, #ff7a1a, #6b2200); }
 
 	.bi-steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 28px 0 0; padding: 0; list-style: none; }
 	.bi-steps li { display: grid; grid-template-columns: 32px minmax(0, 1fr); column-gap: 12px; row-gap: 3px; align-content: start; padding: 16px; border-radius: 14px; background: rgb(255 255 255 / .035); border: 1px solid var(--wp-line); }
@@ -433,7 +435,6 @@
 	@media (hover: hover) and (pointer: fine) {
 		.bi-card:not(.still):not(:disabled):hover, .bi-alt:not(:disabled):hover { background: var(--wp-hover); }
 		.bi-card:not(:disabled):hover .bi-pk { transform: scale(1.12); }
-		.bi-more:hover { background: var(--wp-hover); }
 		.bi-go:not(:disabled):hover { filter: brightness(1.1); }
 		.bi-sw:not(:disabled):hover { color: var(--wp-text); }
 	}
