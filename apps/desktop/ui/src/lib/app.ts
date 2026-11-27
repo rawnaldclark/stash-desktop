@@ -227,6 +227,19 @@ function entryOf(item: LibraryItem): core.PlayEntry | null {
 	return { addon: a.addon, track: art ? { ...a.track, art } : a.track };
 }
 
+/** A song neither the library's nor an add-on's (a session's song, a listener's request): told to the core by what it is. */
+function describedOf(item: LibraryItem): core.DescribedSong {
+	const song: core.DescribedSong = { title: item.title, artist: item.artist };
+	if (item.album) song.album = item.album;
+	if (item.isrc) song.isrc = item.isrc;
+	if (item.durationMs) song.duration_ms = Math.round(item.durationMs);
+	const yt = item.refs?.[core.YOUTUBE];
+	if (yt) song.youtube = yt;
+	const art = item.artwork?.[0]?.url;
+	if (art && art.startsWith('https://')) song.art = art;
+	return song;
+}
+
 const trackOfRow = (r: core.TrackRow): Track => {
 	itemOfRow(r); // remembered, so the player knows the song's pages and bit depth
 	const t: Track = { id: String(r.id), title: r.title, artist: r.artist };
@@ -486,8 +499,21 @@ const player: PlayerAPI = {
 	jumpTo: (i) => void (refusedWhileListening('pick') || command(() => core.jumpTo(i))),
 	enqueue(items, opts) {
 		if (refusedWhileListening('queue')) return;
-		const entries = entriesOf(items);
-		if (entries.length) void command(() => core.enqueue(entries, opts?.next === true));
+		const next = opts?.next === true;
+		// The core takes entries or described songs in one call, not both: each run of one kind is a call of its own.
+		const runs: ({ entries: core.PlayEntry[] } | { songs: core.DescribedSong[] })[] = [];
+		for (const item of items) {
+			const entry = entryOf(item);
+			const last = runs[runs.length - 1];
+			if (entry) {
+				if (last && 'entries' in last) last.entries.push(entry);
+				else runs.push({ entries: [entry] });
+			} else if (last && 'songs' in last && last.songs.length < 100) last.songs.push(describedOf(item));
+			else runs.push({ songs: [describedOf(item)] });
+		}
+		// Added after the playing song, each run goes before the ones added before it: the last is added first.
+		for (const run of next ? runs.reverse() : runs)
+			void command(() => ('entries' in run ? core.enqueue(run.entries, next) : core.enqueueSongs(run.songs, next)));
 	},
 	removeAt: (i) => void (refusedWhileListening('queue') || command(() => core.removeFromQueue(i))),
 	move: (from, to) => void (refusedWhileListening('queue') || command(() => core.moveInQueue(from, to))),
@@ -575,14 +601,7 @@ const player: PlayerAPI = {
 	async followLoad(item, positionMs, autoplay) {
 		const l = listening;
 		if (!l) return;
-		const song: core.DescribedSong = { title: item.title, artist: item.artist };
-		if (item.album) song.album = item.album;
-		if (item.isrc) song.isrc = item.isrc;
-		if (item.durationMs) song.duration_ms = Math.round(item.durationMs);
-		const yt = item.refs?.[core.YOUTUBE];
-		if (yt) song.youtube = yt;
-		const art = item.artwork?.[0]?.url;
-		if (art && art.startsWith('https://')) song.art = art;
+		const song = describedOf(item);
 		// After whatever the window asked before (the commands' order), and before the next.
 		await chain.catch(() => {});
 		try {

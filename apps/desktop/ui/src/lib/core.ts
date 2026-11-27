@@ -987,6 +987,8 @@ export const setShuffle = (on: boolean) => told('/api/player/shuffle', { on });
 export const setRepeat = (mode: 'off' | 'all' | 'one') => told('/api/player/repeat', { mode });
 /** Adds songs to the queue: at its end, or (`next`) right after the one playing. */
 export const enqueue = (items: PlayEntry[], next: boolean) => told('/api/player/enqueue', { items, next });
+/** Songs told by what they are (a session's requests), found as the phone's are; at most 100 at once. */
+export const enqueueSongs = (songs: DescribedSong[], next: boolean) => told('/api/player/enqueue', { songs, next });
 export const removeFromQueue = (index: number) => told('/api/player/remove', { index });
 export const moveInQueue = (from: number, to: number) => told('/api/player/move', { from, to });
 
