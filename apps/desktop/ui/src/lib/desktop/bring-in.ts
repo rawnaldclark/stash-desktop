@@ -36,6 +36,22 @@ export type PhoneLibrary = {
 	choice?: LeftOut | null;
 };
 
+/** What a phone's library brought with a take (the done card's line). */
+export type Brought = { likes: number; playlists_new: number; playlists_updated: number; plays: number; songs: number };
+
+/** The done card's line for what the phone's library brought: what is new, or that it was up to date. */
+export function broughtLine(b: Brought): string {
+	const count = (k: number, one: string, many: string) => `${n(k)} ${k === 1 ? one : many}`;
+	const parts = [
+		b.playlists_new ? count(b.playlists_new, 'new playlist', 'new playlists') : '',
+		b.playlists_updated ? `${n(b.playlists_updated)} updated` : '',
+		b.likes ? count(b.likes, 'new like', 'new likes') : '',
+		b.plays ? count(b.plays, 'new play', 'new plays') : '',
+		b.songs ? count(b.songs, 'new song to stream', 'new songs to stream') : ''
+	].filter(Boolean);
+	return parts.length ? `From your library: ${joinAnd(parts)}.` : 'Your likes, playlists and plays were up to date.';
+}
+
 /** What was left out of a phone's library before: each later send brings in all but these. */
 export type LeftOut = {
 	likes_left_out: string[];

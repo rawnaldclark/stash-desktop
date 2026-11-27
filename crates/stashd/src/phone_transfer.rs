@@ -164,6 +164,8 @@ pub(crate) struct Now {
     folder: Option<String>,
     /// Songs can't be kept in Stash's library (not the downloads folder), which is on `drive`.
     library: bool,
+    /// What the phone's library brought with this take, when it came in.
+    brought: Option<library::Brought>,
     drive: Option<String>,
     /// The send this is about (its `sent_at_ms`): a try that carries on the same send adds to what was said of it.
     /// Not told.
@@ -1276,7 +1278,10 @@ fn take_songs(
             return now;
         }
         match library::bring_in(ctx, phone.name(), list, choice, parts, from) {
-            Ok(()) => {}
+            Ok(brought) => {
+                now.brought = Some(brought);
+                ctx.board.set(now.clone());
+            }
             Err(why) if why.starts_with(LIBRARY) => return cannot_save(ctx, now, &why),
             Err(why) => (ctx.log)(&format!("the phone's library did not come in, its songs do: {why}")),
         }
@@ -4839,6 +4844,28 @@ mod tests {
             .collect();
         said.sort();
         assert_eq!(said, ["custom_7", "spotify-6"]);
+    }
+
+    #[test]
+    fn a_take_says_what_the_library_brought() {
+        let here = had_two("library-brought");
+        let phone = sending_with("Test phone", live_at(8));
+        let mut tries = Tries::default();
+        here.take(&phone, &mut tries);
+        assert!(choose_with(&here, 8, Choice::All, parts(true, true, &["custom_7", "spotify-6"], false)).is_ok());
+        here.take(&phone, &mut tries);
+        let told = here.told();
+        assert_eq!(told["state"], "done");
+        let brought = &told["brought"];
+        assert_eq!((brought["likes"].as_u64(), brought["plays"].as_u64()), (Some(4), Some(2)));
+        assert_eq!((brought["playlists_new"].as_u64(), brought["playlists_updated"].as_u64()), (Some(2), Some(0)));
+        // The same send's library again, nothing new: all naught.
+        let again = one_more("Test phone", 9, true, &live_at(9));
+        here.take(&again, &mut tries);
+        assert_eq!(here.choose(9, &[]), Ok(0));
+        here.take(&again, &mut tries);
+        let told = here.told();
+        assert_eq!(told["brought"]["playlists_new"].as_u64(), Some(0), "{told}");
     }
 
     #[test]

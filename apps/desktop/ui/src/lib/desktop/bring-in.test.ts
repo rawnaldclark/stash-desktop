@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { filesToTake, firstPicks, flip, isOn, likeParts, setKeys, lines, listLine, ownLists, syncedLists, takeBody, tally, type PhoneLibrary, type SentList } from './bring-in';
+import { broughtLine, filesToTake, firstPicks, flip, isOn, likeParts, setKeys, lines, listLine, ownLists, syncedLists, takeBody, tally, type PhoneLibrary, type SentList } from './bring-in';
 import type { Offer, Offered } from './phone-songs';
 
 const song = (o: Partial<Offered>): Offered => ({
@@ -190,6 +190,15 @@ describe('the bar', () => {
 		const t = tally(offer, lib, p);
 		expect(t.nothing).toBe(true);
 		expect(lines(t, p)).toEqual({ top: 'Nothing picked yet', sub: 'Pick something to bring it in.' });
+	});
+});
+
+describe('what the library brought, on the done card', () => {
+	it('says what is new, or that it was up to date', () => {
+		const none = { likes: 0, playlists_new: 0, playlists_updated: 0, plays: 0, songs: 0 };
+		expect(broughtLine(none)).toBe('Your likes, playlists and plays were up to date.');
+		expect(broughtLine({ ...none, playlists_new: 1, playlists_updated: 4, songs: 10 })).toBe('From your library: 1 new playlist, 4 updated and 10 new songs to stream.');
+		expect(broughtLine({ ...none, likes: 1, plays: 1200 })).toBe('From your library: 1 new like and 1,200 new plays.');
 	});
 });
 

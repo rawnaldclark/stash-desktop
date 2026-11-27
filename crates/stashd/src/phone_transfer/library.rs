@@ -435,7 +435,7 @@ pub(super) fn bring_in(
     songs: &Choice,
     left_out: &LeftOut,
     from: &FromPhone,
-) -> Result<(), String> {
+) -> Result<Brought, String> {
     let mut incoming = chosen_parts(from, left_out);
     let mirrored: HashSet<String> = incoming
         .playlists
@@ -473,7 +473,24 @@ pub(super) fn bring_in(
         summary.songs_added
     ));
     (ctx.edited)();
-    Ok(())
+    Ok(Brought {
+        likes: summary.likes_added,
+        playlists_new: summary.playlists_added,
+        playlists_updated: summary.playlists_merged,
+        plays: summary.plays_added,
+        songs: summary.songs_added,
+    })
+}
+
+/// What a phone's library brought in ([`bring_in`]), as the done card says it: likes, playlists made and those that
+/// changed, plays, and songs new to the library (to stream, or files coming).
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct Brought {
+    pub likes: usize,
+    pub playlists_new: usize,
+    pub playlists_updated: usize,
+    pub plays: usize,
+    pub songs: usize,
 }
 
 /// What comes in of `from` but for what was left out: its likes made where they were not left out, its plays when

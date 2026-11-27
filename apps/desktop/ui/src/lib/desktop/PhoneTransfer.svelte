@@ -13,6 +13,7 @@
 	import { ui } from '../ui/state.svelte';
 	import { songs } from '../ui/format';
 	import type { Offer } from './phone-songs';
+	import { broughtLine, type Brought } from './bring-in';
 
 	type Now = {
 		state: 'idle' | 'connected' | 'preparing' | 'ready' | 'taking' | 'stalled' | 'done' | 'stopped' | 'withdrawn' | 'cannot_save';
@@ -44,6 +45,8 @@
 		with_library?: boolean;
 		/** What of a library comes in was chosen before for this phone: a take with no choice brings in the same. */
 		library_choice_kept?: boolean;
+		/** What the phone's library brought with this take, when it came in. */
+		brought?: Brought | null;
 	};
 	let now = $state<Now | null>(null);
 	let closedAt = $state(0);
@@ -161,16 +164,21 @@
 						};
 			}
 			case 'done': {
-				const lines = [`${songs(now.taken)} added to your downloads.`];
+				// A sync that brought no new song but the phone's library is the library brought up to date, not nothing.
+				const synced = !!now.brought && !now.taken && !now.had && !now.not_kept && !now.failed;
+				const lines = synced ? [] : [`${songs(now.taken)} added to your downloads.`];
+				if (now.brought) lines.push(broughtLine(now.brought));
 				if (now.had) lines.push(`${songs(now.had)} you had here already.`);
 				if (now.not_kept) lines.push(`${songs(now.not_kept)} in your library to download here: their files can't be kept.`);
-				if (now.left) lines.push(now.left === 1 ? 'The other song stays in Stash on the phone.' : `The other ${now.left.toLocaleString()} stay in Stash on the phone.`);
+				if (now.left && synced) lines.push(now.left === 1 ? 'The song you left out stays on the phone.' : `The ${now.left.toLocaleString()} songs you left out stay on the phone.`);
+				else if (now.left) lines.push(now.left === 1 ? 'The other song stays in Stash on the phone.' : `The other ${now.left.toLocaleString()} stay in Stash on the phone.`);
 				if (now.failed && now.trying_again) lines.push(`${songs(now.failed)} didn't come in yet: the computer tries ${now.failed === 1 ? 'it' : 'them'} again.`);
 				else if (now.failed) lines.push(`${songs(now.failed)} didn't come in. Send again from the phone to try them.`);
 				else if (now.list_left && now.trying_again) lines.push('Keep the phone plugged in: the computer finishes with it in a moment.');
 				else if (now.list_left) lines.push('Unplug the phone and plug it back in so the computer can finish with it.');
 				else if (now.cleared || now.left) lines.push('You can unplug the phone.');
-				return { title: now.failed ? `Songs from ${from}, with trouble` : `Songs from ${from} are here`, lines, bar: undefined };
+				const title = now.failed ? `Songs from ${from}, with trouble` : synced ? `${from} is up to date` : `Songs from ${from} are here`;
+				return { title, lines, bar: undefined };
 			}
 			default:
 				return null;
