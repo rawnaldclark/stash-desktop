@@ -13,7 +13,7 @@
 	import Icon from '../ui/Icon.svelte';
 	import { ui } from '../ui/state.svelte';
 	import { folders } from './folders.svelte';
-	import { firstPicks, flip, gb, LIKE_NAME, likeParts, lines, listLine, n, ownLists, syncedLists, takeBody, tally, type PhoneLibrary, type Picks, type SentList } from './bring-in';
+	import { firstPicks, flip, gb, isOn, LIKE_NAME, likeParts, lines, listLine, n, ownLists, setKeys, syncedLists, takeBody, tally, type PhoneLibrary, type Picks, type SentList } from './bring-in';
 	import type { Offer } from './phone-songs';
 
 	/** `first`: the first time Stash opens (how it runs is set by what is brought in); else a later send, from the corner card. */
@@ -87,6 +87,7 @@
 		return () => {
 			alive = false;
 			clearTimeout(timer);
+			end();
 		};
 	});
 
@@ -118,6 +119,105 @@
 	const toggle = (key: string) => {
 		if (picks && !busy) picks = flip(picks, key);
 	};
+	/** Ticks, or leaves out, every one of `keys` (Select all, Select none). */
+	const setAll = (keys: string[], on: boolean) => {
+		if (picks && !busy) picks = setKeys(picks, keys, on);
+	};
+	const ownKeys = $derived([...(fresh.length ? ['downloads'] : []), ...likes.map((l) => `likes:${l.service}`), ...(lib?.plays ? ['plays'] : []), ...own.map((p) => p.id)]);
+	const foundKeys = $derived(found.map((p) => p.id));
+
+	// A drag across covers picks many at once, as on the Windows desktop (owner: "users need to be able to drag to
+	// select multiple icons like the windows home screen, as well as deselect options"). The covers inside the box all
+	// go one way: left out if the drag began on a cover that was coming, else ticked. Near the view's top or bottom
+	// it scrolls. A drag that never moves 6 px is a tap.
+	type Sweep = { on: boolean; keys: Set<string>; box: { left: number; top: number; width: number; height: number } };
+	let sweep = $state<Sweep | null>(null);
+	let root = $state<HTMLElement>();
+	let drag: { x: number; y: number; px: number; py: number; on: boolean; scroller: HTMLElement | null; moved: boolean; raf: number } | null = null;
+	/** Whether `key` shows as coming: as the drag under way would leave it, else as ticked. */
+	const shownOn = (key: string) => (sweep?.keys.has(key) ? sweep.on : !!picks && isOn(picks, key));
+
+	function down(e: PointerEvent) {
+		if (e.button !== 0 || e.pointerType === 'touch' || busy || !picks) return;
+		const el = e.target as HTMLElement;
+		if (el.closest('input, label, .bi-sw, .bi-sel, .bi-take, .bi-alts, .bi-owed')) return;
+		e.preventDefault();
+		const card = el.closest<HTMLElement>('[data-key]');
+		const scroller = (e.currentTarget as HTMLElement).closest<HTMLElement>('.main') ?? (document.scrollingElement as HTMLElement | null);
+		const sy = scroller?.scrollTop ?? 0;
+		drag = { x: e.clientX, y: e.clientY + sy, px: e.clientX, py: e.clientY, on: card?.dataset.key ? !isOn(picks, card.dataset.key) : true, scroller, moved: false, raf: 0 };
+		window.addEventListener('pointermove', move);
+		window.addEventListener('pointerup', up);
+		window.addEventListener('pointercancel', cancel);
+		window.addEventListener('keydown', escape);
+	}
+	function move(e: PointerEvent) {
+		if (!drag) return;
+		drag.px = e.clientX;
+		drag.py = e.clientY;
+		if (!drag.moved) {
+			if (Math.hypot(e.clientX - drag.x, e.clientY + (drag.scroller?.scrollTop ?? 0) - drag.y) < 6) return;
+			drag.moved = true;
+			drag.raf = requestAnimationFrame(follow);
+		}
+		measure();
+	}
+	/** Near the view's top or bottom, scrolls it (faster the nearer the edge), the box keeping its start. */
+	function follow() {
+		if (!drag) return;
+		const s = drag.scroller;
+		if (s) {
+			const r = s === document.scrollingElement ? { top: 0, bottom: innerHeight } : s.getBoundingClientRect();
+			const by = drag.py < r.top + 64 ? drag.py - (r.top + 64) : drag.py > r.bottom - 64 ? drag.py - (r.bottom - 64) : 0;
+			if (by) {
+				s.scrollTop += Math.max(-28, Math.min(28, by / 2));
+				measure();
+			}
+		}
+		drag.raf = requestAnimationFrame(follow);
+	}
+	/** The box, and the covers it touches (in a shelf, only those the shelf shows). */
+	function measure() {
+		if (!drag || !root) return;
+		const sy = drag.scroller?.scrollTop ?? 0;
+		const x0 = Math.min(drag.x, drag.px), x1 = Math.max(drag.x, drag.px);
+		const y0 = Math.min(drag.y, drag.py + sy), y1 = Math.max(drag.y, drag.py + sy);
+		const keys = new Set<string>();
+		for (const c of root.querySelectorAll<HTMLElement>('[data-key]')) {
+			const b = c.getBoundingClientRect();
+			const clip = c.closest('.bi-shelf')?.getBoundingClientRect();
+			const left = Math.max(b.left, clip?.left ?? -Infinity), right = Math.min(b.right, clip?.right ?? Infinity);
+			if (right > left && right >= x0 && left <= x1 && b.bottom + sy >= y0 && b.top + sy <= y1 && c.dataset.key) keys.add(c.dataset.key);
+		}
+		sweep = { on: drag.on, keys, box: { left: x0, top: y0 - sy, width: x1 - x0, height: y1 - y0 } };
+	}
+	function up() {
+		const moved = !!drag?.moved;
+		end();
+		const done = sweep;
+		sweep = null;
+		if (!moved || !done || !picks) return;
+		picks = setKeys(picks, [...done.keys], done.on);
+		// The click that ends a drag is not a tap on the cover under it.
+		const eat = (e: Event) => (e.stopPropagation(), e.preventDefault());
+		window.addEventListener('click', eat, { capture: true, once: true });
+		setTimeout(() => window.removeEventListener('click', eat, { capture: true }), 0);
+	}
+	function cancel() {
+		end();
+		sweep = null;
+	}
+	function escape(e: KeyboardEvent) {
+		if (e.key === 'Escape') cancel();
+	}
+	function end() {
+		if (drag?.raf) cancelAnimationFrame(drag.raf);
+		drag = null;
+		window.removeEventListener('pointermove', move);
+		window.removeEventListener('pointerup', up);
+		window.removeEventListener('pointercancel', cancel);
+		window.removeEventListener('keydown', escape);
+	}
 	const art = (u: string) => [{ url: artUrl(u) ?? '' }];
 	const initial = (name: string) => name.match(/[A-Za-z0-9]/)?.[0].toUpperCase() ?? '#';
 
@@ -187,8 +287,8 @@
 {/snippet}
 
 {#snippet listCard(p: SentList)}
-	{@const on = !!picks?.lists.includes(p.id)}
-	<button type="button" class="bi-card" class:on aria-pressed={on} disabled={busy} onclick={() => toggle(p.id)}>
+	{@const on = shownOn(p.id)}
+	<button type="button" class="bi-card" class:on data-key={p.id} aria-pressed={on} disabled={busy} onclick={() => toggle(p.id)}>
 		<span class="tile bi-art">{@render cover(p.covers, p.name)}</span>
 		{@render badge(on)}
 		<b>{p.name}</b>
@@ -214,7 +314,16 @@
 	</div>
 {/snippet}
 
-<section class="bi" aria-labelledby="bi-h">
+{#snippet sel(keys: string[])}
+	{@const coming = picks ? keys.filter((k) => isOn(picks!, k)).length : 0}
+	<div class="bi-sel" role="group" aria-label="Select">
+		<button type="button" disabled={busy || coming === keys.length} onclick={() => setAll(keys, true)}>Select all</button>
+		<button type="button" disabled={busy || !coming} onclick={() => setAll(keys, false)}>Select none</button>
+	</div>
+{/snippet}
+
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<section class="bi" aria-labelledby="bi-h" bind:this={root} onpointerdown={down}>
 	{#if owed}
 		<div class="bi-owed" role="alert">
 			<span>Your music is coming in, but Stash couldn’t finish setting up{trouble ? `: ${trouble}` : '.'}</span>
@@ -270,19 +379,22 @@
 			</div>
 		</div>
 
-		<div class="bi-sec"><div><h2>Coming with you</h2><p>{lib ? 'Your downloads, likes, plays and playlists. Tap one to leave it out.' : 'Tap it to leave it out.'}</p></div></div>
+		<div class="bi-sec">
+			<div><h2>Coming with you</h2><p>{lib ? 'Your downloads, likes, plays and playlists. Tap one to leave it out, or drag across several.' : 'Tap it to leave it out.'}</p></div>
+			{#if ownKeys.length > 1}{@render sel(ownKeys)}{/if}
+		</div>
 		<div class="bi-shelf">
 			{#if fresh.length}
-				<button type="button" class="bi-card" class:on={picks.downloads} aria-pressed={picks.downloads} disabled={busy} onclick={() => toggle('downloads')}>
+				<button type="button" class="bi-card" class:on={shownOn('downloads')} data-key="downloads" aria-pressed={shownOn('downloads')} disabled={busy} onclick={() => toggle('downloads')}>
 					<span class="tile bi-art">{@render cover(albumArt.slice(0, 4), 'downloads')}</span>
-					{@render badge(picks.downloads)}
+					{@render badge(shownOn('downloads'))}
 					<b>All your downloads</b>
 					<i>{n(fresh.length)} songs · {gb(fresh.reduce((sum, s) => sum + s.bytes, 0))}</i>
 				</button>
 			{/if}
 			{#each likes as l (l.service)}
-				{@const on = picks.likes.includes(l.service)}
-				<button type="button" class="bi-card" class:on aria-pressed={on} disabled={busy} onclick={() => toggle(`likes:${l.service}`)}>
+				{@const on = shownOn(`likes:${l.service}`)}
+				<button type="button" class="bi-card" class:on data-key="likes:{l.service}" aria-pressed={on} disabled={busy} onclick={() => toggle(`likes:${l.service}`)}>
 					<span class="tile bi-art"><span class="tile-liked bi-lk-{l.service}"><Icon name="favorite" /></span></span>
 					{@render badge(on)}
 					<b>{LIKE_NAME[l.service] ?? 'Liked songs'}</b>
@@ -290,9 +402,9 @@
 				</button>
 			{/each}
 			{#if lib && lib.plays}
-				<button type="button" class="bi-card" class:on={picks.plays} aria-pressed={picks.plays} disabled={busy} onclick={() => toggle('plays')}>
+				<button type="button" class="bi-card" class:on={shownOn('plays')} data-key="plays" aria-pressed={shownOn('plays')} disabled={busy} onclick={() => toggle('plays')}>
 					<span class="tile bi-art"><span class="bi-stat"><b>{n(lib.plays)}</b><i>plays</i></span></span>
-					{@render badge(picks.plays)}
+					{@render badge(shownOn('plays'))}
 					<b>Your plays</b>
 					<i>For your stats and mixes</i>
 				</button>
@@ -306,10 +418,13 @@
 					<h2>From your streaming services</h2>
 					<p>
 						{added === synced.length ? `All ${n(synced.length)} coming` : added ? `${n(added)} of ${n(synced.length)} coming` : `${n(synced.length)} synced on your phone, none coming`}.
-						{added ? `Their downloaded songs come in as files${picks.onlyHere ? '.' : ', the rest stream.'} Tap one to leave it out.` : 'Tap one to bring it in.'}
+						{added ? `Their downloaded songs come in as files${picks.onlyHere ? '.' : ', the rest stream.'}` : ''} Tap one, or drag across many at once.
 					</p>
 				</div>
-				<label class="bi-find"><Icon name="search" /><input id="bi-find" type="search" placeholder="Find a playlist" aria-label="Find a playlist" bind:value={q} /></label>
+				<div class="bi-tools">
+					{#if foundKeys.length}{@render sel(foundKeys)}{/if}
+					<label class="bi-find"><Icon name="search" /><input id="bi-find" type="search" placeholder="Find a playlist" aria-label="Find a playlist" bind:value={q} /></label>
+				</div>
 			</div>
 			<div class="bi-grid">
 				{#each found as p (p.id)}{@render listCard(p)}{/each}
@@ -343,6 +458,7 @@
 			</div>
 		{/if}
 	{/if}
+	{#if sweep}<div class="bi-box" style="left:{sweep.box.left}px;top:{sweep.box.top}px;width:{sweep.box.width}px;height:{sweep.box.height}px" aria-hidden="true"></div>{/if}
 </section>
 
 <style>
@@ -419,6 +535,11 @@
 	.bi-alt b { font: 600 14px/1.3 var(--font-body); }
 	.bi-alt i { font: 400 12.5px/1.35 var(--font-body); font-style: normal; color: var(--wp-text-2); }
 	.bi-trouble { margin-top: 12px; color: #f87171; }
+	.bi-box { position: fixed; z-index: 60; pointer-events: none; border: 1px solid var(--acc); border-radius: 4px; background: color-mix(in oklab, var(--acc) 18%, transparent); }
+	.bi-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+	.bi-sel { display: flex; gap: 6px; }
+	.bi-sel button { height: 32px; padding: 0 13px; border-radius: 999px; border: 1px solid var(--wp-line-2); color: var(--wp-text); font: 600 12.5px/1 var(--font-body); white-space: nowrap; transition: background-color var(--dur-short); }
+	.bi-sel button:disabled { border-color: var(--wp-line); color: var(--wp-num); cursor: default; }
 	.bi-owed { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 0 0 16px; padding: 12px 12px 12px 16px; border-radius: 12px; background: rgb(251 191 36 / .12); color: var(--wp-text); font: 500 14px/1.4 var(--font-body); }
 	.bi-owed span { flex: 1; min-width: 240px; }
 
@@ -437,6 +558,7 @@
 		.bi-card:not(:disabled):hover .bi-pk { transform: scale(1.12); }
 		.bi-go:not(:disabled):hover { filter: brightness(1.1); }
 		.bi-sw:not(:disabled):hover { color: var(--wp-text); }
+		.bi-sel button:not(:disabled):hover { background: var(--wp-hover); }
 	}
 	@keyframes bi-drift { from { transform: rotate(-7deg) translateX(0); } to { transform: rotate(-7deg) translateX(-7%); } }
 	@keyframes bi-breathe { 0%, 100% { opacity: .3; } 50% { opacity: .75; } }

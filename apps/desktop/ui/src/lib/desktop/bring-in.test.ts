@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { filesToTake, firstPicks, flip, likeParts, lines, listLine, ownLists, syncedLists, takeBody, tally, type PhoneLibrary, type SentList } from './bring-in';
+import { filesToTake, firstPicks, flip, isOn, likeParts, setKeys, lines, listLine, ownLists, syncedLists, takeBody, tally, type PhoneLibrary, type SentList } from './bring-in';
 import type { Offer, Offered } from './phone-songs';
 
 const song = (o: Partial<Offered>): Offered => ({
@@ -89,6 +89,20 @@ describe('ticking', () => {
 		expect(flip(p, 'likes:youtube').likes).toEqual(['stash', 'spotify']);
 		expect(flip(flip(p, 'likes:youtube'), 'likes:youtube').likes).toEqual(['stash', 'spotify', 'youtube']);
 		expect(flip(p, 'sp-2').lists).toEqual(['app-1', 'stash-mix-1', 'spotify-album-1', 'sp-1']);
+	});
+});
+
+describe('many at once (a drag across covers, Select all, Select none)', () => {
+	it('leaves every one out, of any kind', () => {
+		const p = setKeys(firstPicks(offer, all), ['downloads', 'likes:spotify', 'sp-1', 'sp-2'], false);
+		expect(p).toMatchObject({ downloads: false, plays: true, likes: ['stash', 'youtube'], lists: ['app-1', 'stash-mix-1', 'spotify-album-1'] });
+		expect(['downloads', 'likes:spotify', 'sp-2', 'app-1'].map((k) => isOn(p, k))).toEqual([false, false, false, true]);
+	});
+	it('ticks every one, keeping the order and never twice', () => {
+		const none = setKeys(firstPicks(offer, all), ['plays', 'likes:stash', 'likes:spotify', 'likes:youtube', 'app-1', 'stash-mix-1', 'spotify-album-1', 'sp-1', 'sp-2'], false);
+		expect(none).toMatchObject({ plays: false, likes: [], lists: [] });
+		const some = setKeys(none, ['sp-2', 'likes:youtube', 'sp-1'], true);
+		expect(setKeys(some, ['sp-1', 'app-1'], true)).toMatchObject({ likes: ['youtube'], lists: ['sp-2', 'sp-1', 'app-1'] });
 	});
 });
 

@@ -80,6 +80,28 @@ export function flip(picks: Picks, key: string): Picks {
 	return { ...picks, lists };
 }
 
+/** Whether `key` (as [flip] takes it) is ticked. */
+export function isOn(picks: Picks, key: string): boolean {
+	if (key === 'downloads' || key === 'plays') return picks[key];
+	if (key.startsWith('likes:')) return picks.likes.includes(key.slice(6));
+	return picks.lists.includes(key);
+}
+
+/** Ticks every one of `keys` (as [flip] takes them), or leaves every one out: a drag across covers, Select all, Select none. */
+export function setKeys(picks: Picks, keys: string[], on: boolean): Picks {
+	const want = new Set(keys);
+	const likes = keys.filter((k) => k.startsWith('likes:')).map((k) => k.slice(6));
+	const lists = keys.filter((k) => k !== 'downloads' && k !== 'plays' && !k.startsWith('likes:'));
+	const add = (have: string[], more: string[]) => [...have, ...more.filter((x) => !have.includes(x))];
+	return {
+		...picks,
+		downloads: want.has('downloads') ? on : picks.downloads,
+		plays: want.has('plays') ? on : picks.plays,
+		likes: on ? add(picks.likes, likes) : picks.likes.filter((s) => !likes.includes(s)),
+		lists: on ? add(picks.lists, lists) : picks.lists.filter((id) => !lists.includes(id))
+	};
+}
+
 /**
  * The phone's files to take: every song this computer doesn't have with All your downloads ticked; without it, the
  * ones liked (with Liked songs) or in a playlist ticked, so those still play offline.
