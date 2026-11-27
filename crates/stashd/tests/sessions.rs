@@ -572,7 +572,36 @@ fn a_rooms_songs_play_here_from_their_place_and_autoplay_waits_for_the_rooms_nex
     play(json!({ "songs": [song("two")], "position_ms": 3500 }));
     let added = client.send("POST", "/api/player/enqueue", None, &json!({ "items": [{ "id": row("three")["id"] }] }));
     assert_eq!(added.status, 200);
+    assert_eq!(added.json()["qids"].as_array().map(Vec::len), Some(1), "{}", added.text);
     until("autoplay to add after the song the listener added", &|s| s["queue_len"].as_u64() > Some(2));
+
+    // A listener's request the DJ took (this computer hosting): songs described, not entries, added after the one
+    // playing; the library's when it has them, as described when not. The answer is the player's, and what was added.
+    let queued = play(json!({ "songs": [song("one")], "play": false }));
+    let requested = client.send(
+        "POST",
+        "/api/player/enqueue",
+        None,
+        &json!({ "songs": [song("four"), { "title": "Asked for", "artist": "A listener", "youtube": "dQw4w9WgXcQ" }], "next": true }),
+    );
+    assert_eq!(requested.status, 200, "{}", requested.text);
+    let answer = requested.json();
+    assert_eq!((answer["available"].as_bool(), answer["queue_len"].as_u64()), (Some(true), Some(3)), "{answer}");
+    let qids = answer["qids"].as_array().cloned().unwrap_or_default();
+    assert_eq!(qids.len(), 2, "{answer}");
+    let rows = client.get("/api/player/queue?offset=0&limit=5").json()["rows"].clone();
+    assert_eq!(rows[0]["qid"], queued["start_qid"]);
+    assert_eq!((rows[1]["id"].clone(), rows[1]["qid"].clone()), (row("four")["id"].clone(), qids[0].clone()));
+    assert_eq!((rows[2]["title"].as_str(), rows[2]["qid"].clone()), (Some("Asked for"), qids[1].clone()));
+    assert_eq!(rows[2]["addon"]["track"], "dQw4w9WgXcQ");
+    for wrong in [
+        json!({ "songs": [] }),
+        json!({ "songs": [{ "title": "No artist" }] }),
+        json!({ "songs": [song("one")], "items": [{ "id": one["id"] }] }),
+    ] {
+        assert_eq!(client.send("POST", "/api/player/enqueue", None, &wrong).status, 400, "{wrong}");
+    }
+    assert_eq!(player()["queue_len"].as_u64(), Some(3), "a refused request adds nothing");
 
     // What isn't a body is refused.
     for wrong in [

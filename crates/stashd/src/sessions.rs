@@ -480,14 +480,7 @@ impl Play {
             return Err("the body is an object".into());
         }
         let given = |name: &str| body.get(name).filter(|v| !v.is_null());
-        let listed = given("songs").and_then(Value::as_array).ok_or("songs is a list")?;
-        if listed.is_empty() || listed.len() > MAX_SONGS {
-            return Err(format!("songs holds 1 to {MAX_SONGS} songs"));
-        }
-        let mut songs = Vec::with_capacity(listed.len());
-        for (n, song) in listed.iter().enumerate() {
-            songs.push(song_of(song).ok_or_else(|| format!("song {n} needs a title and an artist"))?);
-        }
+        let songs = read_songs(body)?;
         let at = match given("at") {
             None => 0,
             Some(at) => at
@@ -520,6 +513,25 @@ impl Play {
             from: from.map(crate::serve::capped).filter(|f| !f.is_empty()),
         })
     }
+}
+
+/// The `songs` of a body: 1 to [`MAX_SONGS`] songs someone else describes (`{ title, artist, album?, isrc?,
+/// duration_ms?, art?, youtube? }`), each read by [`song_of`]; why they are not. Shared by `POST /api/player/songs` and
+/// `POST /api/player/enqueue` (a listener's request the DJ took).
+pub(crate) fn read_songs(body: &Value) -> std::result::Result<Vec<PhoneSong>, String> {
+    let listed = body
+        .get("songs")
+        .filter(|v| !v.is_null())
+        .and_then(Value::as_array)
+        .ok_or("songs is a list")?;
+    if listed.is_empty() || listed.len() > MAX_SONGS {
+        return Err(format!("songs holds 1 to {MAX_SONGS} songs"));
+    }
+    listed
+        .iter()
+        .enumerate()
+        .map(|(n, song)| song_of(song).ok_or_else(|| format!("song {n} needs a title and an artist")))
+        .collect()
 }
 
 /// One song as the window describes it, read by the rules a song from the phone is read by (`read_song`, the library

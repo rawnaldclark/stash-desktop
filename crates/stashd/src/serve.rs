@@ -1905,18 +1905,19 @@ pub(crate) fn body_json(request: &mut Request) -> Result<Value> {
 
 /// The player's state as the window reads it. Without a player: `available: false` and the reason.
 pub(crate) fn player_reply(state: &State) -> Reply {
+    reply_json(200, player_value(state))
+}
+
+fn player_value(state: &State) -> Value {
     match &state.player {
         Ok(player) => {
             let mut answer = json!(player.state());
             answer["available"] = json!(true);
             answer["edits"] = json!(state.edits.load(Ordering::Relaxed));
             answer["station"] = state.radio.summary(player);
-            reply_json(200, answer)
+            answer
         }
-        Err(why) => reply_json(
-            200,
-            json!({ "available": false, "reason": why, "status": "idle" }),
-        ),
+        Err(why) => json!({ "available": false, "reason": why, "status": "idle" }),
     }
 }
 
@@ -2245,14 +2246,33 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
             };
             playing.play_from(items, start, from)?;
         }
-        // Adds tracks (as in `items` above) right after the playing one (`"next": true`) or at the end.
+        // Adds tracks right after the playing one (`"next": true`) or at the end: `{"items": [...]}` as in `items`
+        // above, or `{"songs": [...]}`, songs someone else describes (a session listener's request the DJ took), found
+        // as `/api/player/songs` finds them. Answers the player's state and the queue numbers of what was added
+        // (`qids`).
         "/api/player/enqueue" => {
-            let list = body
-                .get("items")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let (items, _) = listed_items(&state.library.lock().unwrap(), &list, 0)?;
+            let given = |name: &str| body.get(name).filter(|v| !v.is_null());
+            let (items, _) = if given("songs").is_some() {
+                if given("items").is_some() {
+                    return Ok(Some(refuse(400, "items or songs, not both")));
+                }
+                let songs = match crate::sessions::read_songs(&body) {
+                    Ok(songs) => songs,
+                    Err(why) => return Ok(Some(refuse(400, &why))),
+                };
+                let found = crate::remote::items_for(&state.library.lock().unwrap(), &songs, 0);
+                if found.0.is_empty() {
+                    return Ok(Some(refuse(409, crate::blocking::ALL_BLOCKED)));
+                }
+                found
+            } else {
+                let list = body
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                listed_items(&state.library.lock().unwrap(), &list, 0)?
+            };
             let Some((items, _)) =
                 crate::blocking::leave_out(&state.library.lock().unwrap(), items, 0)?
             else {
@@ -2261,12 +2281,15 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
             let Some((items, _)) = offline_queue(state, items, 0)? else {
                 return Ok(Some(refuse(409, NOT_HERE_OFFLINE)));
             };
-            playing.enqueue(
+            let qids = playing.enqueue(
                 items,
                 body.get("next").and_then(Value::as_bool).unwrap_or(false),
             );
-            // Songs added by the listener make the queue theirs: a session's queue is autoplay's again.
+            // Songs added make the queue the listener's: a session's queue is autoplay's again.
             state.sessions.hold_autoplay(None);
+            let mut answer = player_value(state);
+            answer["qids"] = json!(qids);
+            return Ok(Some(reply_json(200, answer)));
         }
         "/api/player/remove" => {
             let place = body
