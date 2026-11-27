@@ -2,7 +2,7 @@
 // the send its Send to computer made (`/api/phone/songs`) and, from a phone new enough, its whole library with it
 // (`/api/phone/library`): likes, plays and every playlist, the ones synced from a streaming service marked as such.
 // This works out what comes in from what is ticked, and the line that says so.
-import type { Offer } from './phone-songs';
+import type { Offer, Offered } from './phone-songs';
 
 /** A playlist the phone sent: `from` names the streaming service it is synced from (none: the listener's own). */
 export type SentList = {
@@ -28,6 +28,20 @@ export type PhoneLibrary = {
 	plays: number;
 	playlists: SentList[];
 	albums: { title: string; artist: string; art_url: string | null; songs: number }[];
+	/** Of the send's files, the services each liked one is liked on; none from an older phone. */
+	liked_files?: Record<string, string[]> | null;
+	/** What was left out when this phone's library was brought in before; null the first time. */
+	choice?: LeftOut | null;
+};
+
+/** What was left out of a phone's library before: each later send brings in all but these. */
+export type LeftOut = {
+	likes_left_out: string[];
+	all_likes_left_out: boolean;
+	/** Whether the plays came in. */
+	plays: boolean;
+	playlists_left_out: string[];
+	only_here: boolean;
 };
 
 /** Songs liked on one service (`all`: an older phone's likes, which say nowhere). */
@@ -60,12 +74,14 @@ export const syncedLists = (lib: PhoneLibrary | null) => (lib?.playlists ?? []).
 
 /** As the screen opens: everything on the phone is coming (owner: "a live transfer of everything i have synced"). */
 export function firstPicks(offer: Offer, lib: PhoneLibrary | null): Picks {
+	// Brought in before: as it was left, so what was left out then stays out, and what is new since comes.
+	const left = lib?.choice ?? null;
 	return {
 		downloads: offer.songs.some((s) => !s.here),
-		likes: likeParts(lib).map((l) => l.service),
-		plays: !!lib && lib.plays > 0,
-		lists: (lib?.playlists ?? []).map((p) => p.id),
-		onlyHere: false
+		likes: left?.all_likes_left_out ? [] : likeParts(lib).map((l) => l.service).filter((s) => !left?.likes_left_out.includes(s)),
+		plays: !!lib && lib.plays > 0 && (left?.plays ?? true),
+		lists: (lib?.playlists ?? []).map((p) => p.id).filter((id) => !left?.playlists_left_out.includes(id)),
+		onlyHere: left?.only_here ?? false
 	};
 }
 
@@ -110,7 +126,12 @@ export function filesToTake(offer: Offer, lib: PhoneLibrary | null, picks: Picks
 	const fresh = offer.songs.filter((s) => !s.here);
 	if (picks.downloads) return fresh.map((s) => s.file);
 	const names = new Set((lib?.playlists ?? []).filter((p) => picks.lists.includes(p.id)).map((p) => p.name));
-	return fresh.filter((s) => (picks.likes.length > 0 && s.liked) || s.playlists.some((n) => names.has(n))).map((s) => s.file);
+	// A liked song comes for its likes when liked on a service whose likes are ticked (one the phone's likes do not
+	// place was liked in Stash); an older phone's likes come all or none.
+	const on = lib?.liked_files;
+	const liked = (s: Offered) =>
+		on ? (on[s.file] ?? (s.liked ? ['stash'] : [])).some((service) => picks.likes.includes(service)) : picks.likes.length > 0 && s.liked;
+	return fresh.filter((s) => liked(s) || s.playlists.some((n) => names.has(n))).map((s) => s.file);
 }
 
 /** The body of `POST /api/phone/take` for what is ticked. A phone too old to send its library sends songs only. */

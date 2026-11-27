@@ -4393,8 +4393,9 @@ mod tests {
                 "downloads": { "songs": 2, "bytes": 2 * w, "here": 1 },
                 // Downloaded: the songs known by 1.wav's ISRC and 2.wav's YouTube id (sent now), and Song 0.wav (a file
                 // here); not Far Away.
-                // An older phone's file: it does not say where its likes were made.
+                // An older phone's file: it does not say where its likes were made, of its likes or of its files.
                 "likes": { "songs": 4, "downloaded": 3, "by": [] },
+                "liked_files": null,
                 "plays": 2,
                 // Its own playlists first, then those synced, Spotify's before YouTube Music's; covers distinct, first
                 // songs first, four at most. An older phone's file says no kind.
@@ -4704,19 +4705,22 @@ mod tests {
         let phone = sending_with("Test phone", live_at(8));
         here.take(&phone, &mut Tries::default());
         let told = summed_up(&here).unwrap();
-        // Downloaded as ever: all but Far Away. Far Away says nowhere, so it is in none of `by`; SoundCloud has none.
+        // Downloaded as ever: all but Far Away. Far Away says nowhere, so it counts as liked in Stash, as a take counts
+        // it; SoundCloud has none.
         assert_eq!(
             told["likes"],
             json!({
                 "songs": 4,
                 "downloaded": 3,
                 "by": [
-                    { "service": "stash", "songs": 1, "downloaded": 1 },
+                    { "service": "stash", "songs": 2, "downloaded": 1 },
                     { "service": "spotify", "songs": 1, "downloaded": 1 },
                     { "service": "youtube", "songs": 2, "downloaded": 2 },
                 ],
             })
         );
+        // The send's files liked: 1.wav (the ISRC liked in Stash) and 2.wav (the video liked on YouTube Music).
+        assert_eq!(told["liked_files"], json!({ "1.wav": ["stash"], "2.wav": ["youtube"] }));
         let lists: Vec<(String, serde_json::Value, serde_json::Value)> = told["playlists"]
             .as_array()
             .unwrap()
@@ -4785,6 +4789,31 @@ mod tests {
         let titles: Vec<String> = liked(&here).into_iter().map(|(title, _)| title).collect();
         assert_eq!(titles, ["Far Away", "First of all"]);
         assert_eq!(playlists(&here), [("Mine".to_string(), 1)]);
+    }
+
+    #[test]
+    fn likes_and_plays_a_phone_had_none_of_are_not_kept_out_when_it_makes_some() {
+        let here = had_two("library-none-yet");
+        let mut bare = live_at(8);
+        bare["likes"] = json!([]);
+        bare["history"] = json!([]);
+        let phone = sending_with("Test phone", bare.clone());
+        let mut tries = Tries::default();
+        here.take(&phone, &mut tries);
+        // Nothing to tick of either, so a window sends them false.
+        assert_eq!(choose_with(&here, 8, Choice::All, parts(false, false, &[], false)), Ok(3));
+        assert_eq!(here.take(&phone, &mut tries).unwrap().state, "done");
+        let every: Vec<&str> = bare["playlists"].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap()).collect();
+        let left = left_out(&[], false, true, &every, false);
+        assert_eq!(setting(&here, library::CHOICE_SETTING), Some(json!({ "Test phone": left }).to_string()));
+        // Liked and played since: they come in.
+        let again = one_more("Test phone", 9, true, &live_at(9));
+        here.take(&again, &mut tries);
+        assert_eq!(summed_up(&here).unwrap()["choice"], left);
+        assert_eq!(here.choose(9, &["4.wav"]), Ok(1));
+        assert_eq!(here.take(&again, &mut tries).unwrap().state, "done");
+        let titles: Vec<String> = liked(&here).into_iter().map(|(title, _)| title).collect();
+        assert_eq!(titles.len(), 5, "the four likes and the send's own: {titles:?}");
     }
 
     #[test]

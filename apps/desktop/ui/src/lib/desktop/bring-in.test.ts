@@ -79,6 +79,17 @@ describe('what is ticked as the screen opens', () => {
 	});
 	it('has no downloads to tick when the computer has every song already', () => {
 		expect(firstPicks({ ...offer, songs: [song({ here: true })] }, lib).downloads).toBe(false);
+	});	it('brought in before, is as it was left: what was left out stays out, what is new since comes', () => {
+		const choice = { likes_left_out: ['youtube'], all_likes_left_out: false, plays: false, playlists_left_out: ['sp-1', 'app-1'], only_here: true };
+		expect(firstPicks(offer, { ...all, choice })).toEqual({
+			downloads: true,
+			likes: ['stash', 'spotify'],
+			plays: false,
+			lists: ['stash-mix-1', 'spotify-album-1', 'sp-2'],
+			onlyHere: true
+		});
+		expect(firstPicks(offer, { ...all, choice: { ...choice, all_likes_left_out: true, plays: true } })).toMatchObject({ likes: [], plays: true });
+		expect(firstPicks(offer, { ...lib, choice: { ...choice, likes_left_out: [] } }).likes).toEqual(['all']);
 	});
 });
 
@@ -115,6 +126,14 @@ describe('the files taken', () => {
 		expect(filesToTake(offer, lib, p)).toEqual(['1.flac', '2.flac']);
 		expect(filesToTake(offer, lib, flip(p, 'sp-1'))).toEqual(['1.flac']);
 		expect(filesToTake(offer, lib, { ...p, likes: [], lists: [] })).toEqual([]);
+	});
+	it('for likes, are the songs liked on a service whose likes are ticked (one placed nowhere was liked in Stash)', () => {
+		const placed = { ...all, liked_files: { '1.flac': ['spotify', 'youtube'], '4.flac': ['stash'] } };
+		const sent = { ...offer, songs: [...offer.songs, song({ file: '5.flac', liked: true })] };
+		const p = { ...firstPicks(sent, placed), downloads: false, lists: [] };
+		expect(filesToTake(sent, placed, { ...p, likes: ['youtube'] })).toEqual(['1.flac']);
+		expect(filesToTake(sent, placed, { ...p, likes: ['stash'] })).toEqual(['5.flac']);
+		expect(filesToTake(sent, placed, { ...p, likes: ['soundcloud'] })).toEqual([]);
 	});
 });
 

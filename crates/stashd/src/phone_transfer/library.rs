@@ -195,7 +195,8 @@ impl LeftOut {
     fn of(asked: &Asked, from: &FromPhone) -> LeftOut {
         let (likes_left_out, all_likes_left_out) = match &asked.likes {
             Likes::All => (Vec::new(), false),
-            Likes::None => (Vec::new(), true),
+            // None left out when the phone had none: likes it makes later come in.
+            Likes::None => (Vec::new(), !from.library.likes.is_empty()),
             Likes::On(on) => {
                 let left: Vec<String> = web_library::LIKED_ON
                     .into_iter()
@@ -210,7 +211,8 @@ impl LeftOut {
         LeftOut {
             likes_left_out,
             all_likes_left_out,
-            plays: asked.plays,
+            // Not left out when the phone had none to bring: plays made later come in.
+            plays: asked.plays || from.library.plays.is_empty(),
             playlists_left_out: from
                 .library
                 .playlists
@@ -240,6 +242,13 @@ impl LeftOut {
 /// Where a like was made, as the phone says (`made`): one that does not say was made in Stash.
 fn made_on<'a>(made: &'a [&'static str]) -> &'a [&'static str] {
     if made.is_empty() { &["stash"] } else { made }
+}
+
+/// Where the like at `at` of `from` was made, as the summary counts it: as a take counts it ([`made_on`]) when the file
+/// says where its likes were made (`says`), else nowhere (an older file's, whose likes come in all or none).
+fn made_at(from: &FromPhone, says: bool, at: usize) -> &[&'static str] {
+    let said = from.liked_on.get(at).map(Vec::as_slice).unwrap_or_default();
+    if says { made_on(said) } else { said }
 }
 
 /// What `POST /api/phone/take` asks of the phone's library (its `library`), when it asks: `likes` true, false, or the
@@ -630,8 +639,9 @@ fn place(from: Option<&str>, kind: Option<&str>) -> (usize, usize) {
 /// (`GET /api/phone/library`): the send's songs to come in (those not here already), the library's likes (with those
 /// made in Stash and on each service: `by`, empty for an older file) and playlists (in [`place`]'s order, each with
 /// where it came from and what kind it is) with how many of their songs are downloaded (sent as files now, or files
-/// here already), its plays, the albums the send's songs are from, and what was left out before for this phone
-/// (`choice`: null the first time).
+/// here already), its plays, the albums the send's songs are from, the services each liked file of the send is
+/// liked on (`liked_files`: null for an older file), and what was left out before for this phone (`choice`: null the
+/// first time).
 pub(super) fn summary(library: &Mutex<Library>, offer: &Offer, from: &FromPhone) -> Value {
     // The send's songs asked again: songs may have come into the library since they were offered.
     let (mut songs, mut bytes, mut had) = (0, 0u64, 0);
@@ -653,17 +663,20 @@ pub(super) fn summary(library: &Mutex<Library>, offer: &Offer, from: &FromPhone)
             .map(|(song, _)| song)
             .chain(incoming.playlists.iter().flat_map(|p| &p.items)),
     );
-    let made = |at: usize| from.liked_on.get(at).map(Vec::as_slice).unwrap_or_default();
+    let says = from.liked_on.iter().any(|made| !made.is_empty());
+    let liked_on = |service: &str| -> Vec<&Song> {
+        incoming
+            .likes
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| made_at(from, says, *at).contains(&service))
+            .map(|(_, (song, _))| song)
+            .collect()
+    };
     let by: Vec<Value> = web_library::LIKED_ON
         .iter()
         .filter_map(|service| {
-            let of: Vec<&Song> = incoming
-                .likes
-                .iter()
-                .enumerate()
-                .filter(|(at, _)| made(*at).contains(service))
-                .map(|(_, (song, _))| song)
-                .collect();
+            let of = liked_on(service);
             (!of.is_empty()).then(|| {
                 json!({
                     "service": service,
@@ -703,6 +716,26 @@ pub(super) fn summary(library: &Mutex<Library>, offer: &Offer, from: &FromPhone)
             })
         })
         .collect();
+    // Of the send's files, which services each is liked on (as the library's likes tell, matched as an import matches
+    // songs): a window bringing in some services' likes takes the files liked there. None for an older file.
+    let liked_files: Option<HashMap<&str, Vec<&str>>> = says.then(|| {
+        let on: Vec<(&str, Coming)> = web_library::LIKED_ON
+            .iter()
+            .map(|service| {
+                let songs: Vec<Song> = liked_on(service).into_iter().cloned().collect();
+                (*service, Coming::of(&songs))
+            })
+            .collect();
+        offer
+            .songs
+            .iter()
+            .zip(&offer.asked)
+            .filter_map(|(sent, song)| {
+                let services: Vec<&str> = on.iter().filter(|(_, liked)| liked.has(song)).map(|(s, _)| *s).collect();
+                (!services.is_empty()).then_some((sent.file.as_str(), services))
+            })
+            .collect()
+    });
     let choice = kept(&library.lock().unwrap(), &offer.phone);
     json!({
         "sent_at_ms": offer.sent_at_ms,
@@ -716,6 +749,7 @@ pub(super) fn summary(library: &Mutex<Library>, offer: &Offer, from: &FromPhone)
         "plays": incoming.plays.len(),
         "playlists": playlists,
         "albums": albums(&offer.songs),
+        "liked_files": liked_files,
         "choice": choice,
     })
 }

@@ -46,11 +46,17 @@
 			/* a phone too old to send its library, or one whose library could not be read: its songs alone */
 		}
 		const fresh = library && library.sent_at_ms === sent.sent_at_ms ? library : null;
-		// The same send again, with nothing new to show: what is ticked stays as the listener left it.
-		const same = !!offer && !!picks && offer.sent_at_ms === sent.sent_at_ms && (!!lib || !fresh);
+		const again = !!offer && !!picks && offer.sent_at_ms === sent.sent_at_ms;
+		// The same send's library, come after its songs: its parts are ticked, the songs' ticks stay as they were.
+		const late = again && !lib && !!fresh;
 		offer = sent;
-		lib = fresh ?? (same ? lib : null);
-		if (same) return;
+		lib = fresh ?? (again ? lib : null);
+		// The same send again, with nothing new to show: what is ticked stays as the listener left it.
+		if (again && !late) return;
+		if (late && picks) {
+			picks = { ...firstPicks(sent, lib), downloads: picks.downloads, onlyHere: picks.onlyHere };
+			return;
+		}
 		picks = firstPicks(sent, lib);
 		// Stash offline for good (on the listener's own files): a song not downloaded could never play, so none comes.
 		if (!first && ui.local) picks = { ...picks, onlyHere: true };
@@ -314,11 +320,12 @@
 	</div>
 {/snippet}
 
-{#snippet sel(keys: string[])}
+{#snippet sel(keys: string[], of: string)}
 	{@const coming = picks ? keys.filter((k) => isOn(picks!, k)).length : 0}
-	<div class="bi-sel" role="group" aria-label="Select">
-		<button type="button" disabled={busy || coming === keys.length} onclick={() => setAll(keys, true)}>Select all</button>
-		<button type="button" disabled={busy || !coming} onclick={() => setAll(keys, false)}>Select none</button>
+	<!-- Never disabled, which would drop the keyboard's place: one with nothing to do says so and does nothing. -->
+	<div class="bi-sel" role="group" aria-label="Select {of}">
+		<button type="button" aria-disabled={busy || coming === keys.length} onclick={() => coming < keys.length && setAll(keys, true)}>Select all</button>
+		<button type="button" aria-disabled={busy || !coming} onclick={() => coming > 0 && setAll(keys, false)}>Select none</button>
 	</div>
 {/snippet}
 
@@ -381,7 +388,7 @@
 
 		<div class="bi-sec">
 			<div><h2>Coming with you</h2><p>{lib ? 'Your downloads, likes, plays and playlists. Tap one to leave it out, or drag across several.' : 'Tap it to leave it out.'}</p></div>
-			{#if ownKeys.length > 1}{@render sel(ownKeys)}{/if}
+			{#if ownKeys.length > 1}{@render sel(ownKeys, 'what comes with you')}{/if}
 		</div>
 		<div class="bi-shelf">
 			{#if fresh.length}
@@ -422,7 +429,7 @@
 					</p>
 				</div>
 				<div class="bi-tools">
-					{#if foundKeys.length}{@render sel(foundKeys)}{/if}
+					{#if foundKeys.length}{@render sel(foundKeys, q.trim() ? 'the playlists found' : 'every streaming playlist')}{/if}
 					<label class="bi-find"><Icon name="search" /><input id="bi-find" type="search" placeholder="Find a playlist" aria-label="Find a playlist" bind:value={q} /></label>
 				</div>
 			</div>
@@ -539,7 +546,7 @@
 	.bi-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 	.bi-sel { display: flex; gap: 6px; }
 	.bi-sel button { height: 32px; padding: 0 13px; border-radius: 999px; border: 1px solid var(--wp-line-2); color: var(--wp-text); font: 600 12.5px/1 var(--font-body); white-space: nowrap; transition: background-color var(--dur-short); }
-	.bi-sel button:disabled { border-color: var(--wp-line); color: var(--wp-num); cursor: default; }
+	.bi-sel button[aria-disabled='true'] { border-color: var(--wp-line); color: var(--wp-num); cursor: default; }
 	.bi-owed { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 0 0 16px; padding: 12px 12px 12px 16px; border-radius: 12px; background: rgb(251 191 36 / .12); color: var(--wp-text); font: 500 14px/1.4 var(--font-body); }
 	.bi-owed span { flex: 1; min-width: 240px; }
 
@@ -558,7 +565,7 @@
 		.bi-card:not(:disabled):hover .bi-pk { transform: scale(1.12); }
 		.bi-go:not(:disabled):hover { filter: brightness(1.1); }
 		.bi-sw:not(:disabled):hover { color: var(--wp-text); }
-		.bi-sel button:not(:disabled):hover { background: var(--wp-hover); }
+		.bi-sel button:not([aria-disabled='true']):hover { background: var(--wp-hover); }
 	}
 	@keyframes bi-drift { from { transform: rotate(-7deg) translateX(0); } to { transform: rotate(-7deg) translateX(-7%); } }
 	@keyframes bi-breathe { 0%, 100% { opacity: .3; } 50% { opacity: .75; } }
