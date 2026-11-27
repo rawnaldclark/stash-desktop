@@ -48,7 +48,31 @@ fn library_path() -> Result<PathBuf> {
     Ok(folder.join("library.db"))
 }
 
+/// What WebView2 is told besides wry's own arguments: the page's timers run at their pace while the window is hidden in
+/// the tray or covered. A session hosted from this computer is run by the page's script (it says each song and its place
+/// to the room), and the page follows the player with timers; hidden, WebView2 would hold its timers to one a second, then
+/// one a minute, and the room would fall behind.
+const KEEP_TIMERS_RUNNING: &str =
+    "--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows";
+
+/// Gives every WebView2 of this program [`KEEP_TIMERS_RUNNING`], unless the listener set WebView2's arguments themselves.
+///
+/// Through the environment, not each window's builder: WebView2 adds `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` to the
+/// arguments a program passes (Microsoft's documentation of `CreateCoreWebView2EnvironmentWithOptions`: "it is appended"),
+/// so wry's own (today `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection`) stay as wry sets them, in wry
+/// 0.57 and in whatever later wry passes. A builder's `additional_browser_args` would replace wry's instead, and would have
+/// to be the same on every window sharing a data folder (WebView2 refuses a second environment with other options), the
+/// mini player's too. This way each window gets the same arguments.
+fn keep_timers_running() {
+    if std::env::var_os("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_none() {
+        // SAFETY: the first thing `main` does, before any thread of this program (or of the window's) exists, so nothing
+        // reads the environment while it is written.
+        unsafe { std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", KEEP_TIMERS_RUNNING) };
+    }
+}
+
 fn main() -> Result<()> {
+    keep_timers_running();
     // `STASH_BENCH_OUT` asks the page to measure itself and the core to write the numbers there.
     let bench_out = std::env::var_os("STASH_BENCH_OUT").map(PathBuf::from);
     let measuring = bench_out.is_some();
