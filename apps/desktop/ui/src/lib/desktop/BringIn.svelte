@@ -109,6 +109,8 @@
 		return k ? synced.filter((p) => p.name.toLowerCase().includes(k)) : synced;
 	});
 	const added = $derived(picks ? synced.filter((p) => picks!.lists.includes(p.id)).length : 0);
+	/** Of the synced lists, those on the computer already. */
+	const syncedHere = $derived(synced.filter((p) => p.here).length);
 	const likes = $derived(likeParts(lib));
 	/** The covers of the send's albums (most songs first), or of its songs when the phone sent no library. */
 	const albumArt = $derived.by(() => {
@@ -295,7 +297,10 @@
 {#snippet listCard(p: SentList)}
 	{@const on = shownOn(p.id)}
 	<button type="button" class="bi-card" class:on data-key={p.id} aria-pressed={on} disabled={busy} onclick={() => toggle(p.id)}>
-		<span class="tile bi-art">{@render cover(p.covers, p.name)}</span>
+		<span class="tile bi-art">
+			{@render cover(p.covers, p.name)}
+			{#if p.here}<span class="bi-here">On your computer</span>{/if}
+		</span>
 		{@render badge(on)}
 		<b>{p.name}</b>
 		<i>{listLine(p, !!picks?.onlyHere)}</i>
@@ -424,7 +429,7 @@
 				<div>
 					<h2>From your streaming services</h2>
 					<p>
-						{added === synced.length ? `All ${n(synced.length)} coming` : added ? `${n(added)} of ${n(synced.length)} coming` : `${n(synced.length)} synced on your phone, none coming`}.
+						{added === synced.length ? `All ${n(synced.length)} coming` : added ? `${n(added)} of ${n(synced.length)} coming` : `${n(synced.length)} synced on your phone, none coming`}{syncedHere ? `, ${n(syncedHere)} on your computer already (ticked, they're updated)` : ''}.
 						{added ? `Their downloaded songs come in as files${picks.onlyHere ? '.' : ', the rest stream.'}` : ''} Tap one, or drag across many at once.
 					</p>
 				</div>
@@ -512,6 +517,8 @@
 	.bi-art { width: 100%; aspect-ratio: 1; margin-bottom: 8px; border-radius: 8px; outline: 2px solid transparent; outline-offset: 3px; transition: outline-color 200ms, transform 350ms var(--ease-out-expo); }
 	.bi-art :global(.cv) { width: 100%; height: 100%; }
 	.bi-card.on .bi-art { outline-color: var(--acc); }
+	.bi-art { position: relative; }
+	.bi-here { position: absolute; left: 6px; bottom: 6px; max-width: calc(100% - 12px); padding: 3px 7px; border-radius: 999px; overflow: clip; text-overflow: ellipsis; white-space: nowrap; background: rgb(0 0 0 / .72); color: #fff; font: 600 10.5px/1.2 var(--font-body); pointer-events: none; }
 	.bi-card:not(.still):active .bi-art { transform: scale(.97); }
 	.bi-card b { overflow: clip; text-overflow: ellipsis; white-space: nowrap; font: 600 14px/1.3 var(--font-body); }
 	.bi-card i { overflow: clip; text-overflow: ellipsis; white-space: nowrap; font: 400 12px/1.35 var(--font-body); font-style: normal; color: var(--wp-text-2); }

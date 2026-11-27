@@ -655,7 +655,8 @@ fn place(from: Option<&str>, kind: Option<&str>) -> (usize, usize) {
 /// What the window's first-run screen draws of the send offered and the library it came with
 /// (`GET /api/phone/library`): the send's songs to come in (those not here already), the library's likes (with those
 /// made in Stash and on each service: `by`, empty for an older file) and playlists (in [`place`]'s order, each with
-/// where it came from and what kind it is) with how many of their songs are downloaded (sent as files now, or files
+/// where it came from, what kind it is and whether it is on the computer already) with how many of their songs are
+/// downloaded (sent as files now, or files
 /// here already), its plays, the albums the send's songs are from, the services each liked file of the send is
 /// liked on (`liked_files`: null for an older file), and what was left out before for this phone (`choice`: null the
 /// first time).
@@ -710,6 +711,13 @@ pub(super) fn summary(library: &Mutex<Library>, offer: &Offer, from: &FromPhone)
             from.kind.get(&p.external_id).copied(),
         )
     });
+    // The lists on the computer already, by their ids: a send's list with one of them updates it, not another copy.
+    let here_ids: HashSet<String> = library
+        .lock()
+        .unwrap()
+        .playlists()
+        .map(|rows| rows.into_iter().filter_map(|p| p.external_id).collect())
+        .unwrap_or_default();
     let playlists: Vec<Value> = ordered
         .into_iter()
         .map(|p| {
@@ -730,6 +738,7 @@ pub(super) fn summary(library: &Mutex<Library>, offer: &Offer, from: &FromPhone)
                 "songs": p.items.len(),
                 "downloaded": p.items.iter().filter(|s| downloaded.is(s)).count(),
                 "covers": covers,
+                "here": here_ids.contains(&p.external_id),
             })
         })
         .collect();

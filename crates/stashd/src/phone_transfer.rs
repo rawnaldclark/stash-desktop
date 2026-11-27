@@ -4400,14 +4400,14 @@ mod tests {
                 "liked_files": null,
                 "plays": 2,
                 // Its own playlists first, then those synced, Spotify's before YouTube Music's; covers distinct, first
-                // songs first, four at most. An older phone's file says no kind.
+                // songs first, four at most. An older phone's file says no kind. None is here yet.
                 "playlists": [
                     { "id": "app-2", "name": "Gym", "from": null, "kind": null, "songs": 2, "downloaded": 1,
-                      "covers": ["https://art/far"] },
+                      "covers": ["https://art/far"], "here": false },
                     { "id": "app-9", "name": "Daily Mix 1", "from": "spotify", "kind": null, "songs": 6, "downloaded": 4,
-                      "covers": ["https://art/far", "https://art/1", "https://art/2", "https://art/0"] },
+                      "covers": ["https://art/far", "https://art/1", "https://art/2", "https://art/0"], "here": false },
                     { "id": "app-12", "name": "Supermix", "from": "youtube", "kind": null, "songs": 0, "downloaded": 0,
-                      "covers": [] },
+                      "covers": [], "here": false },
                 ],
                 // From the send's songs, most songs first.
                 "albums": [
@@ -4816,6 +4816,29 @@ mod tests {
         assert_eq!(here.take(&again, &mut tries).unwrap().state, "done");
         let titles: Vec<String> = liked(&here).into_iter().map(|(title, _)| title).collect();
         assert_eq!(titles.len(), 5, "the four likes and the send's own: {titles:?}");
+    }
+
+    #[test]
+    fn the_summary_says_which_lists_are_here_already() {
+        let here = had_two("library-lists-here");
+        let phone = sending_with("Test phone", live_at(8));
+        let mut tries = Tries::default();
+        here.take(&phone, &mut tries);
+        let none: Vec<bool> = summed_up(&here).unwrap()["playlists"].as_array().unwrap().iter().map(|p| p["here"].as_bool().unwrap()).collect();
+        assert!(none.iter().all(|h| !h), "nothing is here before the first bring-in");
+        assert!(choose_with(&here, 8, Choice::All, parts(true, true, &["custom_7", "spotify-6"], false)).is_ok());
+        here.take(&phone, &mut tries);
+        let again = one_more("Test phone", 9, true, &live_at(9));
+        here.take(&again, &mut tries);
+        let mut said: Vec<String> = summed_up(&here).unwrap()["playlists"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["here"] == true)
+            .map(|p| p["id"].as_str().unwrap().to_string())
+            .collect();
+        said.sort();
+        assert_eq!(said, ["custom_7", "spotify-6"]);
     }
 
     #[test]

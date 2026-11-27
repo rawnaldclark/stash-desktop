@@ -6,6 +6,8 @@ import type { Offer, Offered } from './phone-songs';
 
 /** A playlist the phone sent: `from` names the streaming service it is synced from (none: the listener's own). */
 export type SentList = {
+	/** On the computer already (brought in before): taking it again updates it. */
+	here?: boolean;
 	id: string;
 	name: string;
 	from: 'spotify' | 'youtube' | 'soundcloud' | null;
