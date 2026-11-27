@@ -529,6 +529,47 @@ fn next_and_previous_do_not_wait_for_the_engine_to_have_the_track() {
 }
 
 #[test]
+fn a_skip_never_says_the_song_it_left_started_over() {
+    // The engine moves to the track it has ready before it says so: until it does, the player must not report the
+    // track it left at the new track's position (0), as if that song had started over (a session's listeners would
+    // hear it restart).
+    let Some(library) = library() else { return };
+    let dir = scratch("player-skip-report");
+    let files: Vec<_> = (0..6)
+        .map(|i| {
+            let f = dir.join(format!("{i}.wav"));
+            write_wav(&f, RATE, &signal(RATE as usize * 4)); // 4 s
+            f
+        })
+        .collect();
+    let player = Player::start(&library, &Output::Silent).unwrap();
+    let items = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| item(i as i64 + 1, &format!("T{i}"), f))
+        .collect();
+    player.play(items).unwrap();
+    for place in 0..5 {
+        until(&player, "a second into the track", |s| {
+            s.status == "playing" && s.index == Some(place) && s.position_ms >= 1000
+        });
+        player.next().unwrap();
+        // Read at once and for a moment after: the track left, or the next one; never the one left, from its start.
+        let deadline = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < deadline {
+            let s = player.state();
+            assert!(
+                !(s.index == Some(place) && s.position_ms < 500),
+                "after next from track {place}, the player said it was at its start: {s:?}"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    drop(player);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn trouble_with_the_add_on_is_said_and_the_queue_is_not_marched_through() {
     let Some(library) = library() else { return };
     let (addon, dir) = fake_addon("player-addon-trouble", Duration::from_millis(20));

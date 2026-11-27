@@ -2151,6 +2151,16 @@ impl Player {
     }
 
     pub fn state(&self) -> PlayerState {
+        // The engine moves to the track it has ready (`playlist-next`) before its event says so, and its position is
+        // the new track's at once: its own word, read now, is newer than the one kept (else a skip would report the
+        // track left as started over).
+        let engine_pos = self
+            .ctx
+            .engine
+            .mpv()
+            .get("playlist-pos")
+            .and_then(|v| v.parse::<i64>().ok())
+            .and_then(|i| usize::try_from(i).ok());
         let (
             queue_len,
             index,
@@ -2166,7 +2176,13 @@ impl Player {
             nothing_after,
         ) = {
             let shared = self.ctx.shared.lock().unwrap();
-            let index = shared.index();
+            // Only while a track plays: during a start the engine's list is being replaced, and its word is old.
+            let pos = match engine_pos {
+                Some(p) if shared.pos.is_some() && p < shared.slots.len() => Some(p),
+                _ => shared.pos,
+            };
+            let slot = pos.and_then(|p| shared.slots.get(p));
+            let index = slot.map(|s| s.queue);
             let resting = shared.resting();
             let track = index
                 .or(shared.starting)
@@ -2180,8 +2196,8 @@ impl Player {
                 // A file that is starting is as good as playing; a track that has to be asked for is not yet.
                 track.as_ref().is_some_and(|t| t.asks()),
                 track,
-                shared.slot().and_then(|s| s.tier.clone()),
-                shared.slot().and_then(|s| s.addon.clone()),
+                slot.and_then(|s| s.tier.clone()),
+                slot.and_then(|s| s.addon.clone()),
                 shared.accepted.clone(),
                 (shared.error.clone(), shared.error_id, shared.errors),
                 (
@@ -2193,7 +2209,7 @@ impl Player {
                 ),
                 resting,
                 shared.ahead >= shared.queue.len()
-                    && shared.pos.is_some_and(|pos| pos + 1 >= shared.slots.len()),
+                    && pos.is_some_and(|pos| pos + 1 >= shared.slots.len()),
             )
         };
         let (queue_version, queue_id, shuffle, repeat, from) = queue;
