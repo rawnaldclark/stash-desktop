@@ -11,7 +11,8 @@
 	import type { PickList } from '../../lib/ui/pick.svelte';
 	import { shelf } from '../../lib/ui/shelf';
 	import { openSongMenu, songMenu } from '../../lib/ui/song-menu';
-	import { clearRecent, loadRecent, recentId, removeRecent, saveRecent, saveRecentSong, L, ui, type RecentEntry } from '../../lib/ui/state.svelte';
+	import { clearRecent, loadRecent, recentId, removeRecent, S, saveRecent, saveRecentSong, L, ui, type RecentEntry } from '../../lib/ui/state.svelte';
+	import { requestSong } from '../../lib/ui/request';
 
 	const q = $derived((page.url.searchParams.get('q') ?? '').trim());
 	let result = $state.raw<SearchResult | null>(null);
@@ -76,6 +77,8 @@
 		const it = items[i];
 		if (!it) return;
 		saveRecentSong(it);
+		// Tuned in to a session: the DJ plays, so a song found is asked for (as the rows do).
+		if (S.v.listening) return requestSong(it);
 		void player.playItems([it], 0, { from: 'Search' });
 	};
 	/** Songs can be picked among the top songs, and among each add-on's. */
@@ -90,7 +93,7 @@
 		}
 		return list;
 	}
-	const playRecent = (e: Extract<RecentEntry, { kind: 'song' }>) => void player.playItems([e.item], 0, { from: 'Search' });
+	const playRecent = (e: Extract<RecentEntry, { kind: 'song' }>) => (S.v.listening ? requestSong(e.item) : void player.playItems([e.item], 0, { from: 'Search' }));
 	const forget = (e: RecentEntry) => {
 		removeRecent(e);
 		recent = loadRecent();
@@ -163,7 +166,7 @@
 							</div>
 						{:else if top}
 							<div class="top-card" use:songMenu={{ item: top }}>
-								<button type="button" class="top-main" onclick={() => play(topItems, 0)} aria-label="Play {top.title} by {top.artist}">
+								<button type="button" class="top-main" onclick={() => play(topItems, 0)} aria-label="{S.v.listening ? 'Request' : 'Play'} {top.title} by {top.artist}">
 									<span class="top-cv"><Cover artwork={top.artwork} seed={top.title} min={200} class="cv" /></span>
 									<span class="top-kind">Song</span>
 									<b>{top.title}</b>
