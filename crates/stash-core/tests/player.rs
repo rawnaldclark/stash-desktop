@@ -403,7 +403,7 @@ fn an_add_ons_track_is_asked_for_late_and_one_it_does_not_have_is_passed_over() 
 }
 
 #[test]
-fn a_queue_starts_at_a_place_in_its_track_or_rests_there_paused() {
+fn a_queue_starts_at_a_place_in_its_track_or_is_cued_there_paused() {
     let Some(library) = library() else { return };
     let (addon, dir) = fake_addon("player-start-at", Duration::from_millis(300));
     let long = dir.join("long.wav");
@@ -427,40 +427,136 @@ fn a_queue_starts_at_a_place_in_its_track_or_rests_there_paused() {
     assert_eq!(started.track.as_ref().map(|t| t.qid), queued.start);
     std::thread::sleep(Duration::from_millis(300));
     let at = player.state().position_ms;
-    assert!((2_000..3_500).contains(&at), "the file plays from {at} ms, not from 2 s");
+    assert!(
+        (2_000..3_500).contains(&at),
+        "the file plays from {at} ms, not from 2 s"
+    );
 
     // An add-on's track, asked for while the file plays: its place is taken when it has loaded, not in the file.
     let queued = player
         .play_from_at(vec![from_addon("a", "A")], 0, None, 0.9, true)
         .unwrap();
     until(&player, "the add-on's track playing", |s| {
-        s.status == "playing" && s.track.as_ref().map(|t| t.qid) == queued.start && s.duration_ms > 0
+        s.status == "playing"
+            && s.track.as_ref().map(|t| t.qid) == queued.start
+            && s.duration_ms > 0
     });
     std::thread::sleep(Duration::from_millis(100));
     let at = player.state().position_ms;
-    assert!(at >= 900, "the add-on's track plays from {at} ms, not from 0.9 s");
+    assert!(
+        at >= 900,
+        "the add-on's track plays from {at} ms, not from 0.9 s"
+    );
 
-    // Paused: nothing plays, the player rests on the track at its place, and play goes on from there.
+    // Cued: the track is opened paused at its place, nothing plays, and play goes on from there.
     let queued = player
         .play_from_at(vec![item(2, "Long", &long)], 0, None, 1.5, false)
         .unwrap();
-    let resting = until(&player, "the player resting on the track", |s| {
-        s.resting && s.status == "paused"
+    let cued = until(&player, "the track open, paused at its place", |s| {
+        s.status == "paused" && s.duration_ms > 0
     });
     assert_eq!(
-        (resting.track.as_ref().map(|t| t.qid), resting.position_ms, resting.queue_id),
-        (queued.start, 1_500, queued.queue_id)
+        (cued.track.as_ref().map(|t| t.qid), cued.queue_id),
+        (queued.start, queued.queue_id)
+    );
+    assert!(
+        (1_450..1_600).contains(&cued.position_ms),
+        "cued at {} ms",
+        cued.position_ms
     );
     std::thread::sleep(Duration::from_millis(400));
-    assert_eq!(
-        (player.state().status, player.state().position_ms),
-        ("paused", 1_500),
-        "nothing plays while it rests"
+    let still = player.state();
+    assert_eq!(still.status, "paused", "nothing plays while it is cued");
+    assert!(
+        (1_450..1_600).contains(&still.position_ms),
+        "it moved to {} ms",
+        still.position_ms
     );
     player.set_paused(false).unwrap();
     until(&player, "the track playing from its place", |s| {
         s.status == "playing" && s.duration_ms > 0 && s.position_ms >= 1_500
     });
+
+    drop(player);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_pause_while_a_track_starts_holds_and_a_cued_track_is_asked_for_before_play() {
+    let Some(library) = library() else { return };
+    let (addon, dir) = fake_addon("player-cue", Duration::from_millis(400));
+    let settings = Settings {
+        resolver: Some(addon.resolver()),
+        ..Settings::default()
+    };
+    let player = Player::start_with(&library, &Output::Silent, settings).unwrap();
+
+    // Paused while the add-on is still being asked: the track opens paused, and stays so until play.
+    player
+        .play_from(vec![from_addon("a", "A")], 0, None)
+        .unwrap();
+    assert_eq!(player.state().status, "loading");
+    player.set_paused(true).unwrap();
+    assert_eq!(
+        player.state().status,
+        "paused",
+        "paused at once, while it is asked for"
+    );
+    let opened = until(&player, "the track open, paused", |s| {
+        s.status == "paused" && s.duration_ms > 0
+    });
+    assert_eq!(opened.track.as_ref().map(|t| t.title.as_str()), Some("A"));
+    std::thread::sleep(Duration::from_millis(400));
+    let still = player.state();
+    assert_eq!(still.status, "paused", "the start played on over the pause");
+    assert!(
+        still.position_ms < 100,
+        "it played while paused, to {} ms",
+        still.position_ms
+    );
+    player.set_paused(false).unwrap();
+    until(&player, "it plays when asked", |s| {
+        s.status == "playing" && s.position_ms > 0
+    });
+
+    // Cued: asked for at once and opened paused at its place, said as paused there meanwhile; play starts there and
+    // asks nothing again.
+    let queued = player
+        .play_from_at(vec![from_addon("b", "B")], 0, None, 0.6, false)
+        .unwrap();
+    let cued = player.state();
+    assert_eq!(
+        (
+            cued.status,
+            cued.position_ms,
+            cued.track.as_ref().map(|t| t.qid)
+        ),
+        ("paused", 600, queued.start)
+    );
+    until(&player, "the cued track asked for before play", |_| {
+        addon.asked().iter().any(|t| t == "b")
+    });
+    let opened = until(&player, "the cued track open, paused", |s| {
+        s.status == "paused" && s.duration_ms > 0
+    });
+    assert!(
+        (550..700).contains(&opened.position_ms),
+        "cued at {} ms",
+        opened.position_ms
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(player.state().status, "paused");
+    let asks = addon.asked().len();
+    player.set_paused(false).unwrap();
+    let playing = until(&player, "the cued track playing from its place", |s| {
+        s.status == "playing" && s.duration_ms > 0
+    });
+    assert!(
+        playing.position_ms >= 550,
+        "it played from {} ms",
+        playing.position_ms
+    );
+    assert_eq!(addon.asked().len(), asks, "play asked the add-on again");
 
     drop(player);
     let _ = std::fs::remove_dir_all(&dir);

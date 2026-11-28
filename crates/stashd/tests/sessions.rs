@@ -169,11 +169,13 @@ struct Canned {
     retry_after: Option<&'static str>,
 }
 
-/// A stand-in for the share service: it keeps every request and answers each with what it was last told to.
+/// A stand-in for the share service: it keeps every request and answers each with what it was last told to, one at a
+/// time, after `slow`.
 struct Upstream {
     url: String,
     seen: Arc<Mutex<Vec<Seen>>>,
     next: Arc<Mutex<Canned>>,
+    slow: Arc<Mutex<Duration>>,
 }
 
 impl Upstream {
@@ -187,9 +189,12 @@ impl Upstream {
             body: "{}".into(),
             retry_after: None,
         }));
-        let (kept, told) = (Arc::clone(&seen), Arc::clone(&next));
+        let slow = Arc::new(Mutex::new(Duration::ZERO));
+        let (kept, told, waits) = (Arc::clone(&seen), Arc::clone(&next), Arc::clone(&slow));
         std::thread::spawn(move || {
             for mut request in server.incoming_requests() {
+                let wait = *waits.lock().unwrap();
+                std::thread::sleep(wait);
                 let mut body = String::new();
                 let _ = request.as_reader().read_to_string(&mut body);
                 kept.lock().unwrap().push(Seen {
@@ -214,7 +219,12 @@ impl Upstream {
                 let _ = request.respond(response);
             }
         });
-        Upstream { url, seen, next }
+        Upstream { url, seen, next, slow }
+    }
+
+    /// Each answer waits `wait` from now on.
+    fn be_slow(&self, wait: Duration) {
+        *self.slow.lock().unwrap() = wait;
     }
 
     fn answer(&self, status: u16, body: Value) {
@@ -543,12 +553,16 @@ fn a_rooms_songs_play_here_from_their_place_and_autoplay_waits_for_the_rooms_nex
     std::thread::sleep(Duration::from_millis(1500));
     assert_eq!(player()["queue_len"].as_u64(), Some(1), "autoplay added to the room's queue");
 
-    // Paused, it waits at its place; play goes on from there.
+    // Paused (cued), it is opened and waits at its place; play goes on from there.
     let queued = play(json!({ "songs": [song("two")], "position_ms": 2000, "play": false }));
-    let state = until("the room's song resting at its place", &|s| s["status"] == "paused" && s["resting"] == true);
-    assert_eq!((state["track"]["qid"].as_u64(), state["position_ms"].as_u64()), (queued["start_qid"].as_u64(), Some(2000)));
+    let state = until("the room's song open, paused at its place", &|s| {
+        s["status"] == "paused" && s["duration_ms"].as_u64() > Some(0)
+    });
+    assert_eq!(state["track"]["qid"].as_u64(), queued["start_qid"].as_u64());
+    let at = state["position_ms"].as_u64().unwrap_or(0);
+    assert!((1950..2100).contains(&at), "cued at {at} ms");
     client.send("POST", "/api/player/pause", None, &json!({ "paused": false }));
-    until("the song playing on from its place", &|s| s["status"] == "playing" && s["position_ms"].as_u64() >= Some(2000));
+    until("the song playing on from its place", &|s| s["status"] == "playing" && s["position_ms"].as_u64() >= Some(1950));
 
     // Songs the library doesn't have go in the queue as they are described; `at` is where it starts.
     let queued = play(json!({
@@ -615,5 +629,156 @@ fn a_rooms_songs_play_here_from_their_place_and_autoplay_waits_for_the_rooms_nex
     }
     let not_json = client.ask("POST", "/api/player/songs", &[("Content-Type", "application/json")], Some("{songs"));
     assert_eq!(not_json.status, 400);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn tuned_in_the_dj_plays_and_leaving_gives_the_queue_back() {
+    let dir = scratch("listening");
+    let db = dir.join("library.db");
+    let tuned_in = json!({ "error": { "message": "You are tuned in to a session: the DJ plays" } });
+    let Some(engine) = engine() else {
+        // Without a player the switch still answers; what it refuses needs the player.
+        let client = Client::new(&core(&db, None, "off"));
+        assert_eq!(client.send("POST", "/api/sessions/listening", None, &json!({ "on": true })).status, 204);
+        assert_eq!(client.get("/api/sessions/listening").json(), json!({ "on": true }));
+        eprintln!("SKIPPED what tuning in refuses: no libmpv found");
+        return;
+    };
+    let music = dir.join("Music");
+    std::fs::create_dir_all(&music).unwrap();
+    for name in ["one", "two", "three"] {
+        silence_for(&music.join(format!("{name}.wav")), 4);
+    }
+    {
+        let mut library = Library::open(&db).unwrap();
+        scan_folder(&mut library, &music, |_| {}).unwrap();
+    }
+    let client = Client::new(&core(&db, Some(engine), "off"));
+    let row = |name: &str| client.get(&format!("/api/search?q={name}&limit=1")).json()["rows"][0].clone();
+    let song = |name: &str| {
+        let row = row(name);
+        json!({ "title": row["title"], "artist": row["artist"], "duration_ms": 4000 })
+    };
+    let player = || client.get("/api/player").json();
+    let until = |what: &str, wanted: &dyn Fn(&Value) -> bool| -> Value {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let state = player();
+            if wanted(&state) {
+                return state;
+            }
+            assert!(Instant::now() < deadline, "waited for {what}: {state}");
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    };
+    let post = |path: &str, body: Value| client.send("POST", path, None, &body);
+    let listen = |on: bool| assert_eq!(post("/api/sessions/listening", json!({ "on": on })).status, 204);
+
+    // Not tuned in until the window says so; a body that isn't a switch is refused.
+    assert_eq!(client.get("/api/sessions/listening").json(), json!({ "on": false }));
+    for wrong in [json!({}), json!({ "on": "yes" })] {
+        assert_eq!(post("/api/sessions/listening", wrong.clone()).status, 400, "{wrong}");
+    }
+
+    // Tuned in, the room's songs play (and the room's next ones replace them).
+    listen(true);
+    assert_eq!(client.get("/api/sessions/listening").json(), json!({ "on": true }));
+    let queued = post("/api/player/songs", json!({ "songs": [song("one"), song("two")] }));
+    assert_eq!(queued.status, 200, "{}", queued.text);
+    let start = queued.json()["start_qid"].clone();
+    let state = until("the room's song playing", &|s| s["status"] == "playing" && s["duration_ms"].as_u64() > Some(0));
+    assert_eq!((state["track"]["qid"].clone(), state["listening"].clone()), (start.clone(), json!(true)));
+
+    // What the DJ chooses is refused, whoever asks: the window, the mini player, the tray and media keys (these
+    // routes), a shortcut.
+    let three = row("three")["id"].clone();
+    for (path, body) in [
+        ("/api/player/next", json!({})),
+        ("/api/player/previous", json!({})),
+        ("/api/player/jump", json!({ "index": 1 })),
+        ("/api/player/play", json!({ "items": [{ "id": three }] })),
+        ("/api/player/enqueue", json!({ "items": [{ "id": three }] })),
+        ("/api/player/enqueue", json!({ "songs": [song("three")], "next": true })),
+        ("/api/player/remove", json!({ "index": 1 })),
+        ("/api/player/move", json!({ "from": 1, "to": 0 })),
+        ("/api/player/shuffle", json!({ "on": true })),
+        ("/api/player/repeat", json!({ "mode": "one" })),
+        ("/api/player/speed", json!({ "speed": 1.25 })),
+        ("/api/radio/start", json!({ "playing": true })),
+        ("/api/shortcut", json!({ "action": "next" })),
+    ] {
+        let answer = post(path, body.clone());
+        assert_eq!((answer.status, answer.json()), (409, tuned_in.clone()), "{path} {body}");
+    }
+    let state = player();
+    assert_eq!(
+        (state["track"]["qid"].clone(), state["queue_len"].as_u64(), state["shuffle"].clone(), state["repeat"].clone()),
+        (start.clone(), Some(2), json!(false), json!("off")),
+        "a refused control changed the player"
+    );
+
+    // The listener's own: pause and play, the place, the volume, and the settings put back as they are.
+    assert_eq!(post("/api/player/pause", json!({ "paused": true })).status, 200);
+    until("paused", &|s| s["status"] == "paused");
+    assert_eq!(post("/api/player/seek", json!({ "seconds": 1.0 })).status, 200);
+    assert_eq!(post("/api/player/volume", json!({ "percent": 60 })).status, 200);
+    assert_eq!(post("/api/shortcut", json!({ "action": "toggle" })).status, 200);
+    until("playing again", &|s| s["status"] == "playing");
+    for (path, body) in [
+        ("/api/player/shuffle", json!({ "on": false })),
+        ("/api/player/repeat", json!({ "mode": "off" })),
+        ("/api/player/speed", json!({ "speed": 1.0 })),
+    ] {
+        assert_eq!(post(path, body.clone()).status, 200, "{path} {body}");
+    }
+
+    // Autoplay adds nothing while tuned in, even to a queue the room did not hold.
+    let last = post("/api/player/songs", json!({ "songs": [song("three")], "autoplay": true }));
+    assert_eq!(last.status, 200, "{}", last.text);
+    until("the room's last song playing", &|s| s["status"] == "playing" && s["duration_ms"].as_u64() > Some(0));
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(player()["queue_len"].as_u64(), Some(1), "autoplay added while tuned in");
+
+    // Leaving gives the queue back: autoplay goes on after the room's last song, and the controls work again.
+    listen(false);
+    until("autoplay to add after the room's last song", &|s| s["queue_len"].as_u64() > Some(1));
+    assert_eq!(player()["listening"], json!(false));
+    assert_eq!(post("/api/player/shuffle", json!({ "on": true })).status, 200);
+    assert_eq!(post("/api/player/next", json!({})).status, 200);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_share_service_that_hangs_holds_only_a_few_of_the_cores_calls() {
+    let dir = scratch("busy");
+    let share = Upstream::start();
+    share.answer(200, json!({ "sessions": [] }));
+    share.be_slow(Duration::from_millis(700));
+    let client = Client::new(&core(&dir.join("library.db"), None, &share.url));
+
+    // Six at once: four are passed on, the others are told to come back.
+    let asks: Vec<_> = (0..6u64)
+        .map(|i| {
+            let base = client.base.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(30 * i));
+                let answer = Client::new(&base).get("/api/sessions/live");
+                (answer.status, answer.json(), answer.header("Retry-After").map(str::to_string))
+            })
+        })
+        .collect();
+    let answers: Vec<_> = asks.into_iter().map(|a| a.join().unwrap()).collect();
+    let busy = json!({ "error": "busy" });
+    let told_to_wait = answers
+        .iter()
+        .filter(|a| a.0 == 503 && a.1 == busy && a.2.as_deref() == Some("1"))
+        .count();
+    let passed = answers.iter().filter(|a| a.0 == 200).count();
+    assert_eq!((passed, told_to_wait), (4, 2), "{answers:?}");
+
+    // Once they are answered, there is room again.
+    share.be_slow(Duration::ZERO);
+    assert_eq!(client.get("/api/sessions/live").status, 200);
     let _ = std::fs::remove_dir_all(&dir);
 }

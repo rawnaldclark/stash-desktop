@@ -426,7 +426,11 @@ impl<'s> Session<'s> {
 
     fn perform(&mut self, from: &str, cmd: Cmd) {
         let p = self.player;
+        // Tuned in to a session, the DJ chooses what plays: refused as a command that did not work is (the phone is
+        // sent the state as it is).
+        let refused = self.state.sessions.listening() && crate::sessions::the_djs_command(&cmd.command);
         let result: anyhow::Result<()> = match cmd.command {
+            _ if refused => Err(anyhow::anyhow!(crate::sessions::TUNED_IN)),
             Command::Play => p.set_paused(false).map_err(Into::into),
             Command::Pause => p.set_paused(true).map_err(Into::into),
             Command::Next => p.next().map_err(Into::into),

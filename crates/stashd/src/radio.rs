@@ -958,6 +958,10 @@ pub(crate) fn route(state: &State, request: &mut Request, path: &str) -> Result<
                 json!({ "available": true, "on": on, "forgot": forgot }),
             )
         }
+        // Tuned in to a session, the DJ chooses what plays.
+        (Method::Post, "/api/radio/start") if state.sessions.listening() => {
+            refuse(409, crate::sessions::TUNED_IN)
+        }
         (Method::Post, "/api/radio/start") => start(state, request)?,
         (Method::Post, "/api/radio/stop") => match &state.player {
             Ok(player) => reply_json(200, json!({ "removed": radio.stop(player) })),

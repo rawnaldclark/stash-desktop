@@ -1915,6 +1915,8 @@ fn player_value(state: &State) -> Value {
             answer["available"] = json!(true);
             answer["edits"] = json!(state.edits.load(Ordering::Relaxed));
             answer["station"] = state.radio.summary(player);
+            // Tuned in to a session: every window (the mini player too) leaves out what the DJ chooses.
+            answer["listening"] = json!(state.sessions.listening());
             answer
         }
         Err(why) => json!({ "available": false, "reason": why, "status": "idle" }),
@@ -2173,6 +2175,10 @@ fn player_route(state: &State, request: &mut Request, path: &str) -> Result<Opti
         return Ok(Some(player_reply(state)));
     };
     let body = body_json(request)?;
+    // Tuned in to a session, the DJ chooses what plays: whoever asks (the window, the mini player, the tray, media keys).
+    if state.sessions.listening() && crate::sessions::the_djs(path, &body) {
+        return Ok(Some(refuse(409, crate::sessions::TUNED_IN)));
+    }
     match path {
         // What to play: `{"ids": [...]}` (library tracks, in that order), `{"offset": n}` (the library's rows from
         // there on; with `"playlist": id` that playlist's, with `"liked": true` the liked songs'), or

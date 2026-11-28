@@ -238,6 +238,10 @@ fn act(state: &State, action: &str) -> Result<Reply> {
     let Ok(playing) = &state.player else {
         return Ok(refuse(503, "there is no player"));
     };
+    // Tuned in to a session, the DJ chooses what plays: a skip key does nothing (play/pause and the volume still work).
+    if matches!(action, "next" | "previous") && state.sessions.listening() {
+        return Ok(refuse(409, crate::sessions::TUNED_IN));
+    }
     match action {
         "toggle" => playing.set_paused(playing.state().status == "playing")?,
         "next" => playing.next()?,

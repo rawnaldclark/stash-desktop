@@ -27,7 +27,10 @@
 //!   window's: no cookies, no other headers. The service's status and JSON body come back as they are (the window checks
 //!   every answer itself, as the web page does); a refusal made here has the service's own shape, `{ "error": "<code>" }`.
 //!   A room's socket is not relayed: the window opens it itself, straight to the share service (`rooms` in the status), as
-//!   the phones do.
+//!   the phones do. At most [`MOST_AT_ONCE`] calls are under way at once; past that, 503 `busy`.
+//! - `POST /api/sessions/listening {on}` → 204: the window tuned in to a session, or left it (`GET` → `{on}`). While tuned in the DJ chooses
+//!   what plays: the core refuses a skip, other songs and edits of the queue whoever asks ([`the_djs`]), and autoplay
+//!   adds nothing. Leaving gives the queue back to the listener, autoplay too.
 //! - `POST /api/player/songs`: songs someone else describes (the room's) played on this computer's player, found the way
 //!   the phone's songs are ([`crate::remote::items_for`]). Autoplay adds nothing to the queue it makes (the room's next
 //!   song follows), until that queue is replaced or added to.
@@ -36,13 +39,14 @@
 
 use std::io::Read;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::{Value, json};
 use stash_core::link::crypto::{b64u, random_bytes};
-use stash_core::link::remote::{MAX_SONGS, PhoneSong, read_song};
+use stash_core::link::remote::{Command, MAX_SONGS, PhoneSong, read_song};
+use stash_core::player::Repeat;
 use tiny_http::{Method, Request};
 use url::Url;
 
@@ -70,14 +74,27 @@ const MAX_HOST_NAME: usize = 40;
 /// The furthest into a song a start may be (a day: no song is longer).
 const POSITION_CAP_MS: f64 = 24.0 * 3600.0 * 1000.0;
 
-/// Sessions on this computer: where the share service is, and the queue autoplay leaves alone.
+/// Sessions on this computer: where the share service is, the queue autoplay leaves alone, and whether this computer
+/// is tuned in to one.
 pub(crate) struct Sessions {
     /// The share service's origin; `None`: Sessions are off here.
     share: Option<Url>,
     /// The id ([`stash_core::player::PlayerState::queue_id`]) of the queue `POST /api/player/songs` made for a session,
     /// which autoplay adds nothing to; 0 for none. A queue that replaces it has another id, so it is autoplay's again.
     quiet: AtomicU64,
+    /// Tuned in to a session (the window says so, `POST /api/sessions/listening`): the DJ chooses what plays, so
+    /// nothing here skips, starts other songs, adds to the queue or changes its order or speed, whoever asks (the
+    /// window, the mini player, the tray, media keys, shortcuts, the phone). Kept only while Stash runs.
+    listening: AtomicBool,
+    /// Calls to the share service under way.
+    asking: AtomicUsize,
 }
+
+/// What a control refused while tuned in says.
+pub(crate) const TUNED_IN: &str = "You are tuned in to a session: the DJ plays";
+/// How many calls to the share service may be under way at once: one that hangs holds that many of the core's request
+/// workers, never all of them.
+const MOST_AT_ONCE: usize = 4;
 
 impl Sessions {
     /// As `STASH_SHARE_URL` says, else stashfm.app.
@@ -87,7 +104,34 @@ impl Sessions {
 
     /// With the share service at `named` (`None`: stashfm.app; `off` or empty: Sessions are off).
     pub(crate) fn at(named: Option<&str>) -> Sessions {
-        Sessions { share: share_base(named), quiet: AtomicU64::new(0) }
+        Sessions {
+            share: share_base(named),
+            quiet: AtomicU64::new(0),
+            listening: AtomicBool::new(false),
+            asking: AtomicUsize::new(0),
+        }
+    }
+
+    /// Whether this computer is tuned in to a session (see [`Sessions::listening`]'s field).
+    pub(crate) fn listening(&self) -> bool {
+        self.listening.load(Ordering::SeqCst)
+    }
+
+    /// Tuned in, or not any more. Leaving, what is left of the room's queue is the listener's own: autoplay too.
+    fn set_listening(&self, on: bool) {
+        self.listening.store(on, Ordering::SeqCst);
+        if !on {
+            self.hold_autoplay(None);
+        }
+    }
+
+    /// A place among the calls to the share service under way, given back when dropped; `None` when they are all taken.
+    fn asking(&self) -> Option<Asking<'_>> {
+        if self.asking.fetch_add(1, Ordering::SeqCst) >= MOST_AT_ONCE {
+            self.asking.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(Asking(&self.asking))
     }
 
     /// Whether autoplay leaves the queue `queue_id` alone (a session's).
@@ -98,6 +142,55 @@ impl Sessions {
     /// Autoplay leaves the queue `queue_id` alone; `None`: any queue is autoplay's again.
     pub(crate) fn hold_autoplay(&self, queue_id: Option<u64>) {
         self.quiet.store(queue_id.unwrap_or(0), Ordering::SeqCst);
+    }
+}
+
+/// A call to the share service under way (see [`Sessions::asking`]).
+struct Asking<'a>(&'a AtomicUsize);
+
+impl Drop for Asking<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Whether a control of the player is the DJ's while tuned in to a session: a skip, a jump, other songs started or
+/// added, the queue edited or its order changed, a speed other than the song's own, a station started. Pausing,
+/// seeking, the volume and the sound's own settings stay the listener's, and so do the room's own songs
+/// (`/api/player/songs`). Setting shuffle off, repeat off or the speed back to 1 is never refused.
+pub(crate) fn the_djs(path: &str, body: &Value) -> bool {
+    match path {
+        "/api/player/play"
+        | "/api/player/enqueue"
+        | "/api/player/next"
+        | "/api/player/previous"
+        | "/api/player/jump"
+        | "/api/player/remove"
+        | "/api/player/move"
+        | "/api/radio/start" => true,
+        "/api/player/shuffle" => body.get("on").and_then(Value::as_bool).unwrap_or(false),
+        "/api/player/repeat" => {
+            Repeat::from_word(body.get("mode").and_then(Value::as_str).unwrap_or("off")) != Repeat::Off
+        }
+        "/api/player/speed" => body.get("speed").and_then(Value::as_f64).is_some_and(|s| (s - 1.0).abs() > 1e-9),
+        _ => false,
+    }
+}
+
+/// [`the_djs`] for a command from the phone: it may pause and play, stop, seek and set the volume while tuned in, and
+/// set shuffle or repeat off. Every command is named, so a new one is decided on here.
+pub(crate) fn the_djs_command(command: &Command) -> bool {
+    match command {
+        Command::Play | Command::Pause | Command::Stop | Command::Seek { .. } | Command::Volume { .. } => false,
+        Command::Shuffle { on } => *on,
+        Command::Repeat { mode } => Repeat::from_word(mode) != Repeat::Off,
+        Command::Next
+        | Command::Prev
+        | Command::Start { .. }
+        | Command::Add { .. }
+        | Command::Remove { .. }
+        | Command::Move { .. }
+        | Command::SkipTo { .. } => true,
     }
 }
 
@@ -193,6 +286,9 @@ pub(crate) fn route(state: &State, request: &mut Request, path: &str) -> Result<
             json!({ "on": base.is_some(), "rooms": base.map(rooms_socket), "offline": offline }),
         )));
     }
+    if path == "/api/sessions/listening" {
+        return listening_route(state, request).map(Some);
+    }
     let Some(asked) = Asked::of(path) else {
         return Ok(Some(fail(404, "not_found")));
     };
@@ -220,12 +316,36 @@ pub(crate) fn route(state: &State, request: &mut Request, path: &str) -> Result<
         Ok(body) => body,
         Err(refusal) => return Ok(Some(refusal)),
     };
+    // A share service that hangs holds a few of the core's request workers, never all of them.
+    let Some(_asking) = state.sessions.asking() else {
+        return Ok(Some(fail(503, "busy").with_header(header("Retry-After", "1"))));
+    };
     let method = if read { "GET" } else { method.as_str() };
     Ok(Some(pass(base, method, &asked.upstream(), key.as_deref(), body)))
 }
 
 fn not_allowed(allowed: &[&str]) -> Reply {
     fail(405, "method_not_allowed").with_header(header("Allow", &allowed.join(", ")))
+}
+
+/// `POST /api/sessions/listening {on: bool}` → 204: the window tuned in to a session, or left it. `GET` → `{ on }`.
+/// Nothing is asked of the share service.
+fn listening_route(state: &State, request: &mut Request) -> Result<Reply> {
+    match request.method() {
+        Method::Get | Method::Head => {}
+        Method::Post => {
+            let Ok(body) = crate::serve::body_json(request) else {
+                return Ok(refuse(400, "the body is not JSON"));
+            };
+            let Some(on) = body.get("on").and_then(Value::as_bool) else {
+                return Ok(refuse(400, "on is true or false"));
+            };
+            state.sessions.set_listening(on);
+            return Ok(reply(204, "text/plain", Vec::new()));
+        }
+        _ => return Ok(refuse(405, "listening is read with a GET and set with a POST")),
+    }
+    Ok(reply_json(200, json!({ "on": state.sessions.listening() })))
 }
 
 /// `GET /api/community`, `POST /api/community/join`.
@@ -586,6 +706,88 @@ pub(crate) fn play_songs(state: &State, request: &mut Request) -> Result<Reply> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tuned_in_what_plays_is_the_djs_and_pausing_seeking_and_the_volume_are_the_listeners() {
+        for (path, body) in [
+            ("/api/player/next", json!({})),
+            ("/api/player/previous", json!({})),
+            ("/api/player/jump", json!({ "index": 2 })),
+            ("/api/player/play", json!({ "items": [] })),
+            ("/api/player/enqueue", json!({ "songs": [] })),
+            ("/api/player/remove", json!({ "index": 1 })),
+            ("/api/player/move", json!({ "from": 1, "to": 2 })),
+            ("/api/radio/start", json!({ "playing": true })),
+            ("/api/player/shuffle", json!({ "on": true })),
+            ("/api/player/repeat", json!({ "mode": "all" })),
+            ("/api/player/repeat", json!({ "mode": "one" })),
+            ("/api/player/speed", json!({ "speed": 0.75 })),
+        ] {
+            assert!(the_djs(path, &body), "{path} {body}");
+        }
+        for (path, body) in [
+            ("/api/player/songs", json!({ "songs": [] })),
+            ("/api/player/pause", json!({ "paused": true })),
+            ("/api/player/seek", json!({ "seconds": 3 })),
+            ("/api/player/volume", json!({ "percent": 40 })),
+            ("/api/player/stop", json!({})),
+            ("/api/player/shuffle", json!({ "on": false })),
+            ("/api/player/shuffle", json!({})),
+            ("/api/player/repeat", json!({ "mode": "off" })),
+            ("/api/player/repeat", json!({ "mode": "sideways" })),
+            ("/api/player/speed", json!({ "speed": 1 })),
+            // Not a speed: the route itself refuses it.
+            ("/api/player/speed", json!({ "speed": "fast" })),
+            ("/api/player/tuning", json!({ "hz": 432 })),
+            ("/api/player/replaygain", json!({ "mode": "track" })),
+            ("/api/player", json!({})),
+        ] {
+            assert!(!the_djs(path, &body), "{path} {body}");
+        }
+
+        let mine = [
+            Command::Play,
+            Command::Pause,
+            Command::Stop,
+            Command::Seek { position_ms: 1000 },
+            Command::Volume { volume: 0.5 },
+            Command::Shuffle { on: false },
+            Command::Repeat { mode: "off".into() },
+        ];
+        assert!(mine.iter().all(|c| !the_djs_command(c)));
+        let theirs = [
+            Command::Next,
+            Command::Prev,
+            Command::Start { songs: Vec::new(), at: 0, position_ms: 0, play: true, from: None },
+            Command::Add { songs: Vec::new(), next: true },
+            Command::Remove { iid: "a".into() },
+            Command::Move { iid: "a".into(), to: 0 },
+            Command::SkipTo { iid: "a".into() },
+            Command::Shuffle { on: true },
+            Command::Repeat { mode: "one".into() },
+        ];
+        assert!(theirs.iter().all(the_djs_command));
+    }
+
+    #[test]
+    fn calls_to_the_share_service_take_a_place_and_give_it_back() {
+        let sessions = Sessions::at(Some("off"));
+        let held: Vec<_> = (0..MOST_AT_ONCE).map(|_| sessions.asking().expect("a place")).collect();
+        assert!(sessions.asking().is_none(), "more than {MOST_AT_ONCE} at once");
+        drop(held);
+        assert!(sessions.asking().is_some(), "the places were not given back");
+        assert_eq!(sessions.asking.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn leaving_a_session_lets_autoplay_add_to_the_rooms_queue_again() {
+        let sessions = Sessions::at(Some("off"));
+        sessions.hold_autoplay(Some(7));
+        sessions.set_listening(true);
+        assert!(sessions.listening() && sessions.holds_autoplay(7));
+        sessions.set_listening(false);
+        assert!(!sessions.listening() && !sessions.holds_autoplay(7));
+    }
 
     #[test]
     fn the_share_service_is_https_or_on_this_computer_and_off_is_off() {

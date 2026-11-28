@@ -337,6 +337,12 @@ struct Shared {
     errors: u64,
     /// A seek asked for while the next track was still loading; it is done when the track has loaded.
     pending_seek: Option<f64>,
+    /// The start under way is to begin paused: the listener paused while its track was asked for or opening, or it
+    /// was cued ([`Player::play_from_at`] with `play` false). Each new start begins playing unless told so.
+    start_paused: bool,
+    /// A track that opened paused and has not played since: the place it waits at. Paused, the engine says a place a
+    /// little before the one it plays from (what it has ready, less what its output holds), so this is said instead.
+    cued: Option<f64>,
     heard: Option<Heard>,
     /// The engine's last complaints about the track it is on: said with the failure when the track cannot be played.
     complaints: Vec<String>,
@@ -403,7 +409,7 @@ pub struct Queued {
     pub queue_id: u64,
     /// Its tracks' queue numbers ([`QueueItem::qid`]), in its order.
     pub qids: Vec<u64>,
-    /// The queue number of the track it starts (or rests) on; `None` for an empty queue.
+    /// The queue number of the track it starts (or is cued) on; `None` for an empty queue.
     pub start: Option<u64>,
 }
 
@@ -809,10 +815,17 @@ impl Ctx {
             }
             match located {
                 Ok(located) => {
-                    let played = self
-                        .engine
-                        .play_now(&located.locator)
-                        .and_then(|()| self.engine.set_paused(false));
+                    // To begin paused (paused while it was asked for, or cued): opened paused, at its place, and
+                    // nothing of it is heard until play.
+                    let played = if shared.start_paused {
+                        self.engine
+                            .set_paused(true)
+                            .and_then(|()| self.engine.play_now(&located.locator))
+                    } else {
+                        self.engine
+                            .play_now(&located.locator)
+                            .and_then(|()| self.engine.set_paused(false))
+                    };
                     match played {
                         Ok(()) => {
                             shared.slots = vec![Slot {
@@ -1235,7 +1248,14 @@ impl Player {
                                 }
                             }
                             Event::FileLoaded => {
-                                let pending = ctx.shared.lock().unwrap().pending_seek.take();
+                                let pending = {
+                                    let mut shared = ctx.shared.lock().unwrap();
+                                    let pending = shared.pending_seek.take();
+                                    if shared.start_paused {
+                                        shared.cued = Some(pending.unwrap_or(0.0));
+                                    }
+                                    pending
+                                };
                                 if let Some(seconds) = pending {
                                     let _ = ctx.engine.seek_to(seconds);
                                 }
@@ -1276,14 +1296,20 @@ impl Player {
 
     /// Replaces the queue with `items` and plays from place `start`; `from` says what the queue is, in the
     /// listener's words. With shuffle on, the track at `start` plays first and the rest follow in a new order.
-    pub fn play_from(&self, items: Vec<QueueItem>, start: usize, from: Option<String>) -> Result<()> {
+    pub fn play_from(
+        &self,
+        items: Vec<QueueItem>,
+        start: usize,
+        from: Option<String>,
+    ) -> Result<()> {
         self.play_from_at(items, start, from, 0.0, true).map(|_| ())
     }
 
     /// Replaces the queue with `items`, as [`Player::play_from`] does, and starts the track at `start` from `seconds`
     /// in. The place is taken once the track has loaded, so it holds for a track an add-on is still being asked for (a
-    /// seek asked right after a start could land on the track before it). With `play` false nothing plays: the player
-    /// rests on that track, `seconds` in, and play starts it from there. Answers what was queued.
+    /// seek asked right after a start could land on the track before it). With `play` false the track is cued: asked
+    /// for and opened now, paused at its place, so it plays the moment it is asked to (and nothing of it is heard
+    /// before); meanwhile the state says it is paused there. Answers what was queued.
     pub fn play_from_at(
         &self,
         mut items: Vec<QueueItem>,
@@ -1295,9 +1321,17 @@ impl Player {
         if items.is_empty() {
             self.stop()?;
             let queue_id = self.ctx.shared.lock().unwrap().queue_id;
-            return Ok(Queued { queue_id, qids: Vec::new(), start: None });
+            return Ok(Queued {
+                queue_id,
+                qids: Vec::new(),
+                start: None,
+            });
         }
-        let seconds = if seconds.is_finite() { seconds.max(0.0) } else { 0.0 };
+        let seconds = if seconds.is_finite() {
+            seconds.max(0.0)
+        } else {
+            0.0
+        };
         let mut start = start.min(items.len() - 1);
         // The queue is put in place and its start begun under one hold: nothing else starts in between.
         let (queued, begun) = {
@@ -1320,17 +1354,10 @@ impl Player {
                 start: Some(shared.queue[start].qid),
             };
             let begun = Self::begin(&mut shared, start, Some(seconds));
-            if !play {
-                // Nothing starts: the player rests on the track, `seconds` in (what the engine plays is stopped below).
-                shared.starting = None;
-                shared.pending_seek = None;
-                shared.rest = Some((shared.queue[start].qid, seconds));
-            }
+            shared.start_paused = !play;
             (queued, begun)
         };
-        if !play {
-            self.ctx.engine.stop()?;
-        } else if let Some((generation, waits)) = begun {
+        if let Some((generation, waits)) = begun {
             self.go(generation, waits);
         }
         Ok(queued)
@@ -1728,6 +1755,8 @@ impl Player {
             shared.error = None;
             shared.error_id = None;
             shared.pending_seek = seconds.filter(|s| *s > 0.05);
+            shared.start_paused = false;
+            shared.cued = None;
             shared.retried.clear();
             shared.retry = None;
             shared.rest = None;
@@ -1742,9 +1771,20 @@ impl Player {
         self.ctx.run(waits, move |ctx| ctx.start(generation, waits));
     }
 
-    /// Pauses, or plays on. Resting on a track, playing on starts that track from where it rests.
+    /// Pauses, or plays on. Resting on a track, playing on starts that track from where it rests. While a track is
+    /// being started (asked of an add-on, or opening), it begins as last asked: paused at its place, or playing.
     pub fn set_paused(&self, paused: bool) -> Result<()> {
-        let resting = self.ctx.shared.lock().unwrap().resting();
+        let resting = {
+            let mut shared = self.ctx.shared.lock().unwrap();
+            let resting = shared.resting();
+            if resting.is_none() {
+                shared.start_paused = paused;
+                if !paused {
+                    shared.cued = None;
+                }
+            }
+            resting
+        };
         match resting {
             Some(_) if paused => Ok(()),
             Some((place, seconds)) => {
@@ -1856,6 +1896,10 @@ impl Player {
                     rest.1 = seconds;
                 }
                 return Ok(());
+            }
+            // Cued: it waits at the new place.
+            if let Some(cued) = shared.cued.as_mut() {
+                *cued = seconds;
             }
         }
         self.commit_eq();
@@ -2174,6 +2218,7 @@ impl Player {
             queue,
             resting,
             nothing_after,
+            (start_paused, pending_seek, cued),
         ) = {
             let shared = self.ctx.shared.lock().unwrap();
             // Only while a track plays: during a start the engine's list is being replaced, and its word is old.
@@ -2210,6 +2255,7 @@ impl Player {
                 resting,
                 shared.ahead >= shared.queue.len()
                     && pos.is_some_and(|pos| pos + 1 >= shared.slots.len()),
+                (shared.start_paused, shared.pending_seek, shared.cued),
             )
         };
         let (queue_version, queue_id, shuffle, repeat, from) = queue;
@@ -2306,6 +2352,8 @@ impl Player {
         PlayerState {
             status: if !playing {
                 match starting {
+                    // A start that is to begin paused (paused while it was asked for, or cued) is paused already.
+                    Some(_) if start_paused => "paused",
                     Some(_) if asking => "loading",
                     Some(_) => "playing",
                     // Resting on a track is being paused in it: play goes on from there.
@@ -2325,10 +2373,13 @@ impl Player {
             repeat: repeat.as_str(),
             from,
             track,
-            position_ms: match resting {
+            // A place still to be taken (the track opening, or a seek between tracks) is where it will be; a cued
+            // track, where it waits.
+            position_ms: match (resting, pending_seek.or(cued.filter(|_| playing))) {
+                (_, Some(at)) if playing || starting.is_some() => (at * 1000.0) as u64,
                 _ if playing => seconds("time-pos"),
-                Some((_, at)) => (at * 1000.0) as u64,
-                None => 0,
+                (Some((_, at)), _) => (at * 1000.0) as u64,
+                (None, _) => 0,
             },
             duration_ms: match resting {
                 _ if playing => seconds("duration"),
