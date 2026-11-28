@@ -33,7 +33,7 @@ const FRAMES: Record<FaceId, readonly string[]> = {
 	'k:shrug': [String.raw`¯\_(ツ)_/¯`],
 	'k:lenny': ['( ͡° ͜ʖ ͡°)'],
 	'k:yay': [String.raw`\(^o^)/`],
-	'k:love': ['(♥‿♥)'],
+	'k:love': ['(♥\uFE0E‿♥\uFE0E)'], // U+FE0E: the text heart, not a red emoji
 	'k:cool': ['(⌐■_■)'],
 	'k:look': ['ಠ_ಠ'],
 	'k:wow': ['(⊙_⊙)'],
