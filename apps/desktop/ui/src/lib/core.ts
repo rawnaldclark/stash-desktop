@@ -985,8 +985,15 @@ export const pickEqFile = () => post<{ path: string | null }>('/api/player/eq/pi
 export const eqFromFile = (path: string) => told('/api/player/eq/file', { path });
 export const setShuffle = (on: boolean) => told('/api/player/shuffle', { on });
 export const setRepeat = (mode: 'off' | 'all' | 'one') => told('/api/player/repeat', { mode });
+/** Tells the core this window is tuned in to a session, or no longer: while it is, the core refuses skips and picks from
+ * anywhere (the tray, media keys, the mini player, the phone), as the window does. */
+export async function setSessionListening(on: boolean): Promise<void> {
+	await fetch(at('/api/sessions/listening'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ on }) });
+}
 /** Adds songs to the queue: at its end, or (`next`) right after the one playing. */
 export const enqueue = (items: PlayEntry[], next: boolean) => told('/api/player/enqueue', { items, next });
+/** Songs told by what they are (a session's requests), found as the phone's are; at most 100 at once. */
+export const enqueueSongs = (songs: DescribedSong[], next: boolean) => told('/api/player/enqueue', { songs, next });
 export const removeFromQueue = (index: number) => told('/api/player/remove', { index });
 export const moveInQueue = (from: number, to: number) => told('/api/player/move', { from, to });
 
@@ -1106,3 +1113,22 @@ export const mornyeCallback = (key: string, url: string) => post<unknown>('/api/
 export const mornyeLogout = (key: string) => post<{ ok: boolean }>('/api/mornye/logout', { key });
 export const mornyeAction = (key: string, action: string, input?: Record<string, unknown>, token?: string) =>
 	post<MornyeActed>('/api/mornye/action', { key, action, input: input ?? null, token: token ?? null });
+
+// ------------------------------------------------------------------------------------------------ Sessions
+
+/** A song someone else described (a session's), for `POST /api/player/songs`. */
+export type DescribedSong = { title: string; artist: string; album?: string; isrc?: string; duration_ms?: number; art?: string; youtube?: string };
+
+/**
+ * Plays songs described by someone else (a session's): the library's own copy when it has the song, else found through the
+ * add-ons. Not grown by autoplay. Answers the queue ids of the songs queued (`q<qid>` in the window), in order.
+ */
+export const playSongs = (songs: DescribedSong[], o: { at?: number; positionMs?: number; play?: boolean; from?: string } = {}) =>
+	post<{ queued: number; qids?: number[]; start_qid?: number | null }>('/api/player/songs', {
+		songs,
+		at: o.at ?? 0,
+		position_ms: Math.max(0, Math.round(o.positionMs ?? 0)),
+		play: o.play !== false,
+		...(o.from ? { from: o.from } : {})
+	});
+

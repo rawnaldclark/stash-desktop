@@ -28,11 +28,12 @@
 	<div class="bar" role="group" aria-label="Player">
 		<div class="bar-l">
 			<a class="bar-cv" href="/now" aria-label="Open Now playing"><Cover artwork={s.current.artwork} seed={s.current.title} min={104} class="cv" eager /></a>
-			<span class="bar-t"><span class="bar-ti"><b dir="auto">{s.current.title}</b><i dir="auto">{s.current.artist}</i></span><SignalBadge kind="bar" /></span>
+			<span class="bar-t"><span class="bar-ti"><b dir="auto">{s.current.title}</b><i dir="auto">{s.current.artist}</i></span>{#if ui.hosting && !s.listening}<a class="ss-bar-live" href="/sessions" title="You're live on {ui.hosting}">LIVE · You’re on {ui.hosting}</a>{:else if s.listening}<a class="ss-bar-live" href="/sessions" title="Tuned in to {s.listening.station}">LIVE · {s.listening.station}</a>{:else}<SignalBadge kind="bar" />{/if}</span>
 			<LikeButton item={s.current} class="bar-ib bar-like" />
 			<SaveButton item={s.current} class="bar-ib" />
 		</div>
 		<div class="bar-c">
+			{#if s.listening}<p class="ss-bar-who"><b>{s.listening.host}</b> is playing{s.listenHeld && !s.playing ? ' · you paused: play to go back to live' : ' · skip and seek are theirs'}</p>{/if}
 			<Transport kind="bar" />
 			<ProgressBar wave />
 		</div>

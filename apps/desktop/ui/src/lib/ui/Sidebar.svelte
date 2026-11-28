@@ -61,6 +61,7 @@
 		<NavTile href="/library?tab=history" icon="history" label="History" on={onTab('history')} />
 		{#if !ui.local}<NavTile href="/library?tab=downloads" icon="download" label="Downloads" on={onTab('downloads')} />{/if}
 		<NavTile href="/stats" icon="leaderboard" label="Statistics" on={page.url.pathname === '/stats'} />
+		{#if !ui.local}<NavTile href="/sessions" icon="groups" label="Sessions" on={page.url.pathname === '/sessions'} />{/if}
 		{#if !ui.local && (NF.open > 0 || onTab('notfound'))}<NavTile href="/library?tab=notfound" icon="search" label="Not found" count={NF.open} on={onTab('notfound')} />{/if}
 		{#if !ui.local && ((T.on && T.signedIn) || onTab('youtube'))}<NavTile href="/library?tab=youtube" icon="library_music" label="YouTube Music" on={onTab('youtube')} />{/if}
 	</nav>

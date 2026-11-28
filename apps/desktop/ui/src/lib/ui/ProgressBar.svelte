@@ -95,8 +95,10 @@
 		const r = track!.getBoundingClientRect();
 		return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
 	}
+	/** Tuned in to a session: the position is the DJ's (the player would refuse the seek anyway). */
+	const locked = $derived(!!S.v.listening);
 	function down(e: PointerEvent) {
-		if (!(dur > 0)) return;
+		if (!(dur > 0) || locked) return;
 		track!.setPointerCapture(e.pointerId);
 		drag = frac(e);
 		for (const a of anims) {
@@ -117,6 +119,7 @@
 		pin(f * dur, S.v.playing);
 	}
 	function key(e: KeyboardEvent) {
+		if (locked) return;
 		const step = e.key === 'ArrowLeft' || e.key === 'ArrowDown' ? -5000 : e.key === 'ArrowRight' || e.key === 'ArrowUp' ? 5000 : e.key === 'PageDown' ? -30000 : e.key === 'PageUp' ? 30000 : 0;
 		if (e.key === 'Home') player.seek(0);
 		else if (e.key === 'End') player.seek(Math.max(0, dur - 1000));
@@ -132,10 +135,12 @@
 	<div
 		class="trk"
 		class:drag={drag !== null}
+		class:locked
 		bind:this={track}
 		role="slider"
-		tabindex="0"
-		aria-label="Seek"
+		tabindex={locked ? -1 : 0}
+		aria-disabled={locked}
+		aria-label={locked ? 'Song progress' : 'Seek'}
 		aria-valuemin="0"
 		aria-valuemax={Math.round(dur / 1000)}
 		aria-valuenow={Math.round(pos / 1000)}

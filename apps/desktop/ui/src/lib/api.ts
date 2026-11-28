@@ -77,7 +77,19 @@ export interface PlayerState {
 	eq: CoreEq;
 	/** The station growing the queue (a radio, or autoplay), when one is. */
 	station: Station | null;
+	/**
+	 * Tuned in to a session (Sessions, as a listener): its DJ plays, so skip, seek, playing from a list, radio and speed are theirs,
+	 * and the player bar says whose. Pause stays this listener's own (`listenHeld`); play again goes back to live.
+	 */
+	listening?: Listening | null;
+	/** Paused by this listener while the session plays on: songs that start meanwhile wait too. */
+	listenHeld?: boolean;
+	/** The session's song key while the song playing is the one the session loaded (the follower compares it with the room's). */
+	listeningKey?: string | null;
 }
+
+/** Sessions: the session this player is tuned in to (as a listener), by its station's name and its DJ's. */
+export type Listening = { station: string; host: string };
 
 export interface PlayerAPI {
 	state: Readable<PlayerState>;
@@ -131,6 +143,19 @@ export interface PlayerAPI {
 	stopRadio(): Promise<boolean>;
 	/** Opens the station's seed on Last.fm. */
 	openLastfm(): Promise<void>;
+	/**
+	 * Tunes this player in to a session, or out of it (null: what plays stays, paused, as this player's own). While tuned in, only
+	 * the follow* calls change the song or its position (lib/sessions/follow.ts calls them); the window's own are refused, said why.
+	 */
+	setListening(l: Listening | null): void;
+	/** The session's song, at its position; it starts only if `autoplay` and this listener hasn't paused. Only while listening. */
+	followLoad(item: LibraryItem, positionMs: number, autoplay: boolean): Promise<void>;
+	/** The session's position (a correction, or the DJ's seek). Only while listening. */
+	followSeek(ms: number): void;
+	/** The session plays: so does this player, unless this listener paused. Only while listening. */
+	followPlay(): void;
+	/** The session paused (this listener's own pause stays theirs). Only while listening. */
+	followPause(): void;
 }
 
 export interface SearchAPI {
@@ -302,5 +327,8 @@ export const INITIAL_PLAYER_STATE: PlayerState = {
 	speed: 1,
 	tuning: 440,
 	eq: NO_EQ,
-	station: null
+	station: null,
+	listening: null,
+	listenHeld: false,
+	listeningKey: null
 };

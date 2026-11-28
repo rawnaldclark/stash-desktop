@@ -14,7 +14,8 @@
 	import { albumHref, albumLink, artistHref, artistLink } from '../identity';
 	import Icon from './Icon.svelte';
 	import type { IconName } from './icons';
-	import { L, ui } from './state.svelte';
+	import { L, S, ui } from './state.svelte';
+	import { requestSong } from './request';
 
 	/** The main entries; the playlists to add to; or, before saved files are deleted, the question. */
 	let view = $state<'main' | 'playlists' | 'remove'>('main');
@@ -200,13 +201,18 @@
 	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 	<div class="menu" role="menu" aria-label={picked ? `Options for ${targets.length} songs` : isGroup ? 'Album options' : 'Song options'} tabindex="-1" bind:this={el} style="left:{pos.x}px;top:{pos.y}px" onkeydown={onkey}>
 		{#if view === 'main'}
-			{@render entry('queue_play_next', 'Play next', () => run(() => player.enqueue(targets, { next: true }), 'Playing next'))}
-			{@render entry('queue_music', 'Add to Up next', () => run(() => player.enqueue(targets), 'Added to Up next'))}
+			{#if S.v.listening}
+				<!-- Tuned in to a session: the queue is the DJ's, so a song is asked for instead. -->
+				{#if !isGroup && !picked}{@const host = S.v.listening.host}{@render entry('queue_music', `Request from ${host}`, () => run(() => requestSong(m.item)))}{/if}
+			{:else}
+				{@render entry('queue_play_next', 'Play next', () => run(() => player.enqueue(targets, { next: true }), 'Playing next'))}
+				{@render entry('queue_music', 'Add to Up next', () => run(() => player.enqueue(targets), 'Added to Up next'))}
+			{/if}
 			{@render entry('playlist_add', 'Add to playlist', () => {
 				view = 'playlists';
 				tick().then(() => el?.querySelector<HTMLElement>('[role="menuitem"]')?.focus());
 			})}
-			{#if R.ready && !isGroup && player.canRadio(m.item)}
+			{#if R.ready && !isGroup && !S.v.listening && player.canRadio(m.item)}
 				{@const item = m.item}
 				{@render entry('radio', 'Start radio', () => run(() => player.startRadio(item)))}
 			{/if}

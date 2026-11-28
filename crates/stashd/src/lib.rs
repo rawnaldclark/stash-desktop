@@ -27,6 +27,7 @@ mod remote_art;
 mod saving;
 mod scrobbling;
 pub mod serve;
+mod sessions;
 mod shortcuts;
 mod subsonic;
 mod table;

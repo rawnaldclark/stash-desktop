@@ -9,6 +9,7 @@ import { loadMixes } from './desktop/mixes.svelte';
 import { get, writable, type Readable } from 'svelte/store';
 import * as core from './core';
 import { Refused, said } from './core';
+import { sessionActive } from './sessions/active';
 import {
 	INITIAL_PLAYER_STATE,
 	type Album,
@@ -20,6 +21,7 @@ import {
 	type HistoryEntry,
 	type LibraryAPI,
 	type LibraryItem,
+	type Listening,
 	type LyricsAPI,
 	type PlayerAPI,
 	type PlayerState,
@@ -226,6 +228,19 @@ function entryOf(item: LibraryItem): core.PlayEntry | null {
 	return { addon: a.addon, track: art ? { ...a.track, art } : a.track };
 }
 
+/** A song neither the library's nor an add-on's (a session's song, a listener's request): told to the core by what it is. */
+function describedOf(item: LibraryItem): core.DescribedSong {
+	const song: core.DescribedSong = { title: item.title, artist: item.artist };
+	if (item.album) song.album = item.album;
+	if (item.isrc) song.isrc = item.isrc;
+	if (item.durationMs) song.duration_ms = Math.round(item.durationMs);
+	const yt = item.refs?.[core.YOUTUBE];
+	if (yt) song.youtube = yt;
+	const art = item.artwork?.[0]?.url;
+	if (art && art.startsWith('https://')) song.art = art;
+	return song;
+}
+
 const trackOfRow = (r: core.TrackRow): Track => {
 	itemOfRow(r); // remembered, so the player knows the song's pages and bit depth
 	const t: Track = { id: String(r.id), title: r.title, artist: r.artist };
@@ -285,6 +300,38 @@ function publish(next: PlayerState): void {
 	playerState.set(next);
 }
 
+// ------------------------------------------------------------------------------------------------ Sessions: tuned in, the DJ plays
+
+/** Tuned in to a session (lib/sessions/): its station and DJ; null when not. */
+let listening: Listening | null = null;
+/** Paused by this listener while the session plays on. */
+let listenHeld = false;
+/** The session's song as the window loaded it (followLoad): its key, and the queue entry the core gave it. */
+let roomSong: { key: string; qid: string | null } | null = null;
+/** What the follower last asked of the player (play or pause): a pause it didn't ask for is the listener's own. */
+let followWant: 'play' | 'pause' | null = null;
+/** The room's latest song load: an older one still waiting is dropped (the latest wins). */
+let loadSeq = 0;
+/** The room's song key while the song playing is the one followLoad loaded (the library's copy can be worded differently). */
+const listeningKeyOf = (current: QueueItem | null): string | null =>
+	listening && roomSong && roomSong.qid !== null && current && current.qid === roomSong.qid ? roomSong.key : null;
+
+/** The window's own move while tuned in: the session's DJ has it. Says so, and refuses. */
+function refusedWhileListening(what: 'skip' | 'pick' | 'queue' | 'speed'): boolean {
+	const l = listening;
+	if (!l) return false;
+	const text =
+		what === 'skip'
+			? `${l.host} is playing: skip and seek are theirs.`
+			: what === 'speed'
+				? 'A session plays at its own speed.'
+				: what === 'queue'
+					? `The queue is ${l.host}'s: request a song instead.`
+					: `You're in ${l.station}: request a song instead.`;
+	problemStore.set({ text, n: ++problemCount });
+	return true;
+}
+
 const same = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.stringify(b);
 
 /** Takes in what the core says the player is doing. Things that did not change keep their objects, so the UI redraws only what did. */
@@ -298,6 +345,13 @@ function take(a: core.CorePlayer): void {
 		oldErrors = a.errors ?? 0;
 	}
 	if (a.error !== old || (a.errors ?? 0) !== oldErrors) old = null;
+	// Tuned in, a pause on the same song that neither the follower nor this window asked for (a media key, the tray, the mini
+	// player, the phone) is the listener's own: it holds, as the window's Pause does; their play from there goes back to live.
+	// A song that ran out (resting) is not a pause.
+	if (listening && heard.track && a.track && heard.track.qid === a.track.qid) {
+		if (!listenHeld && followWant === 'play' && heard.status === 'playing' && a.status === 'paused' && !a.resting) listenHeld = true;
+		else if (listenHeld && heard.status === 'paused' && a.status === 'playing') listenHeld = false;
+	}
 	heard = a;
 	heardAt = performance.now();
 	const index = a.track && a.index !== null ? a.index : -1;
@@ -334,7 +388,9 @@ function take(a: core.CorePlayer): void {
 		speed: a.speed ?? 1,
 		tuning: a.tuning ?? 440,
 		eq: same(state.eq, a.eq) ? state.eq : a.eq,
-		station: same(state.station, a.station ?? null) ? state.station : (a.station ?? null)
+		station: same(state.station, a.station ?? null) ? state.station : (a.station ?? null),
+		listenHeld: !!listening && listenHeld,
+		listeningKey: listeningKeyOf(current)
 	});
 	readQueue(a);
 	// A stream from an add-on the window has not heard of (added from somewhere else): the list is read again.
@@ -396,8 +452,10 @@ async function poll(): Promise<void> {
 	clearTimeout(pollTimer);
 	await hear(() => core.player()).catch(() => {});
 	if (!polling) return;
-	// Often while a stream is being asked for, twice a second while something plays or waits, now and then otherwise.
-	const pause = heard.status === 'loading' ? 250 : heard.status !== 'idle' ? 500 : 1500;
+	// Often while a stream is being asked for, twice a second while something plays or waits, now and then otherwise. Hidden in the
+	// tray with no session on, every few seconds: the timers run at full pace there (for a session), and nothing is on screen.
+	const away = document.hidden && !listening && !sessionActive.hosting;
+	const pause = away ? 5000 : heard.status === 'loading' ? 250 : heard.status !== 'idle' ? 500 : 1500;
 	clearTimeout(pollTimer);
 	pollTimer = setTimeout(() => void poll(), pause);
 }
@@ -429,41 +487,53 @@ const player: PlayerAPI = {
 	now: position,
 	position,
 	playItems(items, startIndex = 0, opts) {
+		if (refusedWhileListening('pick')) return Promise.resolve();
 		// A song that is neither a row of the library nor an add-on's track cannot be played: the start moves with what is left out.
 		const start = items.slice(0, startIndex).filter((i) => entryOf(i) !== null).length;
 		const entries = entriesOf(items);
 		if (!entries.length) return Promise.resolve();
 		return command(() => core.playEntries(entries, Math.min(start, entries.length - 1), opts?.from));
 	},
-	playLibrary: (offset, opts) => command(() => core.playLibrary(offset, opts?.from, opts?.here, opts?.id)),
+	playLibrary: (offset, opts) => (refusedWhileListening('pick') ? Promise.resolve() : command(() => core.playLibrary(offset, opts?.from, opts?.here, opts?.id))),
 	playRows(ids, startIndex = 0, opts) {
-		if (!ids.length) return Promise.resolve();
+		if (!ids.length || refusedWhileListening('pick')) return Promise.resolve();
 		return command(() => core.playEntries(ids.map((id) => ({ id })), Math.max(0, Math.min(startIndex, ids.length - 1)), opts?.from));
 	},
-	play: () => void command(() => core.setPaused(false)),
-	pause: () => void command(() => core.setPaused(true)),
+	play: playNow,
+	pause: pauseNow,
 	toggle: () => {
-		if (state.current) void command(() => core.setPaused(heard.status === 'playing'));
+		if (!state.current) return;
+		if (heard.status === 'playing') pauseNow();
+		else playNow();
 	},
-	next: () => void command(() => core.nextTrack()),
-	prev: () => void command(() => core.previousTrack()),
+	next: () => void (refusedWhileListening('skip') || command(() => core.nextTrack())),
+	prev: () => void (refusedWhileListening('skip') || command(() => core.previousTrack())),
 	seek(ms) {
-		const to = Math.max(0, ms);
-		// The bar moves at once; the core's answer follows.
-		heard = { ...heard, position_ms: to };
-		heardAt = performance.now();
-		publish({ ...state, positionMs: to });
-		void command(() => core.seekTo(to / 1000));
+		if (!refusedWhileListening('skip')) seekNow(ms);
 	},
-	jumpTo: (i) => void command(() => core.jumpTo(i)),
+	jumpTo: (i) => void (refusedWhileListening('pick') || command(() => core.jumpTo(i))),
 	enqueue(items, opts) {
-		const entries = entriesOf(items);
-		if (entries.length) void command(() => core.enqueue(entries, opts?.next === true));
+		if (refusedWhileListening('queue')) return;
+		const next = opts?.next === true;
+		// The core takes entries or described songs in one call, not both: each run of one kind is a call of its own.
+		const runs: ({ entries: core.PlayEntry[] } | { songs: core.DescribedSong[] })[] = [];
+		for (const item of items) {
+			const entry = entryOf(item);
+			const last = runs[runs.length - 1];
+			if (entry) {
+				if (last && 'entries' in last) last.entries.push(entry);
+				else runs.push({ entries: [entry] });
+			} else if (last && 'songs' in last && last.songs.length < 100) last.songs.push(describedOf(item));
+			else runs.push({ songs: [describedOf(item)] });
+		}
+		// Added after the playing song, each run goes before the ones added before it: the last is added first.
+		for (const run of next ? runs.reverse() : runs)
+			void command(() => ('entries' in run ? core.enqueue(run.entries, next) : core.enqueueSongs(run.songs, next)));
 	},
-	removeAt: (i) => void command(() => core.removeFromQueue(i)),
-	move: (from, to) => void command(() => core.moveInQueue(from, to)),
-	setShuffle: (on) => void command(() => core.setShuffle(on)),
-	setRepeat: (m) => void command(() => core.setRepeat(m)),
+	removeAt: (i) => void (refusedWhileListening('queue') || command(() => core.removeFromQueue(i))),
+	move: (from, to) => void (refusedWhileListening('queue') || command(() => core.moveInQueue(from, to))),
+	setShuffle: (on) => void (refusedWhileListening('queue') || command(() => core.setShuffle(on))),
+	setRepeat: (m) => void (refusedWhileListening('queue') || command(() => core.setRepeat(m))),
 	setVolume(v) {
 		const to = Math.max(0, Math.min(1, v));
 		volumeHeld = { v: to, until: performance.now() + 800 };
@@ -472,7 +542,7 @@ const player: PlayerAPI = {
 	},
 	setExclusive: (on) => void command(() => core.setExclusive(on)),
 	setReplaygain: (mode) => void command(() => core.setReplaygain(mode)),
-	setSpeed: (speed) => void command(() => core.setSpeed(speed)),
+	setSpeed: (speed) => void ((speed !== 1 && refusedWhileListening('speed')) || command(() => core.setSpeed(speed))),
 	setTuning: (hz) => void command(() => core.setTuning(hz)),
 	refresh: () => void poll(),
 	setEq: (patch) => void command(() => core.setEq(patch)),
@@ -486,6 +556,7 @@ const player: PlayerAPI = {
 	wholeQueue: async () => (await allPages((o, l) => core.queueAt(o, l))).map(itemOfQueued),
 	canRadio: (item) => entryOf(item) !== null,
 	startRadio(from) {
+		if (refusedWhileListening('pick')) return Promise.resolve();
 		let body: core.RadioStart;
 		if ('artist' in from && !('title' in from)) body = { artist: from.artist };
 		else {
@@ -522,8 +593,113 @@ const player: PlayerAPI = {
 		} catch (e) {
 			report(e);
 		}
+	},
+	setListening(l) {
+		const name = (v: unknown, or: string) => (typeof v === 'string' && v.trim() ? v.replace(/\s+/g, ' ').trim().slice(0, 60) : or);
+		const next = l && typeof l.station === 'string' && l.station.trim() ? { station: name(l.station, 'the session'), host: name(l.host, 'The DJ') } : null;
+		if (!next && !listening) return;
+		if (next) {
+			listening = next;
+			// The session's time is the DJ's: no speed of one's own, and a radio of one's own ends.
+			if (state.speed !== 1) void command(() => core.setSpeed(1));
+			// Nor a repeat: the room's song ends when the DJ's does (Repeat can't be changed while tuned in).
+			if (state.repeat !== 'off') void command(() => core.setRepeat('off'));
+			if (state.station) void core.stopRadio().catch(() => {});
+			// The core refuses skips and picks from anywhere else too (after the two above, which it would refuse).
+			void command(async () => {
+				await core.setSessionListening(true).catch(() => {});
+				return core.player();
+			});
+			publish({ ...state, listening: next, listenHeld, listeningKey: listeningKeyOf(state.current) });
+			return;
+		}
+		// Tuned out: what plays stays, paused, as this player's own song. A room song still waiting to load never does.
+		listening = null;
+		listenHeld = false;
+		roomSong = null;
+		followWant = null;
+		loadSeq++;
+		publish({ ...state, listening: null, listenHeld: false, listeningKey: null });
+		void command(() => core.setPaused(true));
+		void command(async () => {
+			await core.setSessionListening(false).catch(() => {});
+			return core.player();
+		});
+	},
+	async followLoad(item, positionMs, autoplay) {
+		const l = listening;
+		if (!l) return;
+		const mine = ++loadSeq;
+		const song = describedOf(item);
+		const current = () => mine === loadSeq && listening === l;
+		// In the commands' order (after whatever the window asked before, before the next); a later song, or leaving, drops it.
+		barrier = sent;
+		const run = chain.then(async () => {
+			if (!current()) return;
+			barrier = sent;
+			const play = autoplay && !listenHeld;
+			followWant = play ? 'play' : 'pause';
+			const a = await core.playSongs([song], { positionMs, play, from: l.station });
+			if (!current()) return;
+			// The song it starts on (with shuffle on it need not be the first queued).
+			const qid = a.start_qid ?? a.qids?.[0];
+			roomSong = { key: item.key, qid: typeof qid === 'number' ? `q${qid}` : null };
+		});
+		chain = run.then(pollSoon, () => {});
+		try {
+			await run;
+		} catch (e) {
+			if (!current()) return;
+			// Not found here: what played before must not go on under the room's song (the follower pauses, and tries once more).
+			roomSong = null;
+			if (e instanceof Refused) report(e);
+			throw e;
+		}
+	},
+	followSeek(ms) {
+		if (listening) seekNow(ms);
+	},
+	// Sent whatever the last poll said (it may be half a second old, or a song still being found): the core's pause and play
+	// are the same asked twice.
+	followPlay() {
+		if (!listening || listenHeld) return;
+		followWant = 'play';
+		void command(() => core.setPaused(false));
+	},
+	followPause() {
+		if (!listening) return;
+		followWant = 'pause';
+		void command(() => core.setPaused(true));
 	}
 };
+
+/** Play: tuned in, it is also "back to live" (the follower puts the place right). */
+function playNow(): void {
+	if (listening) followWant = 'play';
+	if (listening && listenHeld) {
+		listenHeld = false;
+		publish({ ...state, listenHeld });
+	}
+	void command(() => core.setPaused(false));
+}
+
+/** Pause: tuned in, it is this listener's own and holds (songs that start meanwhile wait too). */
+function pauseNow(): void {
+	if (listening && !listenHeld) {
+		listenHeld = true;
+		publish({ ...state, listenHeld });
+	}
+	void command(() => core.setPaused(true));
+}
+
+/** A seek: the bar moves at once; the core's answer follows. */
+function seekNow(ms: number): void {
+	const to = Math.max(0, ms);
+	heard = { ...heard, position_ms: to };
+	heardAt = performance.now();
+	publish({ ...state, positionMs: to });
+	void command(() => core.seekTo(to / 1000));
+}
 
 // ------------------------------------------------------------------------------------------------ the library
 
@@ -1260,9 +1436,14 @@ export const searchApi = search;
 function start(): void {
 	polling = true;
 	void poll();
-	// While something plays the position runs on between the core's reports, so the clock and the lyrics move smoothly.
+	// Shown again: up to date at once.
+	document.addEventListener('visibilitychange', () => {
+		if (!document.hidden) pollSoon();
+	});
+	// While something plays the position runs on between the core's reports, so the clock and the lyrics move smoothly (not
+	// while hidden, unless a session watches the player).
 	setInterval(() => {
-		if (heard.status === 'playing') publish({ ...state, positionMs: position() });
+		if (heard.status === 'playing' && (!document.hidden || listening || sessionActive.hosting)) publish({ ...state, positionMs: position() });
 	}, 250);
 	void loadAddons().catch(() => {});
 	void loadLibrary()

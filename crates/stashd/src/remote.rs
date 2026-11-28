@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use stash_core::Library;
 use stash_core::link::crypto::{Envelope, b64u, open, place, random_bytes, seal};
 use stash_core::link::remote::{Cmd, Command, PhoneSong, StateFormat, StateIn, StateSong, read_cmd, state_doc};
 use stash_core::player::{AddonTrack, Player, QueueItem, Repeat};
@@ -425,7 +426,11 @@ impl<'s> Session<'s> {
 
     fn perform(&mut self, from: &str, cmd: Cmd) {
         let p = self.player;
+        // Tuned in to a session, the DJ chooses what plays: refused as a command that did not work is (the phone is
+        // sent the state as it is).
+        let refused = self.state.sessions.listening() && crate::sessions::the_djs_command(&cmd.command);
         let result: anyhow::Result<()> = match cmd.command {
+            _ if refused => Err(anyhow::anyhow!(crate::sessions::TUNED_IN)),
             Command::Play => p.set_paused(false).map_err(Into::into),
             Command::Pause => p.set_paused(true).map_err(Into::into),
             Command::Next => p.next().map_err(Into::into),
@@ -435,7 +440,7 @@ impl<'s> Session<'s> {
             Command::Volume { volume } => p.set_volume((volume * 100.0).round()).map_err(Into::into),
             Command::Start { songs, at, position_ms, play, from: list } => self.start(&songs, at, position_ms, play, list),
             Command::Add { songs, next } => {
-                let (items, _) = self.items_for(&songs, 0);
+                let (items, _) = items_for(&self.state.library.lock().unwrap(), &songs, 0);
                 if !items.is_empty() {
                     p.enqueue(items, next);
                 }
@@ -476,7 +481,7 @@ impl<'s> Session<'s> {
     }
 
     fn start(&mut self, songs: &[PhoneSong], at: usize, position_ms: u64, play: bool, from: Option<String>) -> anyhow::Result<()> {
-        let (items, start) = self.items_for(songs, at);
+        let (items, start) = items_for(&self.state.library.lock().unwrap(), songs, at);
         if items.is_empty() {
             return Ok(());
         }
@@ -487,43 +492,6 @@ impl<'s> Session<'s> {
         // The phone's place in the song: once the song has started here.
         self.seek_after_start = (position_ms > 2_000).then(|| (position_ms, Instant::now() + Duration::from_secs(15)));
         Ok(())
-    }
-
-    /// The phone's songs as this computer's queue items, and the place `at` lands on among those kept: each song is the
-    /// library's when the library has it (by ISRC, else by its words), else YouTube Music's by its id (asked of the
-    /// listener's add-ons first), else found by its description. Songs the listener chose not to play are left out.
-    fn items_for(&self, songs: &[PhoneSong], at: usize) -> (Vec<QueueItem>, usize) {
-        let library = self.state.library.lock().unwrap();
-        let mut items = Vec::with_capacity(songs.len());
-        let mut start = 0;
-        for (place, song) in songs.iter().enumerate() {
-            if place == at {
-                start = items.len();
-            }
-            let row = library.same_song(&song.title, &song.artist, song.isrc.as_deref()).ok().flatten();
-            let item = match row {
-                Some(id) => library.queue_items(&[id]).ok().and_then(|mut v| v.pop()),
-                None => Some(QueueItem {
-                    id: None,
-                    title: song.title.clone(),
-                    artist: song.artist.clone(),
-                    album: song.album.clone(),
-                    addon: song
-                        .youtube
-                        .as_ref()
-                        .map(|yt| AddonTrack { addon: stash_core::youtube::ID.to_string(), track: yt.clone() }),
-                    locator: String::new(),
-                    art: song.art.clone(),
-                    duration_ms: song.duration_ms,
-                    qid: 0,
-                }),
-            };
-            items.extend(item);
-        }
-        match crate::blocking::leave_out(&library, items, start) {
-            Ok(Some((items, start))) => (items, start),
-            _ => (Vec::new(), 0),
-        }
     }
 
     /// The place in the queue of the item `iid` names: looked for near the playing song first.
@@ -541,4 +509,42 @@ impl<'s> Session<'s> {
 /// An item's id on the wire: its place-in-queue number.
 fn iid(qid: u64) -> String {
     format!("q{qid}")
+}
+
+/// Songs another device describes (the phone's, a session's) as this computer's queue items, and the place `at` lands
+/// on among those kept: each song is the library's when the library has it (by ISRC, else by its words), else YouTube
+/// Music's by its id (asked of the listener's add-ons first), else found by its description. Songs the listener chose
+/// not to play are left out (one song asked for by itself still plays). Shared by the phone's remote and
+/// `POST /api/player/songs` ([`crate::sessions`]).
+pub(crate) fn items_for(library: &Library, songs: &[PhoneSong], at: usize) -> (Vec<QueueItem>, usize) {
+    let mut items = Vec::with_capacity(songs.len());
+    let mut start = 0;
+    for (place, song) in songs.iter().enumerate() {
+        if place == at {
+            start = items.len();
+        }
+        let row = library.same_song(&song.title, &song.artist, song.isrc.as_deref()).ok().flatten();
+        let item = match row {
+            Some(id) => library.queue_items(&[id]).ok().and_then(|mut v| v.pop()),
+            None => Some(QueueItem {
+                id: None,
+                title: song.title.clone(),
+                artist: song.artist.clone(),
+                album: song.album.clone(),
+                addon: song
+                    .youtube
+                    .as_ref()
+                    .map(|yt| AddonTrack { addon: stash_core::youtube::ID.to_string(), track: yt.clone() }),
+                locator: String::new(),
+                art: song.art.clone(),
+                duration_ms: song.duration_ms,
+                qid: 0,
+            }),
+        };
+        items.extend(item);
+    }
+    match crate::blocking::leave_out(library, items, start) {
+        Ok(Some((items, start))) => (items, start),
+        _ => (Vec::new(), 0),
+    }
 }

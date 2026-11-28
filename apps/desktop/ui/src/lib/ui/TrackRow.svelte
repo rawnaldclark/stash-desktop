@@ -7,6 +7,7 @@
 	import Icon from './Icon.svelte';
 	import LikeButton from './LikeButton.svelte';
 	import { mmss } from './format';
+	import { requestSong } from './request';
 	import { P, pickedMenu, rowLists, type PickList } from './pick.svelte';
 	import { openSongMenu, songMenu, type SongMenuArgs } from './song-menu';
 	import { L, S, ui, type MenuState } from './state.svelte';
@@ -80,9 +81,13 @@
 	const albumTo = $derived(albumLink(item));
 
 	// The names that link away keep their click (the router handles it); anywhere else on the row plays the song.
+	/** Tuned in to a session: the row asks the DJ for the song instead of playing it here. */
+	const requesting = $derived(!!S.v.listening);
+
 	function rowClick(e: MouseEvent) {
 		if ((e.target as Element | null)?.closest('a')) return;
 		if (pickBy(e)) return;
+		if (requesting) return requestSong(item);
 		// A plain click plays the song, as it always does, and lets the picked songs go.
 		P.clear();
 		if (away) {
@@ -98,7 +103,7 @@
 	}
 </script>
 
-<div class="trk-row" class:cur={current} class:off class:away class:blk={!!blocked} class:pk={picked} class:picking class:has-num={num !== undefined} class:has-cv={cover} class:has-al={album} class:has-rd={handle} use:songMenu={menuArgs} bind:this={rowEl} role="presentation" title={off ? 'Not found on your add-ons' : away ? 'Not on this computer: Stash is offline' : blocked ? 'You chose not to play this' : undefined}>
+<div class="trk-row" class:requesting class:cur={current} class:off class:away class:blk={!!blocked} class:pk={picked} class:picking class:has-num={num !== undefined} class:has-cv={cover} class:has-al={album} class:has-rd={handle} use:songMenu={menuArgs} bind:this={rowEl} role="presentation" title={off ? 'Not found on your add-ons' : away ? 'Not on this computer: Stash is offline' : blocked ? 'You chose not to play this' : undefined}>
 	{#if handle}<button type="button" class="rd-h" aria-label="Reorder {item.title}" title="Drag to reorder, or press Arrow Up or Down" aria-keyshortcuts="ArrowUp ArrowDown"><Icon name="drag_indicator" /></button>{/if}
 	<!-- A click anywhere on the row plays it (except on the names that link away); the button inside is the keyboard and screen-reader way in: its Enter or Space click bubbles to the row. -->
 	<!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -117,6 +122,7 @@
 		<span class="tr-d">{item.durationMs ? mmss(item.durationMs) : ''}</span>
 	</div>
 	<span class="trk-acts">
+		{#if requesting}<button type="button" class="tr-req" aria-hidden="true" tabindex="-1" onclick={() => requestSong(item)}>Request</button>{/if}
 		<LikeButton {item} class="tr-h" />
 		<button type="button" class="more" aria-label="More for {item.title}" aria-haspopup="menu" onclick={(e) => menuArgs && openSongMenu(menuArgs, e.currentTarget)}>
 			<Icon name="more_horiz" />
