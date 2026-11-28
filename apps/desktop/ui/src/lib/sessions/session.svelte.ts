@@ -86,6 +86,8 @@ class SessionState {
 
 	private room: RoomSocket | null = null;
 	private bridge: HostBridge | null = null;
+	/** A tune-in or Go live on its way. */
+	private busy = false;
 	private follower: Follower | null = null;
 	private unsubscribe: (() => void) | null = null;
 	private heardTimer: ReturnType<typeof setTimeout> | null = null;
@@ -130,6 +132,17 @@ class SessionState {
 
 	/** Tunes in to a station's session. Asks for Community first when this browser hasn't joined. */
 	async tuneIn(stationId: string): Promise<'ok' | 'join' | 'off-air' | 'failed' | 'hosting'> {
+		// One at a time: a click while one is on its way (a double-click, another station, Go live) is let go.
+		if (this.busy) return 'ok';
+		this.busy = true;
+		try {
+			return await this.tuneInNow(stationId);
+		} finally {
+			this.busy = false;
+		}
+	}
+
+	private async tuneInNow(stationId: string): Promise<'ok' | 'join' | 'off-air' | 'failed' | 'hosting'> {
 		if (this.inSession && this.station?.id === stationId) return 'ok';
 		// A host tuning in elsewhere would end their own session: they end it first, on purpose.
 		if (this.inSession && this.role === 'host') return 'hosting';
@@ -168,10 +181,13 @@ class SessionState {
 		if (!base) {
 			p.setListening(null);
 			this.phase = 'idle';
+			this.station = null;
+			this.code = null;
+			this.closeRoomTab();
 			ui.toast('Couldn’t reach Sessions. Try again.');
 			return 'failed';
 		}
-		const room = new RoomSocket(base, page.live.room, { communityKey: key, ...(this.name ? { name: this.name } : {}) }, (f) => this.frame(f), (s) => this.status(s), {
+		const room: RoomSocket = new RoomSocket(base, page.live.room, { communityKey: key, ...(this.name ? { name: this.name } : {}) }, (f) => this.room === room && this.frame(f), (s) => this.room === room && this.status(s), {
 			open: (url) => new WebSocket(url) as unknown as SocketLike
 		});
 		this.room = room;
@@ -189,6 +205,16 @@ class SessionState {
 	 * bridge tells the room what it plays (host.ts). Quitting Stash, or 15 minutes without playing, ends the session.
 	 */
 	async goLive(station: StationSummary): Promise<boolean> {
+		if (this.busy) return false;
+		this.busy = true;
+		try {
+			return await this.goLiveNow(station);
+		} finally {
+			this.busy = false;
+		}
+	}
+
+	private async goLiveNow(station: StationSummary): Promise<boolean> {
 		const key = await community.key();
 		if (!key) {
 			ui.toast('Join Community first: it’s how your station is yours.');
@@ -218,10 +244,13 @@ class SessionState {
 		if (!base) {
 			this.teardown();
 			this.phase = 'idle';
+			this.station = null;
+			this.code = null;
+			this.closeRoomTab();
 			ui.toast('Couldn’t reach Sessions. Try again.');
 			return false;
 		}
-		const room = new RoomSocket(base, opened.code, { hostKey: opened.hostKey, ...(this.name ? { name: this.name } : {}) }, (f) => this.frame(f), (s) => this.status(s), {
+		const room: RoomSocket = new RoomSocket(base, opened.code, { hostKey: opened.hostKey, ...(this.name ? { name: this.name } : {}) }, (f) => this.room === room && this.frame(f), (s) => this.room === room && this.status(s), {
 			open: (url) => new WebSocket(url) as unknown as SocketLike
 		});
 		this.room = room;

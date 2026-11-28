@@ -985,6 +985,11 @@ export const pickEqFile = () => post<{ path: string | null }>('/api/player/eq/pi
 export const eqFromFile = (path: string) => told('/api/player/eq/file', { path });
 export const setShuffle = (on: boolean) => told('/api/player/shuffle', { on });
 export const setRepeat = (mode: 'off' | 'all' | 'one') => told('/api/player/repeat', { mode });
+/** Tells the core this window is tuned in to a session, or no longer: while it is, the core refuses skips and picks from
+ * anywhere (the tray, media keys, the mini player, the phone), as the window does. */
+export async function setSessionListening(on: boolean): Promise<void> {
+	await fetch(at('/api/sessions/listening'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ on }) });
+}
 /** Adds songs to the queue: at its end, or (`next`) right after the one playing. */
 export const enqueue = (items: PlayEntry[], next: boolean) => told('/api/player/enqueue', { items, next });
 /** Songs told by what they are (a session's requests), found as the phone's are; at most 100 at once. */

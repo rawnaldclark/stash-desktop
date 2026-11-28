@@ -8,9 +8,16 @@ class FakePlayer implements FollowPlayer {
 	playing = false;
 	held = false;
 	key: string | null = null;
+	/** Loads that fail (the song isn't found), counted down. */
+	fail = 0;
 	private pos = 0;
 	private at = 0;
 	async followLoad(item: LibraryItem, positionMs: number, autoplay: boolean) {
+		if (this.fail > 0) {
+			this.fail--;
+			this.log.push(`load ${item.title} failed`);
+			throw new Error('not found');
+		}
 		this.log.push(`load ${item.title} @${positionMs} ${autoplay ? 'play' : 'paused'}`);
 		this.key = item.key;
 		this.pos = positionMs;
@@ -129,5 +136,71 @@ describe('following the DJ', () => {
 		expect(p.log.slice(-2)[0]).toMatch(/^seek /);
 		expect(p.playing).toBe(true);
 		expect(Math.abs(p.position() - (f.position() ?? 0))).toBeLessThan(50);
+	});
+
+	it('a player stopped from elsewhere plays again where the room is, once two checks have found it stopped', async () => {
+		f.welcome({ track: SONG, trackKey: 1, timeline: { positionMs: 0, atRoomMs: Date.now() + 3_000, playing: true }, phase: { kind: 'playing' } });
+		await flush();
+		await vi.advanceTimersByTimeAsync(10_000);
+		p.followPause(); // a skip past the end of its one-song queue, a stop from the tray: not the listener's pause
+		f.observe(p.view());
+		const before = p.log.length;
+		await vi.advanceTimersByTimeAsync(2_000);
+		expect(p.log.length).toBe(before); // once: the state may be a moment behind
+		await vi.advanceTimersByTimeAsync(2_000);
+		expect(p.playing).toBe(true);
+		expect(Math.abs(p.position() - (f.position() ?? 0))).toBeLessThan(50);
+	});
+
+	it("a player playing through the DJ's pause is paused", async () => {
+		f.welcome({ track: SONG, trackKey: 1, timeline: { positionMs: 5_000, playing: false }, phase: { kind: 'playing' } });
+		await flush();
+		p.followPlay(); // a play from elsewhere that isn't the listener's
+		f.observe(p.view());
+		await vi.advanceTimersByTimeAsync(4_000);
+		expect(p.playing).toBe(false);
+		expect(p.log.at(-1)).toBe('pause');
+	});
+
+	it('a song that fails to load stops what played before, is tried once more, and starts with the room when it loads', async () => {
+		f.welcome({ track: SONG, trackKey: 1, timeline: { positionMs: 0, atRoomMs: Date.now() + 3_000, playing: true }, phase: { kind: 'playing' } });
+		await flush();
+		f.observe(p.view());
+		p.fail = 1;
+		f.prepare({ trackKey: 2, track: { t: 'Ivy', a: 'Frank Ocean' }, positionMs: 0 });
+		await flush();
+		expect(p.log.slice(-2)).toEqual(['load Ivy failed', 'pause']);
+		f.observe(p.view());
+		f.timelineMsg({ trackKey: 2, positionMs: 0, atRoomMs: Date.now() + 3_000, playing: true });
+		await flush();
+		expect(p.playing).toBe(false); // not the song before under Ivy's timeline
+		await vi.advanceTimersByTimeAsync(4_000);
+		expect(p.log.some((l) => l.startsWith('load Ivy @'))).toBe(true);
+		f.observe(p.view());
+		expect(p.playing).toBe(true);
+		expect(p.key).toBe('k:Ivy');
+	});
+
+	it("a song that still can't be loaded is not tried a third time", async () => {
+		f.welcome({ track: SONG, trackKey: 1, timeline: { positionMs: 0, atRoomMs: Date.now() + 3_000, playing: true }, phase: { kind: 'playing' } });
+		await flush();
+		f.observe(p.view());
+		p.fail = 5;
+		f.prepare({ trackKey: 2, track: { t: 'Ivy', a: 'Frank Ocean' }, positionMs: 0 });
+		await flush();
+		f.observe(p.view());
+		await vi.advanceTimersByTimeAsync(20_000);
+		expect(p.log.filter((l) => l === 'load Ivy failed').length).toBe(2);
+		expect(p.playing).toBe(false);
+	});
+
+	it("another song in the player (a skip from elsewhere) gives way to the room's song", async () => {
+		f.welcome({ track: SONG, trackKey: 1, timeline: { positionMs: 0, atRoomMs: Date.now() + 3_000, playing: true }, phase: { kind: 'playing' } });
+		await flush();
+		p.key = 'k:something else';
+		f.observe(p.view());
+		await vi.advanceTimersByTimeAsync(4_000);
+		expect(p.log.at(-1)).toMatch(/^load Pink \+ White @\d+ play$/);
+		expect(p.key).toBe('k:Pink + White');
 	});
 });

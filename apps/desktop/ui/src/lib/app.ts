@@ -307,6 +307,10 @@ let listening: Listening | null = null;
 let listenHeld = false;
 /** The session's song as the window loaded it (followLoad): its key, and the queue entry the core gave it. */
 let roomSong: { key: string; qid: string | null } | null = null;
+/** What the follower last asked of the player (play or pause): a pause it didn't ask for is the listener's own. */
+let followWant: 'play' | 'pause' | null = null;
+/** The room's latest song load: an older one still waiting is dropped (the latest wins). */
+let loadSeq = 0;
 /** The room's song key while the song playing is the one followLoad loaded (the library's copy can be worded differently). */
 const listeningKeyOf = (current: QueueItem | null): string | null =>
 	listening && roomSong && roomSong.qid !== null && current && current.qid === roomSong.qid ? roomSong.key : null;
@@ -340,6 +344,13 @@ function take(a: core.CorePlayer): void {
 		oldErrors = a.errors ?? 0;
 	}
 	if (a.error !== old || (a.errors ?? 0) !== oldErrors) old = null;
+	// Tuned in, a pause on the same song that neither the follower nor this window asked for (a media key, the tray, the mini
+	// player, the phone) is the listener's own: it holds, as the window's Pause does; their play from there goes back to live.
+	// A song that ran out (resting) is not a pause.
+	if (listening && heard.track && a.track && heard.track.qid === a.track.qid) {
+		if (!listenHeld && followWant === 'play' && heard.status === 'playing' && a.status === 'paused' && !a.resting) listenHeld = true;
+		else if (listenHeld && heard.status === 'paused' && a.status === 'playing') listenHeld = false;
+	}
 	heard = a;
 	heardAt = performance.now();
 	const index = a.track && a.index !== null ? a.index : -1;
@@ -377,6 +388,7 @@ function take(a: core.CorePlayer): void {
 		tuning: a.tuning ?? 440,
 		eq: same(state.eq, a.eq) ? state.eq : a.eq,
 		station: same(state.station, a.station ?? null) ? state.station : (a.station ?? null),
+		listenHeld: !!listening && listenHeld,
 		listeningKey: listeningKeyOf(current)
 	});
 	readQueue(a);
@@ -587,48 +599,80 @@ const player: PlayerAPI = {
 			listening = next;
 			// The session's time is the DJ's: no speed of one's own, and a radio of one's own ends.
 			if (state.speed !== 1) void command(() => core.setSpeed(1));
+			// Nor a repeat: the room's song ends when the DJ's does (Repeat can't be changed while tuned in).
+			if (state.repeat !== 'off') void command(() => core.setRepeat('off'));
 			if (state.station) void core.stopRadio().catch(() => {});
+			// The core refuses skips and picks from anywhere else too (after the two above, which it would refuse).
+			void command(async () => {
+				await core.setSessionListening(true).catch(() => {});
+				return core.player();
+			});
 			publish({ ...state, listening: next, listenHeld, listeningKey: listeningKeyOf(state.current) });
 			return;
 		}
-		// Tuned out: what plays stays, paused, as this player's own song.
+		// Tuned out: what plays stays, paused, as this player's own song. A room song still waiting to load never does.
 		listening = null;
 		listenHeld = false;
 		roomSong = null;
+		followWant = null;
+		loadSeq++;
 		publish({ ...state, listening: null, listenHeld: false, listeningKey: null });
 		void command(() => core.setPaused(true));
+		void command(async () => {
+			await core.setSessionListening(false).catch(() => {});
+			return core.player();
+		});
 	},
 	async followLoad(item, positionMs, autoplay) {
 		const l = listening;
 		if (!l) return;
+		const mine = ++loadSeq;
 		const song = describedOf(item);
-		// After whatever the window asked before (the commands' order), and before the next.
-		await chain.catch(() => {});
-		try {
-			const a = await core.playSongs([song], { positionMs, play: autoplay && !listenHeld, from: l.station });
+		const current = () => mine === loadSeq && listening === l;
+		// In the commands' order (after whatever the window asked before, before the next); a later song, or leaving, drops it.
+		barrier = sent;
+		const run = chain.then(async () => {
+			if (!current()) return;
+			barrier = sent;
+			const play = autoplay && !listenHeld;
+			followWant = play ? 'play' : 'pause';
+			const a = await core.playSongs([song], { positionMs, play, from: l.station });
+			if (!current()) return;
 			// The song it starts on (with shuffle on it need not be the first queued).
 			const qid = a.start_qid ?? a.qids?.[0];
 			roomSong = { key: item.key, qid: typeof qid === 'number' ? `q${qid}` : null };
+		});
+		chain = run.then(pollSoon, () => {});
+		try {
+			await run;
 		} catch (e) {
+			if (!current()) return;
+			// Not found here: what played before must not go on under the room's song (the follower pauses, and tries once more).
 			roomSong = null;
 			if (e instanceof Refused) report(e);
+			throw e;
 		}
-		pollSoon();
 	},
 	followSeek(ms) {
 		if (listening) seekNow(ms);
 	},
+	// Sent whatever the last poll said (it may be half a second old, or a song still being found): the core's pause and play
+	// are the same asked twice.
 	followPlay() {
-		if (!listening || listenHeld || heard.status === 'playing') return;
+		if (!listening || listenHeld) return;
+		followWant = 'play';
 		void command(() => core.setPaused(false));
 	},
 	followPause() {
-		if (listening && heard.status === 'playing') void command(() => core.setPaused(true));
+		if (!listening) return;
+		followWant = 'pause';
+		void command(() => core.setPaused(true));
 	}
 };
 
 /** Play: tuned in, it is also "back to live" (the follower puts the place right). */
 function playNow(): void {
+	if (listening) followWant = 'play';
 	if (listening && listenHeld) {
 		listenHeld = false;
 		publish({ ...state, listenHeld });

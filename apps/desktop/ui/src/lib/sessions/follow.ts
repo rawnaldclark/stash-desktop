@@ -7,6 +7,9 @@
  *   so every phone starts together), or at once, further in, when that moment has passed.
  * - Every 2 s, a listener playing more than 1.2 s off the room is put back where the room is (a stall, a slow start, a tab that
  *   slept). A listener who paused is left alone: their play goes back to live (the engine's listenHeld, watched here).
+ * - A player come apart from the room (stopped, or playing through the DJ's pause, or on another song: a load that failed or lost
+ *   a race, a skip from outside) is put right when a check finds the same twice in a row. A song that can't be loaded is tried
+ *   once more; until it loads the player stays quiet, never on the song before.
  * - A listener never holds the room up: the room doesn't wait for them (only the host's status counts).
  */
 import type { LibraryItem } from '../identity';
@@ -63,6 +66,14 @@ export class Follower {
 	private view: FollowView = { playing: false, buffering: false, listenHeld: false, currentKey: null };
 	private loading: Promise<void> | null = null;
 	private disposed = false;
+	/** The room's song as the room sent it (to load it again). */
+	private track: WireTrack | null = null;
+	/** Its load failed: the player stays quiet until it loads. */
+	private failed = false;
+	/** The song (trackKey) a check has loaded once more: it isn't tried a third time. */
+	private retried: number | null = null;
+	/** What the last check found off ('song', 'play', 'pause'): put right when the next finds the same. */
+	private off: string | null = null;
 
 	private readonly later: (fn: () => void, ms: number) => unknown;
 	private readonly cancel: (h: unknown) => void;
@@ -129,24 +140,41 @@ export class Follower {
 		if (this.disposed) return;
 		this.timeline = tl;
 		if (key === this.trackKey && this.loading) return void this.loading.then(() => this.apply());
-		if (key === this.trackKey) return void this.apply();
+		if (key === this.trackKey && !this.failed) return void this.apply();
+		this.load(key, track, tl);
+	}
+
+	/** Loads the room's song where the room is; a failure leaves the player quiet (what played before stops). */
+	private load(key: number, track: WireTrack, tl: Timeline): void {
 		this.trackKey = key;
+		this.track = track;
+		this.failed = false;
+		this.off = null;
 		const item = this.deps.itemOf(track);
 		this.itemKey = item.key;
 		const now = this.deps.roomNow();
 		const at = roomPosition(tl, now);
 		const starting = tl.playing && (tl.atRoomMs === undefined || tl.atRoomMs <= now);
-		const load = this.player.followLoad(item, at, starting).catch(() => {});
-		this.loading = load;
-		void load.then(() => {
-			if (this.loading === load) this.loading = null;
-			if (this.trackKey === key) void this.apply();
-		});
+		const loading: Promise<void> = this.player
+			.followLoad(item, at, starting)
+			.then(
+				() => true,
+				() => false
+			)
+			.then((ok) => {
+				if (this.loading === loading) this.loading = null;
+				if (this.disposed || this.trackKey !== key) return;
+				this.failed = !ok;
+				if (ok) void this.apply();
+				else this.player.followPause();
+			});
+		this.loading = loading;
 	}
 
 	/** Puts the player where the room's timeline says. */
 	private async apply(): Promise<void> {
 		if (this.disposed || !this.timeline) return;
+		if (this.failed) return this.player.followPause();
 		if (this.loading) return; // the load's end applies it
 		if (this.startTimer !== null) this.cancel(this.startTimer);
 		this.startTimer = null;
@@ -173,12 +201,38 @@ export class Follower {
 		this.player.followPlay();
 	}
 
-	/** Every 2 s: back with the room after a stall or a sleep. A listener who paused stays paused. */
+	/**
+	 * Every 2 s: back with the room after a stall or a sleep, and put right when the player has come apart from it. What is found
+	 * off is put right when the next check finds the same: the player's state may be a moment behind what it was asked. A listener
+	 * who paused stays paused.
+	 */
 	private check(): void {
-		if (this.disposed || this.loading || !this.timeline?.playing || this.startTimer !== null) return;
-		if (this.view.listenHeld || this.view.buffering || !this.view.playing) return;
-		if (this.itemKey && this.view.currentKey && this.view.currentKey !== this.itemKey) return;
-		const want = roomPosition(this.timeline, this.deps.roomNow());
-		if (Math.abs(this.player.position() - want) > DRIFT_MS) this.player.followSeek(want);
+		const tl = this.timeline;
+		if (this.disposed || this.loading || !tl || this.startTimer !== null || this.view.listenHeld || this.view.buffering) {
+			this.off = null;
+			return;
+		}
+		const off = this.itemKey && this.view.currentKey !== this.itemKey ? 'song' : !tl.playing ? (this.view.playing ? 'pause' : null) : !this.view.playing ? 'play' : null;
+		if (off === null) {
+			this.off = null;
+			const want = roomPosition(tl, this.deps.roomNow());
+			if (tl.playing && Math.abs(this.player.position() - want) > DRIFT_MS) this.player.followSeek(want);
+			return;
+		}
+		if (this.off !== off) {
+			this.off = off;
+			return;
+		}
+		this.off = null;
+		if (off === 'song') {
+			// The room's song once more; one that still can't be loaded leaves the player quiet, not on another song.
+			if (this.track && this.trackKey !== null && this.retried !== this.trackKey) {
+				this.retried = this.trackKey;
+				this.load(this.trackKey, this.track, tl);
+			} else if (this.view.playing) this.player.followPause();
+			return;
+		}
+		if (off === 'pause') return this.player.followPause();
+		void this.apply();
 	}
 }
