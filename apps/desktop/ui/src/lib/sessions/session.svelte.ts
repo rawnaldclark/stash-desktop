@@ -9,6 +9,7 @@
  * Two minutes tuned in counts as heard (the station's vote needs it); that is sent once per station per tab.
  */
 import { player } from '../app';
+import { sessionActive } from './active';
 import { community } from '../community/key';
 import { wireTrackOf, itemFromWire } from '../share/links';
 import type { WireTrack } from '../share/rules';
@@ -238,6 +239,7 @@ class SessionState {
 		this.startedAt = Date.now();
 		ui.room = true;
 		ui.hosting = station.name;
+		sessionActive.hosting = true;
 		const app = await loadApp();
 		const p = app.player;
 		const base = await rooms();
@@ -561,6 +563,7 @@ class SessionState {
 		this.follower = null;
 		this.bridge = null;
 		ui.hosting = null;
+		sessionActive.hosting = false;
 		this.unsubscribe?.();
 		this.unsubscribe = null;
 		this.room = null;

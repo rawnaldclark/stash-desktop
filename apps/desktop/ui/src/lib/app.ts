@@ -9,6 +9,7 @@ import { loadMixes } from './desktop/mixes.svelte';
 import { get, writable, type Readable } from 'svelte/store';
 import * as core from './core';
 import { Refused, said } from './core';
+import { sessionActive } from './sessions/active';
 import {
 	INITIAL_PLAYER_STATE,
 	type Album,
@@ -451,8 +452,10 @@ async function poll(): Promise<void> {
 	clearTimeout(pollTimer);
 	await hear(() => core.player()).catch(() => {});
 	if (!polling) return;
-	// Often while a stream is being asked for, twice a second while something plays or waits, now and then otherwise.
-	const pause = heard.status === 'loading' ? 250 : heard.status !== 'idle' ? 500 : 1500;
+	// Often while a stream is being asked for, twice a second while something plays or waits, now and then otherwise. Hidden in the
+	// tray with no session on, every few seconds: the timers run at full pace there (for a session), and nothing is on screen.
+	const away = document.hidden && !listening && !sessionActive.hosting;
+	const pause = away ? 5000 : heard.status === 'loading' ? 250 : heard.status !== 'idle' ? 500 : 1500;
 	clearTimeout(pollTimer);
 	pollTimer = setTimeout(() => void poll(), pause);
 }
@@ -1433,9 +1436,14 @@ export const searchApi = search;
 function start(): void {
 	polling = true;
 	void poll();
-	// While something plays the position runs on between the core's reports, so the clock and the lyrics move smoothly.
+	// Shown again: up to date at once.
+	document.addEventListener('visibilitychange', () => {
+		if (!document.hidden) pollSoon();
+	});
+	// While something plays the position runs on between the core's reports, so the clock and the lyrics move smoothly (not
+	// while hidden, unless a session watches the player).
 	setInterval(() => {
-		if (heard.status === 'playing') publish({ ...state, positionMs: position() });
+		if (heard.status === 'playing' && (!document.hidden || listening || sessionActive.hosting)) publish({ ...state, positionMs: position() });
 	}, 250);
 	void loadAddons().catch(() => {});
 	void loadLibrary()
